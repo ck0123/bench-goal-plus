@@ -180,6 +180,17 @@
           "task_ids": ["sympy__sympy-16886"]
         },
         {
+          "id": "sympy-codex-c2-smoke",
+          "purpose": "Two-instance Plain Codex cross-cell concurrency acceptance",
+          "target_size": 2,
+          "status": "frozen",
+          "selection": "Use two locally available amd64 SymPy evaluation images to isolate scheduler behavior from cross-repository setup differences.",
+          "task_ids": [
+            "sympy__sympy-16886",
+            "sympy__sympy-19346"
+          ]
+        },
+        {
           "id": "smoke-10",
           "purpose": "Repository harness regression",
           "target_size": 10,

@@ -119,17 +119,44 @@ class Catalog:
                     raise ContractError(
                         f"{runner_id}: contract for {method} must be an object"
                     )
-                unknown_fields = set(contract) - {"model_format"}
+                unknown_fields = set(contract) - {
+                    "bootstrap_targets",
+                    "model_format",
+                    "max_cell_concurrency",
+                }
                 if unknown_fields:
                     raise ContractError(
                         f"{runner_id}: contract for {method} has unknown fields: "
                         + ", ".join(sorted(unknown_fields))
                     )
                 model_format = contract.get("model_format")
-                if model_format != "provider/model":
+                if model_format is not None and model_format != "provider/model":
                     raise ContractError(
                         f"{runner_id}: contract for {method} has unsupported "
                         f"model_format {model_format!r}"
+                    )
+                max_cell_concurrency = contract.get("max_cell_concurrency")
+                if max_cell_concurrency is not None and (
+                    not isinstance(max_cell_concurrency, int)
+                    or isinstance(max_cell_concurrency, bool)
+                    or max_cell_concurrency < 1
+                ):
+                    raise ContractError(
+                        f"{runner_id}: contract for {method} has invalid "
+                        "max_cell_concurrency"
+                    )
+                method_bootstrap = contract.get("bootstrap_targets")
+                if method_bootstrap is not None and (
+                    not isinstance(method_bootstrap, list)
+                    or len(method_bootstrap) != len(set(method_bootstrap))
+                    or not all(
+                        isinstance(item, str) and item in upstreams
+                        for item in method_bootstrap
+                    )
+                ):
+                    raise ContractError(
+                        f"{runner_id}: contract for {method} has invalid "
+                        "bootstrap_targets"
                     )
                 method_contracts[method] = dict(contract)
             raw_capabilities = entry.get("capabilities")
@@ -189,6 +216,15 @@ class Catalog:
                 raise ContractError(
                     f"{target_id}: bootstrap_targets must name managed upstreams"
                 )
+            for method, contract in runner.method_contracts.items():
+                method_bootstrap = contract.get("bootstrap_targets")
+                if method_bootstrap is not None and not set(method_bootstrap).issubset(
+                    bootstrap
+                ):
+                    raise ContractError(
+                        f"{target_id}: method {method} bootstrap_targets must be "
+                        "included in target bootstrap_targets"
+                    )
             docker = self._docker_contract(target_id, entry.get("docker"))
             local_asset_inventory = entry.get("local_asset_inventory")
             if not isinstance(local_asset_inventory, bool):

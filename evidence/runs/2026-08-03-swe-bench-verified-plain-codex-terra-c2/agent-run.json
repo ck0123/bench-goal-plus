@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "kind": "sanitized_agent_run_projection",
+  "source_snapshot_sha256": "82a2ed03d2d9eff78d85459d5160af2cdb5a6071e94dc6c4195b8e98260ed9fe",
+  "campaign_id": "swe-bench-verified-sympy-2-plain-codex-gpt-5-6-terra-30m-k1-c2-r1-20260803-1719",
+  "target": "swe-bench-verified",
+  "runner_id": "swe-bench-native",
+  "runner_kind": "native-profile",
+  "preset": "swe-bench-verified-sympy-codex-terra-c2-smoke",
+  "profile": "sympy-16886-19346-codex-terra-c2",
+  "task_ids": [
+    "sympy__sympy-16886",
+    "sympy__sympy-19346"
+  ],
+  "method": "plain-codex",
+  "model": "gpt-5.6-terra",
+  "reasoning_effort": "medium",
+  "seed": 1,
+  "retain_containers": false,
+  "concurrency": {
+    "T": 1800,
+    "K": 1,
+    "C": 2,
+    "R": 1
+  },
+  "provider_contract": {
+    "id": "bench_proxy",
+    "auth_mode": "openai-compatible",
+    "base_url_env": "OPENAI_BASE_URL",
+    "api_key_env": "OPENAI_API_KEY",
+    "wire_api": "responses"
+  },
+  "scheduler": {
+    "implementation": "bench_goal_plus.cell_scheduler.execute_cell_queue",
+    "max_active_observed": 2,
+    "simultaneous_active_at": "2026-08-03T09:23:39.414794+00:00",
+    "simultaneous_cell_ids": [
+      "plain-codex--sympy__sympy-16886",
+      "plain-codex--sympy__sympy-19346"
+    ]
+  },
+  "lifecycle": [
+    "check",
+    "doctor",
+    "prepare",
+    "run",
+    "status",
+    "finish"
+  ],
+  "terminal_state": "completed",
+  "report_source": "campaign-summary.json",
+  "credential_values_persisted": false
+}

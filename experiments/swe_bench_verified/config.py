@@ -16,6 +16,11 @@ SWEBENCH_ROOT = ROOT / "third_party" / "swebench"
 GOAL_PLUS_ROOT = ROOT / "third_party" / "goal-plus"
 UPSTREAM_MANIFEST = ROOT / "environment" / "upstreams.json"
 SUPPORTED_METHODS = {"plain-codex", "plain-pi", "goal-plus-pi"}
+MAX_CELL_CONCURRENCY = {
+    "plain-codex": 2,
+    "plain-pi": 2,
+    "goal-plus-pi": 1,
+}
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 PROVIDER_ID = re.compile(r"[a-z][a-z0-9_-]*")
@@ -118,26 +123,42 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
 
     task_ids = profile.get("task_ids")
     tasks = profile.get("tasks")
-    if not isinstance(task_ids, list) or len(task_ids) != 1:
+    if (
+        not isinstance(task_ids, list)
+        or not task_ids
+        or any(not isinstance(task_id, str) or not task_id for task_id in task_ids)
+    ):
+        raise SweBenchContractError(f"{profile_id}: task_ids must be non-empty strings")
+    if len(task_ids) != len(set(task_ids)):
+        raise SweBenchContractError(f"{profile_id}: task_ids must be unique")
+    if (
+        not isinstance(tasks, list)
+        or len(tasks) != len(task_ids)
+        or any(not isinstance(task, dict) for task in tasks)
+    ):
         raise SweBenchContractError(
-            f"{profile_id}: initial acceptance requires exactly one task"
+            f"{profile_id}: tasks must contain one object per task_id"
         )
-    if not isinstance(tasks, list) or len(tasks) != 1 or not isinstance(tasks[0], dict):
-        raise SweBenchContractError(f"{profile_id}: tasks must contain one object")
-    task = tasks[0]
-    if task.get("instance_id") != task_ids[0]:
-        raise SweBenchContractError(f"{profile_id}: task id mapping is inconsistent")
-    for field in ("repo", "image", "base_commit"):
-        if not isinstance(task.get(field), str) or not task[field]:
-            raise SweBenchContractError(f"{profile_id}: task.{field} is required")
-    if FULL_SHA.fullmatch(task["base_commit"]) is None:
+    mapped_ids = [task.get("instance_id") for task in tasks]
+    if mapped_ids != task_ids or len(mapped_ids) != len(set(mapped_ids)):
         raise SweBenchContractError(
-            f"{profile_id}: task.base_commit must be a full commit SHA"
+            f"{profile_id}: tasks must match task_ids in the same unique order"
         )
-    if not task["image"].endswith(":latest"):
-        raise SweBenchContractError(
-            f"{profile_id}: task.image must be an exact tagged reference"
-        )
+    for task in tasks:
+        task_id = str(task["instance_id"])
+        for field in ("repo", "image", "base_commit"):
+            if not isinstance(task.get(field), str) or not task[field]:
+                raise SweBenchContractError(
+                    f"{profile_id}: task {task_id} field {field} is required"
+                )
+        if FULL_SHA.fullmatch(task["base_commit"]) is None:
+            raise SweBenchContractError(
+                f"{profile_id}: task {task_id} base_commit must be a full commit SHA"
+            )
+        if not task["image"].endswith(":latest"):
+            raise SweBenchContractError(
+                f"{profile_id}: task {task_id} image must be an exact tagged reference"
+            )
 
     methods = profile.get("methods")
     if (
@@ -154,9 +175,24 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
         raise SweBenchContractError(f"{profile_id}: unsupported reasoning_effort")
     if not isinstance(profile.get("wall_time_seconds"), int) or profile["wall_time_seconds"] < 1:
         raise SweBenchContractError(f"{profile_id}: wall_time_seconds must be positive")
-    if profile.get("concurrency") != 1 or profile.get("cell_concurrency") != 1:
+    cell_concurrency = profile.get("cell_concurrency")
+    if profile.get("concurrency") != 1:
         raise SweBenchContractError(
-            f"{profile_id}: initial acceptance is restricted to K=1 and C=1"
+            f"{profile_id}: SWE-bench native is restricted to K=1"
+        )
+    if (
+        not isinstance(cell_concurrency, int)
+        or isinstance(cell_concurrency, bool)
+        or cell_concurrency < 1
+        or cell_concurrency > len(task_ids)
+    ):
+        raise SweBenchContractError(
+            f"{profile_id}: C must be positive and cannot exceed task count"
+        )
+    max_cell_concurrency = MAX_CELL_CONCURRENCY[methods[0]]
+    if cell_concurrency > max_cell_concurrency:
+        raise SweBenchContractError(
+            f"{profile_id}: method {methods[0]} supports at most C={max_cell_concurrency}"
         )
     evaluator_timeout = profile.get("evaluator_timeout_seconds")
     if not isinstance(evaluator_timeout, int) or evaluator_timeout < 1:

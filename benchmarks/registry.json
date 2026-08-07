@@ -361,6 +361,11 @@
         "evidence/runs/2026-08-02-swe-bench-verified-plain-codex-sol/agent-run.json",
         "evidence/runs/2026-08-02-swe-bench-verified-plain-codex-sol/model.patch",
         "evidence/runs/2026-08-02-swe-bench-verified-plain-codex-sol/official-report.json",
+        "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/summary.json",
+        "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/agent-run.json",
+        "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/model-16886.patch",
+        "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/model-19346.patch",
+        "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/official-results.json",
         "evidence/runs/2026-08-02-swe-bench-verified-plain-pi-glm/summary.json",
         "evidence/runs/2026-08-02-swe-bench-verified-plain-pi-glm/agent-run.json",
         "evidence/runs/2026-08-02-swe-bench-verified-plain-pi-glm/model.patch",
@@ -380,7 +385,12 @@
           "evidence/runs/2026-08-02-swe-bench-verified-plain-codex-sol/summary.json",
           "evidence/runs/2026-08-02-swe-bench-verified-plain-codex-sol/agent-run.json",
           "evidence/runs/2026-08-02-swe-bench-verified-plain-codex-sol/model.patch",
-          "evidence/runs/2026-08-02-swe-bench-verified-plain-codex-sol/official-report.json"
+          "evidence/runs/2026-08-02-swe-bench-verified-plain-codex-sol/official-report.json",
+          "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/summary.json",
+          "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/agent-run.json",
+          "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/model-16886.patch",
+          "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/model-19346.patch",
+          "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/official-results.json"
         ],
         "plain_pi": [
           "evidence/runs/2026-08-02-swe-bench-verified-plain-pi-glm/summary.json",
@@ -395,10 +405,10 @@
           "evidence/runs/2026-08-03-swe-bench-verified-goal-plus-pi-luna/official-report.json"
         ]
       },
-      "next_action": "Repeat the three accepted single-instance paths from a clean acceptance commit before a matched comparison, then validate K>1 and broader Verified coverage separately.",
+      "next_action": "Repeat the accepted methods and the Plain Codex C2 path from a clean acceptance commit before a matched comparison, then validate K>1, Pi C>1, and broader Verified coverage separately.",
       "blockers": [
-        "Initial acceptance intentionally covers one Linux/amd64 Verified instance with K=1 and C=1; it does not claim a 500-instance campaign is ready.",
-        "Plain Codex, Plain Pi, and Goal Plus + Pi have passed archived K=1 official-harness smokes, but K>1 and broader instance coverage remain unproven.",
+        "Initial method acceptance covers one Linux/amd64 Verified instance at K=1,C=1; Plain Codex additionally has a two-instance C2 smoke, but this does not claim a 500-instance campaign is ready.",
+        "Plain Codex, Plain Pi, and Goal Plus + Pi have passed archived K=1 official-harness smokes; only Plain Codex has C2 evidence, while K>1, Pi C>1, and broader instance coverage remain unproven.",
         "The official checkout is used as an unmodified managed third-party repository, so no project fork is currently required."
       ]
     },

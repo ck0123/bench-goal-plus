@@ -246,8 +246,7 @@ def _record(campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]) -> d
 
 
 def _markdown(summary: dict[str, Any]) -> str:
-    record = summary["records"][0]
-    raw = record["score"]["raw_metrics"]
+    records = summary["records"]
     lines = [
         f"# SWE-bench Verified report: {summary['campaign_id']}",
         "",
@@ -255,19 +254,26 @@ def _markdown(summary: dict[str, Any]) -> str:
         "",
         "| Task | Method | Model | Resolved | Patch applied | Subagents | Evaluator calls |",
         "|---|---|---|---:|---:|---:|---:|",
-        (
+    ]
+    for record in records:
+        raw = record["score"]["raw_metrics"]
+        lines.append(
             f"| {record['task_id']} | {record['method']} | {record['model']} | "
             f"{raw['resolved'] if raw['resolved'] is not None else ''} | "
             f"{raw['patch_applied'] if raw['patch_applied'] is not None else ''} | "
             f"{record['protocol']['goal_plus']['actual_subagent_count'] if record['protocol']['goal_plus']['required'] else ''} | "
             f"{record['execution']['evaluator_calls']['total_claimed']} |"
-        ),
-        "",
-        f"Dataset revision: `{record['protocol']['dataset_revision']}`.",
-        "",
-        f"Official SWE-bench harness commit: `{record['protocol']['swebench_commit']}`.",
-        "",
-    ]
+        )
+    if records:
+        lines.extend(
+            [
+                "",
+                f"Dataset revision: `{records[0]['protocol']['dataset_revision']}`.",
+                "",
+                f"Official SWE-bench harness commit: `{records[0]['protocol']['swebench_commit']}`.",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -285,10 +291,13 @@ def finalize_campaign(campaign: Path) -> dict[str, Any]:
     if revalidated:
         if all(cell.get("state") == "completed" for cell in manifest["cells"]):
             manifest["state"] = "completed"
-        elif any(cell.get("state") == "failed" for cell in manifest["cells"]):
-            manifest["state"] = "failed"
-        else:
+        elif any(
+            cell.get("state") in {"completed", "partial"}
+            for cell in manifest["cells"]
+        ):
             manifest["state"] = "partial"
+        else:
+            manifest["state"] = "failed"
         manifest["evidence_revalidated_at"] = utc_now()
         write_json(campaign / MANIFEST, manifest)
     records = [_record(campaign, manifest, cell) for cell in manifest["cells"]]

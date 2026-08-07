@@ -41,22 +41,30 @@
         "goal-plus-pi"
       ],
       "method_contracts": {
+        "plain-codex": {
+          "bootstrap_targets": ["swebench"],
+          "max_cell_concurrency": 2
+        },
         "plain-pi": {
-          "model_format": "provider/model"
+          "bootstrap_targets": ["swebench"],
+          "model_format": "provider/model",
+          "max_cell_concurrency": 2
         },
         "goal-plus-pi": {
-          "model_format": "provider/model"
+          "bootstrap_targets": ["swebench", "goal_plus"],
+          "model_format": "provider/model",
+          "max_cell_concurrency": 1
         }
       },
       "capabilities": {
         "provision": false,
-        "detach": false,
+        "detach": true,
         "stop": false,
         "resume": false,
-        "cell_concurrency": false,
+        "cell_concurrency": true,
         "retain_containers": true,
         "official_evaluator": true,
-        "resume_semantics": "initial acceptance supports one non-resumable task attempt; retry uses a new campaign"
+        "resume_semantics": "Plain Codex and Plain Pi support up to two detached non-resumable task cells; Goal Plus + Pi supports one; every retry uses a new campaign"
       }
     },
     {
@@ -348,6 +356,30 @@
         "wall_time_seconds": 1800,
         "concurrency": 1,
         "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "swe-bench-verified-sympy-codex-terra-c2-smoke",
+      "description": "Two-instance SWE-bench Verified Plain Codex official-harness concurrency smoke with T=1800, K=1, C=2, R=1.",
+      "benchmarks": ["swe-bench-verified"],
+      "profile": "sympy-16886-19346-codex-terra-c2",
+      "campaign_id_template": "swe-bench-verified-sympy-2-plain-codex-gpt-5-6-terra-30m-k1-c2-r1-{timestamp}",
+      "expected_profile": {
+        "task_count": 2,
+        "methods": ["plain-codex"],
+        "model": "gpt-5.6-terra",
+        "reasoning_effort": "medium",
+        "agent_provider": {
+          "id": "bench_proxy",
+          "name": "Benchmark OpenAI-compatible proxy",
+          "auth_mode": "openai-compatible",
+          "base_url_env": "OPENAI_BASE_URL",
+          "api_key_env": "OPENAI_API_KEY",
+          "wire_api": "responses"
+        },
+        "wall_time_seconds": 1800,
+        "concurrency": 1,
+        "cell_concurrency": 2
       }
     },
     {

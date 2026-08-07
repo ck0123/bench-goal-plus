@@ -80,11 +80,14 @@ def venv_bin(venv: Path) -> Path:
 
 
 def selected_upstreams(
-    manifest: dict[str, Any], only: list[str] | None = None
+    manifest: dict[str, Any],
+    only: list[str] | None = None,
+    *,
+    include_always: bool = True,
 ) -> dict[str, dict[str, Any]]:
     upstreams = manifest["upstreams"]
     if not only:
-        return dict(upstreams)
+        return dict(upstreams) if include_always else {}
     requested = set(only)
     unknown = requested - set(upstreams)
     if unknown:
@@ -92,7 +95,7 @@ def selected_upstreams(
     return {
         name: entry
         for name, entry in upstreams.items()
-        if entry.get("always") is True or name in requested
+        if (include_always and entry.get("always") is True) or name in requested
     }
 
 
@@ -100,10 +103,14 @@ def checkout_paths(
     manifest: dict[str, Any],
     checkout_root: Path,
     only: list[str] | None = None,
+    *,
+    include_always: bool = True,
 ) -> dict[str, Path]:
     return {
         name: checkout_root / entry["checkout_dir"]
-        for name, entry in selected_upstreams(manifest, only).items()
+        for name, entry in selected_upstreams(
+            manifest, only, include_always=include_always
+        ).items()
     }
 
 
@@ -810,11 +817,16 @@ def collect_doctor(
     only: list[str] | None = None,
     require_pi: bool = False,
     require_codex: bool = False,
+    include_always: bool = True,
 ) -> dict[str, Any]:
     ensure_temp_root()
     python = venv_python(venv)
-    chosen = selected_upstreams(manifest, only)
-    paths = checkout_paths(manifest, checkout_root, only)
+    chosen = selected_upstreams(
+        manifest, only, include_always=include_always
+    )
+    paths = checkout_paths(
+        manifest, checkout_root, only, include_always=include_always
+    )
     checks: list[dict[str, Any]] = []
     checks.append(
         {
@@ -868,7 +880,12 @@ def collect_doctor(
     )
 
     versions = package_versions(python) if python.is_file() else {}
-    for package in ("openevolve", "goal-plus", "fastmcp", "numpy", "scipy"):
+    runtime_packages: list[str] = []
+    if "openevolve" in chosen:
+        runtime_packages.extend(("openevolve", "numpy", "scipy"))
+    if "goal_plus" in chosen:
+        runtime_packages.extend(("goal-plus", "fastmcp"))
+    for package in runtime_packages:
         checks.append(
             {
                 "name": f"package:{package}",
@@ -894,13 +911,19 @@ def collect_doctor(
             }
         )
 
-    for executable in (
-        "openevolve-run",
-        "goal-plus",
-        "goal-plus-pi-tool",
-        "goal-plus-pi-worker",
-        "goal-plus-pi-pool",
-    ):
+    runtime_entrypoints: list[str] = []
+    if "openevolve" in chosen:
+        runtime_entrypoints.append("openevolve-run")
+    if "goal_plus" in chosen:
+        runtime_entrypoints.extend(
+            (
+                "goal-plus",
+                "goal-plus-pi-tool",
+                "goal-plus-pi-worker",
+                "goal-plus-pi-pool",
+            )
+        )
+    for executable in runtime_entrypoints:
         path = venv_bin(venv) / executable
         result = run([str(path), "--help"], check=False) if path.is_file() else None
         checks.append(
@@ -940,6 +963,7 @@ def collect_doctor(
         "venv": str(venv),
         "checkout_root": str(checkout_root),
         "managed_checkouts": list(chosen),
+        "include_always": include_always,
         "requirements_lock_sha256": sha256_file(lock) if lock.is_file() else None,
         "packages": versions,
         "checks": checks,
@@ -950,7 +974,10 @@ def bootstrap_environment(args: argparse.Namespace) -> dict[str, Any]:
     manifest = load_manifest(args.manifest)
     checkout_root = args.checkout_root.expanduser().absolute()
     venv = args.venv.expanduser().absolute()
-    chosen = selected_upstreams(manifest, args.only)
+    include_always = not args.exact
+    chosen = selected_upstreams(
+        manifest, args.only, include_always=include_always
+    )
     for name, entry in chosen.items():
         ensure_checkout(checkout_root / entry["checkout_dir"], entry)
     if "edgebench" in chosen:
@@ -979,7 +1006,12 @@ def bootstrap_environment(args: argparse.Namespace) -> dict[str, Any]:
             [uv, "pip", "install", "--python", str(python), "-r", str(args.lock)],
             capture=False,
         )
-        paths = checkout_paths(manifest, checkout_root, args.only)
+        paths = checkout_paths(
+            manifest,
+            checkout_root,
+            args.only,
+            include_always=include_always,
+        )
         editable_paths = [
             paths[name] for name, entry in chosen.items() if entry.get("editable") is True
         ]
@@ -1009,6 +1041,7 @@ def bootstrap_environment(args: argparse.Namespace) -> dict[str, Any]:
         only=args.only,
         require_pi=args.require_pi,
         require_codex=args.require_codex,
+        include_always=include_always,
     )
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(payload, indent=2) + "\n")
@@ -1030,6 +1063,7 @@ def doctor(args: argparse.Namespace) -> int:
         only=args.only,
         require_pi=args.require_pi,
         require_codex=args.require_codex,
+        include_always=not args.exact,
     )
     print(json.dumps(payload, indent=2))
     return 0 if payload["ok"] else 1
@@ -1180,6 +1214,11 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap_parser.add_argument("--require-pi", action="store_true")
     bootstrap_parser.add_argument("--require-codex", action="store_true")
     bootstrap_parser.add_argument(
+        "--exact",
+        action="store_true",
+        help="select only explicit --only checkouts, excluding always-managed runtimes",
+    )
+    bootstrap_parser.add_argument(
         "--only",
         action="append",
         help="clone/check one named benchmark plus the always-managed runtime checkouts",
@@ -1187,6 +1226,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor_parser = subparsers.add_parser("doctor")
     doctor_parser.add_argument("--only", action="append")
+    doctor_parser.add_argument(
+        "--exact",
+        action="store_true",
+        help="check only explicit --only checkouts, excluding always-managed runtimes",
+    )
     doctor_parser.add_argument("--require-pi", action="store_true")
     doctor_parser.add_argument("--require-codex", action="store_true")
     check_parser = subparsers.add_parser(

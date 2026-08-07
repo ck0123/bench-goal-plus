@@ -102,6 +102,10 @@ class ReproEnvironmentTest(unittest.TestCase):
             set(selected_sky), {"openevolve", "goal_plus", "skydiscover"}
         )
         self.assertTrue(selected_sky["skydiscover"]["editable"])
+        selected_exact = repro_env.selected_upstreams(
+            manifest, ["swebench"], include_always=False
+        )
+        self.assertEqual(set(selected_exact), {"swebench"})
         task_catalog = json.loads(
             (ROOT / "adapters/openevolve_examples/tasks.json").read_text()
         )

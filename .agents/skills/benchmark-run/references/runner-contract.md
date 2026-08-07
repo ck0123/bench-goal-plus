@@ -10,7 +10,7 @@
 | `controller` | Existing repository controller; the Agent calls it instead of copying it |
 | `evidence_filename` | Native final JSON basename consumed by the unified `finish` path |
 | `supported_methods` | Canonical methods accepted during plan resolution; unknown methods fail before setup |
-| `method_contracts` | Optional per-method input constraints; `model_format: provider/model` requires an exact `PROVIDER/MODEL` value |
+| `method_contracts` | Optional per-method input constraints; `model_format: provider/model` requires an exact `PROVIDER/MODEL` value, while `max_cell_concurrency` caps `C` for that method |
 | `capabilities` | `provision`, `detach`, `stop`, `resume`, `cell_concurrency`, `retain_containers`, official evaluator, and exact resume semantics |
 
 Current kinds are `native-profile`, `common-matrix`, and `openevolve-batch`. If a new native
@@ -18,8 +18,9 @@ lifecycle cannot implement this interface, add one runner implementation and tes
 target-name branches to the CLI.
 
 Every `method_contracts` key must also appear in `supported_methods`. Resolve these contracts during
-`plan` and reject malformed method inputs before setup, doctor, preparation, or launch. The same
-resolved method, provider, and model must then flow unchanged through the runner lifecycle.
+`plan` and reject malformed method inputs or a method-specific `C` overflow before setup, doctor,
+preparation, or launch. The same resolved method, provider, model, and concurrency must then flow
+unchanged through the runner lifecycle.
 
 ## Target fields
 

@@ -206,6 +206,46 @@ class BenchmarkAgentContractTest(unittest.TestCase):
         )
         self.assertGreater(provision_index, 0)
 
+    def test_swe_setup_accepts_method_specific_environment_scope(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "setup",
+                "--benchmark",
+                "swe-bench-verified",
+                "--profile",
+                "sympy-16886-codex-smoke",
+                "--method",
+                "plain-codex",
+            ]
+        )
+        self.assertEqual(args.method, ["plain-codex"])
+
+        target = self.catalog.targets["swe-bench-verified"]
+        result = self.agent.setup(
+            (target,),
+            profile="sympy-16886-codex-smoke",
+            skip_bootstrap=True,
+            skip_provision=True,
+            dry_run=True,
+            methods=("plain-codex",),
+        )
+        repro_doctor = next(
+            command
+            for command in result["commands"]
+            if "scripts/repro_env.py doctor" in command
+        )
+        native_doctor = next(
+            command
+            for command in result["commands"]
+            if "experiments/swe_bench_verified/experiment.py doctor" in command
+            and "--local-assets-only" not in command
+        )
+        self.assertIn("--only swebench", repro_doctor)
+        self.assertIn("--exact", repro_doctor)
+        self.assertNotIn("--only goal_plus", repro_doctor)
+        self.assertIn("--method plain-codex", native_doctor)
+        self.assertEqual(result["methods"], ["plain-codex"])
+
     def test_profiled_check_fails_closed_for_unsupported_runner(self) -> None:
         with self.assertRaisesRegex(UnsupportedOperation, "target local-vliw"):
             self.agent.check(
@@ -331,6 +371,47 @@ class BenchmarkAgentContractTest(unittest.TestCase):
                 RuntimeManager().validate_host(
                     (target,), dry_run=False, require_uv=True
                 )
+
+    def test_swe_campaign_doctor_uses_method_specific_bootstrap_targets(self) -> None:
+        plain = self.agent.resolve_spec(
+            preset_id="swe-bench-verified-sympy-16886-codex-smoke"
+        )
+        plain_plan = self.agent.start(
+            plain,
+            skip_bootstrap=True,
+            skip_provision=True,
+            prepare_only=False,
+            foreground=True,
+            dry_run=True,
+        )
+        plain_repro_doctor = next(
+            command
+            for command in plain_plan["commands"]
+            if "scripts/repro_env.py doctor" in command
+        )
+        self.assertIn("--only swebench", plain_repro_doctor)
+        self.assertIn("--exact", plain_repro_doctor)
+        self.assertNotIn("--only goal_plus", plain_repro_doctor)
+
+        goal_plus = self.agent.resolve_spec(
+            preset_id="swe-bench-verified-sympy-16886-goal-plus-pi-smoke"
+        )
+        goal_plus_plan = self.agent.start(
+            goal_plus,
+            skip_bootstrap=True,
+            skip_provision=True,
+            prepare_only=False,
+            foreground=True,
+            dry_run=True,
+        )
+        goal_plus_repro_doctor = next(
+            command
+            for command in goal_plus_plan["commands"]
+            if "scripts/repro_env.py doctor" in command
+        )
+        self.assertIn("--only goal_plus", goal_plus_repro_doctor)
+        self.assertIn("--only swebench", goal_plus_repro_doctor)
+        self.assertIn("--exact", goal_plus_repro_doctor)
 
     def test_edgebench_example_resolves_to_explicit_reproducible_values(self) -> None:
         spec = self.agent.resolve_spec(preset_id="edgebench-codex-2h")

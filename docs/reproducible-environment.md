@@ -92,6 +92,11 @@ checkout 的 origin、branch、upstream、与最近 fetch 的 remote-tracking co
 版本、EdgeBench Rust 缓存的 SHA256 和本仓 `.tmp/` 是否存在且可写。`.venv/` 是历史本机缓存，不能复制到其他机器；复现标准
 是从 lock 重建 `.bench-env/venv` 与 `third_party/`。
 
+runner 的 method contract 已明确给出完整 upstream 集合时，统一控制面会附加
+`--exact`，使 `bootstrap`/`doctor` 只选择显式 `--only` checkout，不再自动加入
+`always=true` runtime。该模式用于 Plain 等不依赖 Goal Plus 的方法；直接调用脚本时
+默认仍保留上述全量 runtime 语义。
+
 Adapter 自己的临时编译目录也必须通过 `bench_runtime_paths.py` 创建。AutoLab、
 Frontier-Engineering、HeuriGym、Frontier-CS 和 OpenEvolve worker 分别使用
 `.tmp/` 下的独立 namespace。已经 prepare 的 workspace 会记录当次 checkout

@@ -4,22 +4,27 @@
 
 - Target: `swe-bench-verified`
 - Runner: `swe-bench-native`
-- Initial task: `sympy__sympy-16886`
+- Accepted task profiles: the single `sympy__sympy-16886` smoke, the Plain Codex C2 pair
+  `sympy__sympy-16886` + `sympy__sympy-19346`, and the 39-task Plain Codex campaign profile
+  `verified-indices-39-codex-terra-c2`
 - Raw metric: official `resolved` boolean, direction `maximize`
 - Methods: `plain-codex`, `plain-pi`, and `goal-plus-pi`
-- Topology: Plain methods use one isolated outer trajectory; Goal Plus + Pi uses one outer Goal
-  Plus main session with one bound internal Pi worker. Initial acceptance restricts every method to
-  `K=1,C=1,R=1`
+- Topology: Plain methods use one isolated outer trajectory per task cell; Goal Plus + Pi uses one
+  outer Goal Plus main session with one bound internal Pi worker. Every method remains restricted to
+  `K=1,R=1`; Plain Codex supports `C<=2`, while Plain Pi and Goal Plus + Pi remain `C=1`.
 - Final source JSON: `campaign-summary.json`
 
 The official harness owns final scoring in a separate container. The runner has no host-only score,
-provision, detach, stop, resume, or cross-cell concurrency.
+provision, stop, or resume. It supports a detached campaign controller with campaign-local state and
+logs. Cross-cell concurrency is method-gated: Plain Codex supports at
+most two cells, while both Pi methods support one.
 
 ## Presets
 
 | Preset | Model | T/K/C/R | Auth |
 | --- | --- | --- | --- |
 | `swe-bench-verified-sympy-16886-codex-smoke` | `gpt-5.6-sol`, medium | `1800/1/1/1` | profile-frozen `OPENAI_BASE_URL` + `OPENAI_API_KEY`, Responses |
+| `swe-bench-verified-sympy-codex-terra-c2-smoke` | `gpt-5.6-terra`, medium | `1800/1/2/1` | profile-frozen `OPENAI_BASE_URL` + `OPENAI_API_KEY`, Responses |
 | `swe-bench-verified-sympy-16886-pi-smoke` | `zai/glm-5.2`, medium | `1800/1/1/1` | inherited `ZAI_API_KEY` |
 | `swe-bench-verified-sympy-16886-goal-plus-pi-smoke` | `zai/glm-5.2`, medium | `1800/1/1/1` | inherited `ZAI_API_KEY` |
 | `swe-bench-verified-sympy-16886-goal-plus-pi-luna-high-smoke` | `bench-openai/gpt-5.6-luna`, high | `1800/1/1/1` | profile-frozen `OPENAI_BASE_URL` + `OPENAI_API_KEY`, Responses |
@@ -38,6 +43,10 @@ official-harness contract for
 [Plain Codex](../../../../../evidence/runs/2026-08-02-swe-bench-verified-plain-codex-sol/summary.json),
 [Plain Pi](../../../../../evidence/runs/2026-08-02-swe-bench-verified-plain-pi-glm/summary.json),
 and [Goal Plus + Pi](../../../../../evidence/runs/2026-08-03-swe-bench-verified-goal-plus-pi-luna/summary.json).
+The archived
+[Plain Codex C2 smoke](../../../../../evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/summary.json)
+additionally proves two isolated SymPy cells were simultaneously active and each received exactly
+one official evaluator call. It does not extend C2 to Pi methods or prove full-split readiness.
 The two Plain development smokes preserve their dirty-at-prepare provenance and later acceptance
 commit instead of rewriting it. `K>1`, other instances, and split-wide readiness remain separate
 claims.
@@ -93,9 +102,10 @@ ends, so retention preserves the filesystem and process state boundary, not a li
 ## Lifecycle
 
 Run the profiled `check`, then `setup --skip-provision`, then `plan`. Before `launch`, show the
-resolved confirmation block required by the benchmark-run Skill. Because execution is foreground
-and non-resumable, run the method campaigns sequentially. At terminal state, use unified
-`status` and `finish`; do not invoke the native controller as a second public CLI.
+resolved confirmation block required by the benchmark-run Skill. Execution is detached by default
+and non-resumable; a Plain Codex C2 campaign runs its two cells inside one controller, while separate
+campaigns must still be launched sequentially. At terminal state, use unified `status` and
+`finish`; do not invoke the native controller as a second public CLI.
 
 `finish` creates campaign-local final evidence and reports; it does not edit the source registry.
 During adaptation acceptance, project the reviewed, secret-free minimum into `evidence/runs/`, map
@@ -111,9 +121,14 @@ checkout branch, image tag, image ID, or evaluator implementation.
   `XDG_CACHE_HOME` and `HF_HOME` below the repository `.tmp/`, then use `HF_ENDPOINT` only as a
   transport fallback for the registered dataset revision. Once cached, set `HF_HUB_OFFLINE=1` and
   `HF_DATASETS_OFFLINE=1` for the campaign.
-- A task image HEAD different from the dataset `base_commit` is not by itself a mismatch. Official
-  images may add an empty synthetic commit. Full doctor must prove equal Git tree IDs before launch;
-  never edit, retag, rebuild, or replace the image to make the SHAs look equal.
+- A task image HEAD different from the dataset `base_commit` is not by itself a mismatch. The
+  official harness creates one setup commit whose sole parent is `base_commit`, whose author and
+  committer email are `setup@swebench.config`, and whose subject is `SWE-bench`. That commit may
+  contain required dependency or test-configuration changes. Full doctor requires either a clean
+  HEAD at `base_commit` or that exact clean setup-commit shape; tree equality is recorded only as
+  diagnostic information. The Agent preserves the validated HEAD and exports its model patch
+  relative to it. Never reset, clean, edit, retag, rebuild, or replace the image to force SHA or tree
+  equality.
 - A failed `prepare` has not started an Agent and has not called the evaluator. Keep any empty or
   partial path with the normal `_bak` preservation rule, fix the environment, generate a fresh plan,
   and use the new planned campaign ID.

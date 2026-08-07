@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--cell-concurrency", type=int)
     prepare_parser.add_argument("--retain-containers", action="store_true")
 
-    for command in ("run", "status", "finalize"):
+    for command in ("run", "status", "finalize", "_execute"):
         child = children.add_parser(command)
         child.add_argument("--campaign", required=True)
         if command == "run":
@@ -86,9 +86,10 @@ def main(argv: list[str] | None = None) -> int:
 
     destination = campaign_dir(args.campaign)
     if args.command == "run":
-        if args.detach:
-            parser = build_parser()
-            parser.error("swe-bench-native does not support detached execution")
+        from .runtime import launch
+
+        return launch(destination, detach=args.detach)
+    if args.command == "_execute":
         from .runtime import execute_campaign
 
         return execute_campaign(destination)

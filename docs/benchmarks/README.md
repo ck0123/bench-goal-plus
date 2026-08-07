@@ -42,7 +42,7 @@ Plain Codex / Goal Plus 入口，而不是“仓库能下载”或“代码看�
 | ALE-Bench Lite | `ahc027` | official-lite evaluator、Plain Codex、Goal Plus + Codex 已完成真实 E2E | Lite 其余 9 题尚未 campaign-ready |
 | Frontier-CS | `problem-0` | pinned judge image、Plain Codex、Goal Plus + Codex 已完成真实 E2E | 其余题尚未 materialize |
 | EdgeBench | VLIW Kernel Optimization | SForge work/judge、Plain Codex、Goal Plus lifecycle E2E 已通 | 8–12 个 gradient subset 尚未冻结 |
-| SWE-bench Verified | `sympy__sympy-16886` | Plain Codex/Pi 与 Goal Plus + Pi native lifecycle 已接线，真实 E2E 验收中 | 当前只声明单题 Linux/amd64 smoke |
+| SWE-bench Verified | `sympy__sympy-16886`；Plain Codex C2 另含 `sympy__sympy-19346` | 三种方法的 C1 native lifecycle 已验收；Plain Codex 两题 C2 已验收 | 当前只声明 Linux/amd64 smoke，不代表 500 题 split |
 
 这些任务可以在当前有 Docker 的 Mac 上跑，但不是 host-only 路径。启动前必须
 确认 `docker info` 成功，并保留镜像、冷启动和 evaluator 时间。
@@ -86,7 +86,7 @@ EvoX 的 runtime。
 | [SkyDiscover Math/ADRS task pack](skydiscover-task-packs.md) | **需要** | 非 Torch 19 tags：逻辑 `8.57 GB`、实际新增约 `2.49 GB`、建议 `10 GB` | Circle Packing、HotPotQA 和 Image Gen 仍有 host 路径 |
 | Frontier-CS | **需要** | 共用 judge `1.27 GB`；建议 `2 GB` | 当前 problem-0 评分需要 pinned judge image |
 | EdgeBench | **需要** | VLIW work + judge 逻辑 `2.23 GB`；单 case 建议 `5 GB` | SForge 需要 work container 和独立 hidden judge |
-| SWE-bench Verified | **需要** | 当前 SymPy task image 逻辑约 `2.56 GB` | Agent 与官方 harness 都要求精确 task image |
+| SWE-bench Verified | **需要** | 单个当前 SymPy task image 逻辑约 `2.56 GB`；C2 两个精确镜像合计约 `5.14 GB` | Agent 与官方 harness 都要求每题的精确 task image |
 | PERFOPT-Bench | 无法判定 | 未知 | executable artifact 不可访问；不是“不需要 Docker” |
 
 `local_examples/vliw_kernel_optimization` 可在无 Docker 主机运行 public 和
@@ -129,7 +129,7 @@ Goal Plus 的逐项接入改造、`K/E/Q` 三层并发和 matched-budget baselin
 | [SwarmResearch 15](swarmresearch-15.md) | 多 lineage / swarm 搜索是否能在大搜索空间中累积有效发现 | 26 圆装箱 |
 | [Frontier-CS Algorithmic](frontier-cs-algorithmic.md) | 面向开放算法研究问题生成可执行程序，并从连续 partial score 改进 | Polyomino Packing |
 | [EdgeBench](edgebench.md) | 在真实隔离 artifact + hidden judge 上利用连续 feedback 持续优化 | VLIW Kernel Optimization |
-| [SWE-bench Verified](swe-bench-verified.md) | 根据真实 issue 修复代码，并通过官方隐藏回归测试 | `sympy__sympy-16886` |
+| [SWE-bench Verified](swe-bench-verified.md) | 根据真实 issue 修复代码，并通过官方隐藏回归测试 | `sympy__sympy-16886`；C2 加 `sympy__sympy-19346` |
 
 PERFOPT-Bench 因缺少可执行公开 artifact 继续挂起，不进入本文档集。
 SkyDiscover 是 runtime，EvoX/OpenEvolve 是搜索方法，因此不作为 benchmark

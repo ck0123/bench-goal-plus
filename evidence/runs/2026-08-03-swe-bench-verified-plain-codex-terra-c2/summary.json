@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "kind": "swe_bench_verified_plain_codex_cell_concurrency_smoke",
+  "run_date": "2026-08-03",
+  "status": "completed",
+  "campaign_id": "swe-bench-verified-sympy-2-plain-codex-gpt-5-6-terra-30m-k1-c2-r1-20260803-1719",
+  "tasks": [
+    {
+      "instance_id": "sympy__sympy-16886",
+      "dataset": "SWE-bench/SWE-bench_Verified",
+      "dataset_revision": "91aa3ed51b709be6457e12d00300a6a596d4c6a3",
+      "base_commit": "c50643a49811e9fe2f4851adff4313ad46f7325e",
+      "image": "swebench/sweb.eval.x86_64.sympy_1776_sympy-16886:latest",
+      "metric": "resolved",
+      "direction": "maximize"
+    },
+    {
+      "instance_id": "sympy__sympy-19346",
+      "dataset": "SWE-bench/SWE-bench_Verified",
+      "dataset_revision": "91aa3ed51b709be6457e12d00300a6a596d4c6a3",
+      "base_commit": "94fb720696f5f5d12bad8bc813699fd696afd2fb",
+      "image": "swebench/sweb.eval.x86_64.sympy_1776_sympy-19346:latest",
+      "metric": "resolved",
+      "direction": "maximize"
+    }
+  ],
+  "method": {
+    "id": "plain-codex",
+    "model": "gpt-5.6-terra",
+    "reasoning_effort": "medium",
+    "provider": "bench_proxy",
+    "auth_mode": "openai-compatible",
+    "wire_api": "responses",
+    "credential_reference": "OPENAI_API_KEY"
+  },
+  "budget": {
+    "T": 1800,
+    "K": 1,
+    "C": 2,
+    "R": 1
+  },
+  "source": {
+    "bench_goal_plus_prepare_commit": "a3d34fb7ee465d0edb7308cd006e9ee9c7f3b055",
+    "bench_goal_plus_dirty_at_prepare": true,
+    "dirty_at_prepare_explanation": "The shared cell scheduler and SWE-bench C2 integration were exercised from the current development worktree before an implementation commit. This provenance is preserved; campaign_ready remains partial.",
+    "swebench_commit": "f7bbbb2ccdf479001d6467c9e34af59e44a840f9"
+  },
+  "environment": {
+    "platform": "linux/amd64",
+    "inventory_check": "pass",
+    "full_doctor": "pass",
+    "host_responses_probe": "pass",
+    "task_container_responses_probes": {
+      "sympy__sympy-16886": "pass",
+      "sympy__sympy-19346": "pass"
+    },
+    "image_base_tree_matches": {
+      "sympy__sympy-16886": "pass",
+      "sympy__sympy-19346": "pass"
+    }
+  },
+  "scheduler": {
+    "implementation": "bench_goal_plus.cell_scheduler.execute_cell_queue",
+    "configured_cell_concurrency": 2,
+    "max_active_observed": 2,
+    "simultaneous_active_at": "2026-08-03T09:23:39.414794+00:00",
+    "simultaneous_cell_ids": [
+      "plain-codex--sympy__sympy-16886",
+      "plain-codex--sympy__sympy-19346"
+    ],
+    "returncode": 0
+  },
+  "execution": {
+    "task_count": 2,
+    "official_evaluator_calls": 2,
+    "agent_containers_removed": 2,
+    "credentials_persisted": false,
+    "cells": [
+      {
+        "instance_id": "sympy__sympy-16886",
+        "agent_runtime_seconds": 55.031184419989586,
+        "agent_total_runtime_seconds": 69.58899879502133,
+        "evaluator_runtime_seconds": 41.98042865516618,
+        "official_evaluator_calls": 1,
+        "input_tokens": 104976,
+        "cached_input_tokens": 88576,
+        "output_tokens": 1362,
+        "token_coverage": "agent_reported",
+        "agent_container_removed": true
+      },
+      {
+        "instance_id": "sympy__sympy-19346",
+        "agent_runtime_seconds": 165.40564950392582,
+        "agent_total_runtime_seconds": 179.08874015579931,
+        "evaluator_runtime_seconds": 44.1554004419595,
+        "official_evaluator_calls": 1,
+        "input_tokens": 384157,
+        "cached_input_tokens": 350208,
+        "output_tokens": 4090,
+        "token_coverage": "agent_reported",
+        "agent_container_removed": true
+      }
+    ]
+  },
+  "result": {
+    "evaluated_count": 2,
+    "resolved_count": 2,
+    "resolved_rate": 1.0,
+    "patch_apply_rate": 1.0,
+    "score_valid": true,
+    "cells": [
+      {
+        "instance_id": "sympy__sympy-16886",
+        "resolved": true,
+        "patch_successfully_applied": true,
+        "patch_non_empty": true,
+        "fail_to_pass": [
+          "test_encode_morse"
+        ],
+        "pass_to_pass_failures": []
+      },
+      {
+        "instance_id": "sympy__sympy-19346",
+        "resolved": true,
+        "patch_successfully_applied": true,
+        "patch_non_empty": true,
+        "fail_to_pass": [
+          "test_dict"
+        ],
+        "pass_to_pass_failures": []
+      }
+    ]
+  },
+  "artifacts": {
+    "sanitized_agent_run": "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/agent-run.json",
+    "model_patches": [
+      "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/model-16886.patch",
+      "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/model-19346.patch"
+    ],
+    "official_results": "evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/official-results.json",
+    "full_run_directory": "runs/swe-bench-verified/swe-bench-verified-sympy-2-plain-codex-gpt-5-6-terra-30m-k1-c2-r1-20260803-1719",
+    "full_run_directory_policy": "ignored and preserved locally",
+    "sha256": {
+      "raw_agent_run_snapshot": "82a2ed03d2d9eff78d85459d5160af2cdb5a6071e94dc6c4195b8e98260ed9fe",
+      "sanitized_agent_run": "c09bbab9202f4fff38f5c7e7bcf356460f0bb189ca9aec43acd22a91f64b93d1",
+      "final_campaign_manifest": "b181d15d4223eafb0f223cadb608b4b06ca2ea64951d69d3ba4c2be992327e04",
+      "final_campaign_summary": "d83c5884fb1fbcdf985b91e7af628a431d72d29441fecb43fb76b8dd1ab5bdad",
+      "model_patch_16886": "a651f9dc68369f004895ec7275a2b69be67b0c0bb2716a83036dbccbb3c3863d",
+      "model_patch_19346": "7e818a50a112b3f1ac983e938931129e4c1c5ab08907255bf6cd6f5ed644e4e1",
+      "raw_official_report_16886": "54d6f49054774b7bd92b3ec99c2fc58116fa8376214cf3be839c5c2c78d24096",
+      "raw_official_report_19346": "acd77a0fa0eaa3d89e830c75cde800f796ba5d792ad4052f7583f42ca11d20a1",
+      "sanitized_official_results": "2ce3e87d2fbffbfdb6c9480617540939085c002d218ee56ff6906bfed50fc529"
+    }
+  },
+  "reproduction": {
+    "check": "python3 scripts/bench.py check --preset swe-bench-verified-sympy-codex-terra-c2-smoke",
+    "plan": "python3 scripts/bench.py plan --preset swe-bench-verified-sympy-codex-terra-c2-smoke --campaign-id <new-campaign-id> --skip-bootstrap --skip-provision",
+    "launch": "python3 scripts/bench.py launch --preset swe-bench-verified-sympy-codex-terra-c2-smoke --campaign-id <new-campaign-id> --skip-bootstrap --skip-provision",
+    "status": "python3 scripts/bench.py status --campaign runs/swe-bench-verified/<new-campaign-id>",
+    "finish": "python3 scripts/bench.py finish --campaign runs/swe-bench-verified/<new-campaign-id>"
+  },
+  "limitations": [
+    "This smoke proves Plain Codex K=1, C=2 scheduling for two Linux/amd64 SymPy instances, not the 500-instance Verified split.",
+    "The run used a dirty development worktree; a later clean-commit repeat is still required for full campaign readiness.",
+    "K>1, Plain Pi C>1, Goal Plus + Pi C>1, detach, stop, and resume are not claimed for this runner."
+  ],
+  "secret_scan": {
+    "scope": "committed evidence projection",
+    "result": "clean",
+    "credential_values_persisted": false
+  }
+}

@@ -6,8 +6,9 @@ SWE-bench Verified 测试 Agent 能否根据真实 GitHub issue 修改一个真�
 官方隐藏回归测试通过。当前接入面是一个 Linux/amd64 单题 smoke，用来验证容器隔离、
 patch 导出和官方 harness 接线，不代表 500 题完整 campaign 已 ready。
 
-当前固定 case 是 `sympy__sympy-16886`。数据集 revision、仓库 base commit 和官方任务镜像
-均写入 profile；最终原始指标是官方 `resolved` 布尔值，方向为 maximize。
+单题方法 smoke 固定 `sympy__sympy-16886`；Plain Codex C2 smoke 另加
+`sympy__sympy-19346`。数据集 revision、每题仓库 base commit 和官方任务镜像均写入
+profile；最终原始指标是官方 `resolved` 布尔值，方向为 maximize。
 
 ## 代表 case：`sympy__sympy-16886`
 
@@ -19,13 +20,17 @@ Agent 只看到 issue problem statement、仓库名、base commit 和任务镜�
 
 ### Agent 要做什么
 
-Plain Codex 或 Plain Pi 在精确的 SWE-bench task image 内运行一条隔离 outer trajectory。
-Goal Plus + Pi 运行一个 outer Goal Plus 主会话，并由它启动一个共享 Search 状态的内部
-Pi worker。当前三种方法都固定 `K=1,C=1,R=1`。
+Plain Codex 或 Plain Pi 在每个 task 对应的精确 SWE-bench task image 内运行一条隔离 outer
+trajectory。Goal Plus + Pi 运行一个 outer Goal Plus 主会话，并由它启动一个共享 Search
+状态的内部 Pi worker。三种方法都固定 `K=1,R=1`；Plain Codex 支持 `C<=2`，Plain Pi 和
+Goal Plus + Pi 仍固定 `C=1`。
 
 ### 期待输出是什么
 
-controller 在 Agent 结束后导出唯一的 `git diff --binary --full-index`。默认情况下 Agent
+官方 task image 可能在 dataset `base_commit` 之上保留 harness 创建的 `SWE-bench` setup
+commit，其中包含依赖或测试配置修改。doctor 会精确核对该 commit 的 parent、author、
+committer、subject 和干净工作树；Agent 保留这个 HEAD 及镜像内 ignored 构建产物。controller
+在 Agent 结束后相对该 HEAD 导出唯一的 `git diff --binary --full-index`。默认情况下 Agent
 容器随后被确认删除；debug 模式则要求它被确认停止并保留。完成任一隔离状态后，patch 才能
 交给独立的官方 evaluator。Agent 不直接给分，也不接触 evaluator 数据文件。
 
@@ -50,24 +55,30 @@ task image 始终保留：controller 固定使用官方 harness 的 `cache_level
 
 ## 实验怎么用
 
-当前提供四个冻结 preset：
+当前提供五个冻结 preset：
 
 | Preset | Method | Model | T/K/C/R |
 | --- | --- | --- | --- |
 | `swe-bench-verified-sympy-16886-codex-smoke` | Plain Codex | `gpt-5.6-sol`, medium | `1800/1/1/1` |
+| `swe-bench-verified-sympy-codex-terra-c2-smoke` | Plain Codex | `gpt-5.6-terra`, medium | `1800/1/2/1` |
 | `swe-bench-verified-sympy-16886-pi-smoke` | Plain Pi | `zai/glm-5.2`, medium | `1800/1/1/1` |
 | `swe-bench-verified-sympy-16886-goal-plus-pi-smoke` | Goal Plus + Pi | `zai/glm-5.2`, medium | `1800/1/1/1` |
 | `swe-bench-verified-sympy-16886-goal-plus-pi-luna-high-smoke` | Goal Plus + Pi | `bench-openai/gpt-5.6-luna`, high | `1800/1/1/1` |
 
-campaign 顺序运行。runner 暂不支持 provision、detach、stop、resume、`K>1` 或 `C>1`。
-真实 launch 前仍必须展示并确认解析后的 T/K/C/R。以下 `K=1,C=1` 路径均已通过归档的
-真实官方 harness smoke：
+campaign 默认由带 campaign-local 状态和日志的后台 controller 执行，且不可恢复；不支持
+provision、stop、resume 或 `K>1`。只有 Plain
+Codex 支持 `C<=2`；两个 Pi 方法仍限制为 `C=1`。真实 launch 前仍必须展示并确认解析后的
+T/K/C/R。以下 `K=1,C=1` 路径均已通过归档的真实官方 harness smoke：
 
 - [Plain Codex](../../evidence/runs/2026-08-02-swe-bench-verified-plain-codex-sol/summary.json)
 - [Plain Pi](../../evidence/runs/2026-08-02-swe-bench-verified-plain-pi-glm/summary.json)
 - [Goal Plus + Pi，Luna/high](../../evidence/runs/2026-08-03-swe-bench-verified-goal-plus-pi-luna/summary.json)
 
-这些 pass 不扩展到 `K>1`、其他实例或完整 500 题 split。两个 Plain development smoke
+此外，[Plain Codex C2 smoke](../../evidence/runs/2026-08-03-swe-bench-verified-plain-codex-terra-c2/summary.json)
+证明两个独立 SymPy task cell 在一个 controller 中同时 active，且各自只调用一次官方
+evaluator。该证据不扩展到 Pi 方法或 Verified 全量 split。
+
+这些 pass 不扩展到 `K>1`、未验证实例或完整 500 题 split。两个 Plain development smoke
 保留了 prepare 时工作树非 clean、随后由 `904cae6` 收录实现的 provenance；不会把它改写成
 clean run，完整 campaign readiness 仍为 partial。
 

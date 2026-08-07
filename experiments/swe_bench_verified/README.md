@@ -8,18 +8,20 @@ repository lifecycle through `python3 scripts/bench.py`.
 | Contract | Frozen value |
 | --- | --- |
 | Dataset | `SWE-bench/SWE-bench_Verified` at `91aa3ed51b709be6457e12d00300a6a596d4c6a3` |
-| Instance | `sympy__sympy-16886` |
-| Image | `swebench/sweb.eval.x86_64.sympy_1776_sympy-16886:latest` |
+| Instances | Single-task smokes use `sympy__sympy-16886`; Plain Codex C2 also uses `sympy__sympy-19346` |
+| Images | Each task uses its exact registered `swebench/sweb.eval.x86_64...:latest` image |
 | Methods | `plain-codex`, `plain-pi`, `goal-plus-pi` |
-| Budget | `T=1800`, `K=1`, `C=1`, `R=1` |
+| Budget | `T=1800`, `K=1`, `R=1`; Plain Codex supports `C<=2`, Pi methods support `C=1` |
 | Metric | official `resolved`, maximize |
 | Codex auth | `OPENAI_BASE_URL` + `OPENAI_API_KEY`, OpenAI-compatible Responses |
 
-Detached execution, stop/resume, `K>1`, `C>1`, and automatic image provisioning are not supported
-by this initial acceptance path. Plain Codex, Plain Pi, and Goal Plus + Pi at `K=1,C=1` passed
-archived Linux/amd64 official-harness smokes under `evidence/runs/`; this does not extend the claim
-to other topologies or the full Verified split. The two Plain development smokes retain their
-dirty-at-prepare provenance and later acceptance commit explicitly.
+Detached execution uses a campaign-local controller and log. Stop/resume, `K>1`, and automatic image
+provisioning are not supported. Plain
+Codex, Plain Pi, and Goal Plus + Pi at `K=1,C=1` passed archived Linux/amd64 official-harness smokes
+under `evidence/runs/`. Plain Codex additionally passed a two-task `C=2` smoke with two independent
+containers and evaluator directories; the Pi methods remain capped at `C=1`. None of these claims
+extends to the full Verified split. The development smokes retain their dirty-at-prepare provenance
+explicitly instead of rewriting it.
 
 ## Isolation boundary
 
@@ -28,12 +30,16 @@ campaign as the official-loader-compatible array `evaluator/instances.json` with
 file containing the issue statement and public repository identity; gold patches and official test
 lists are excluded.
 
-The Agent works in a fresh container created from the exact task image. Its only output is a binary,
-full-index Git diff. By default the controller confirms removal of that container before invoking the
-official harness in a separate evaluation container. With unified `--retain-containers` debug mode,
-it instead confirms the Agent container is stopped, records its name/ID, and leaves it available for
-inspection. An evaluator attempt is persisted before the harness starts, so the same campaign cannot
-silently call it twice.
+The Agent works in a fresh container created from the exact task image. The checkout must be clean at
+the dataset base, or at the official harness setup commit with exactly one base parent,
+`setup@swebench.config` author/committer email, and subject `SWE-bench`. Setup changes and ignored
+image build artifacts are preserved; the controller does not reset the checkout or run
+`git clean -fdx`. Its only output is a binary, full-index Git diff relative to the validated image
+HEAD. By default the controller confirms removal of that container before invoking the official
+harness in a separate evaluation container. With unified `--retain-containers` debug mode, it instead
+confirms the Agent container is stopped, records its name/ID, and leaves it available for inspection.
+An evaluator attempt is persisted before the harness starts, so the same campaign cannot silently
+call it twice.
 
 Plain Codex never mounts the host OAuth file. The profile selects the same explicit custom provider
 used by the repository's other direct-API Codex paths. On Linux, a loopback base URL is exposed to
@@ -57,10 +63,14 @@ python3 scripts/bench.py check \
   --preset swe-bench-verified-sympy-16886-codex-smoke
 python3 scripts/bench.py setup \
   --preset swe-bench-verified-sympy-16886-codex-smoke \
+  --method plain-codex \
   --skip-provision
 python3 scripts/bench.py plan \
   --preset swe-bench-verified-sympy-16886-codex-smoke
 ```
+
+Use `swe-bench-verified-sympy-codex-terra-c2-smoke` for the accepted Plain Codex two-cell path. It
+freezes `T=1800,K=1,C=2,R=1` and runs both task cells inside one detached controller.
 
 Use `swe-bench-verified-sympy-16886-goal-plus-pi-smoke` for the Goal Plus + Pi path. It freezes
 `T=1800,K=1,C=1,R=1`, a 1500-second worker budget, and a 300-second Search closeout reserve.

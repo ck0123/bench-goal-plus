@@ -56,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup = children.add_parser("setup")
     add_selection(setup)
     setup.add_argument("--asset-pack", action="append", default=[])
+    setup.add_argument("--method", action="append", default=[])
     setup.add_argument("--skip-bootstrap", action="store_true")
     setup.add_argument("--skip-provision", action="store_true")
     setup.add_argument("--dry-run", action="store_true")
@@ -193,6 +194,14 @@ def main(argv: list[str] | None = None) -> int:
                 skip_bootstrap=args.skip_bootstrap,
                 skip_provision=args.skip_provision,
                 dry_run=args.dry_run,
+                methods=(
+                    tuple(args.method)
+                    or tuple(
+                        (preset.expected_profile.get("methods") or ())
+                        if preset
+                        else ()
+                    )
+                ),
             )
     elif args.command in {"plan", "start", "launch", "e2e"}:
         if args.command == "e2e" and args.prepare_only:

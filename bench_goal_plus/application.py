@@ -246,6 +246,16 @@ class BenchmarkAgent:
             )
         for method in selected_methods:
             contract = runner_definition.method_contracts.get(method, {})
+            max_cell_concurrency = contract.get("max_cell_concurrency")
+            if (
+                cell_concurrency is not None
+                and max_cell_concurrency is not None
+                and cell_concurrency > max_cell_concurrency
+            ):
+                raise ContractError(
+                    f"method {method} supports at most C={max_cell_concurrency}; "
+                    f"requested C={cell_concurrency}"
+                )
             if contract.get("model_format") == "provider/model":
                 provider, separator, model_id = str(model or "").partition("/")
                 if not separator or not provider or not model_id:
@@ -288,7 +298,18 @@ class BenchmarkAgent:
         skip_bootstrap: bool,
         skip_provision: bool,
         dry_run: bool,
+        methods: tuple[str, ...] = (),
     ) -> dict[str, Any]:
+        if len(methods) != len(set(methods)):
+            raise ContractError("setup methods must be unique")
+        for target in targets:
+            runner = self.catalog.runners[target.runner_id]
+            unsupported = set(methods) - set(runner.supported_methods)
+            if unsupported:
+                raise ContractError(
+                    f"runner {runner.runner_id} does not support setup method(s): "
+                    + ", ".join(sorted(unsupported))
+                )
         warnings = self.runtime.validate_host(
             targets, dry_run=dry_run, require_uv=not skip_bootstrap
         )
@@ -307,6 +328,7 @@ class BenchmarkAgent:
             targets,
             skip_bootstrap=skip_bootstrap,
             skip_provision=skip_provision,
+            bootstrap_targets=self._setup_bootstrap_targets(targets, methods),
         ))
         groups: dict[str, list[TargetDefinition]] = {}
         for target in targets:
@@ -319,6 +341,7 @@ class BenchmarkAgent:
                 targets=tuple(members),
                 runner=definition,
                 profile=profile,
+                methods=methods,
             )
             commands.extend(
                 runner.provision_commands(
@@ -330,6 +353,7 @@ class BenchmarkAgent:
             "action": "setup",
             "benchmarks": [item.target_id for item in targets],
             "profile": profile,
+            "methods": list(methods),
             "docker": [item.docker.as_dict() for item in targets],
             "warnings": warnings,
             "commands": [command_text(item) for item in commands],
@@ -368,6 +392,7 @@ class BenchmarkAgent:
             spec.targets,
             skip_bootstrap=skip_bootstrap,
             skip_provision=skip_provision,
+            bootstrap_targets=self._campaign_bootstrap_targets(spec),
         ))
         setup_commands.extend(
             runner.provision_commands(spec, skip_provision=skip_provision)
@@ -411,6 +436,41 @@ class BenchmarkAgent:
         plan["agent_state"] = str(campaign.path / STATE_FILE)
         plan["agent_phase"] = state["agent_phase"]
         return plan
+
+    @staticmethod
+    def _campaign_bootstrap_targets(
+        spec: CampaignSpec,
+    ) -> tuple[str, ...] | None:
+        contracts = [
+            spec.runner.method_contracts.get(method, {}) for method in spec.methods
+        ]
+        if not contracts or any(
+            "bootstrap_targets" not in contract for contract in contracts
+        ):
+            return None
+        selected: set[str] = set()
+        for contract in contracts:
+            selected.update(contract["bootstrap_targets"])
+        return tuple(sorted(selected))
+
+    def _setup_bootstrap_targets(
+        self,
+        targets: tuple[TargetDefinition, ...],
+        methods: tuple[str, ...],
+    ) -> tuple[str, ...] | None:
+        if not methods:
+            return None
+        selected: set[str] = set()
+        for target in targets:
+            runner = self.catalog.runners[target.runner_id]
+            contracts = [
+                runner.method_contracts.get(method, {}) for method in methods
+            ]
+            if any("bootstrap_targets" not in contract for contract in contracts):
+                return None
+            for contract in contracts:
+                selected.update(contract["bootstrap_targets"])
+        return tuple(sorted(selected))
 
     def status(self, campaign_value: str | Path, *, benchmark: str | None = None) -> dict[str, Any]:
         campaign, state, ref, runner = self._campaign_context(campaign_value, benchmark)

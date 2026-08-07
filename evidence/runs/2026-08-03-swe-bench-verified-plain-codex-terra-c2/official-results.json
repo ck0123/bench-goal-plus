@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "kind": "sanitized_official_report_projection",
+  "source_report_sha256": {
+    "sympy__sympy-16886": "54d6f49054774b7bd92b3ec99c2fc58116fa8376214cf3be839c5c2c78d24096",
+    "sympy__sympy-19346": "acd77a0fa0eaa3d89e830c75cde800f796ba5d792ad4052f7583f42ca11d20a1"
+  },
+  "results": {
+    "sympy__sympy-16886": {
+      "patch_is_None": false,
+      "patch_exists": true,
+      "patch_successfully_applied": true,
+      "resolved": true,
+      "tests_status": {
+        "FAIL_TO_PASS": {
+          "success": [
+            "test_encode_morse"
+          ],
+          "failure": []
+        },
+        "PASS_TO_PASS": {
+          "success": [
+            "test_cycle_list",
+            "test_encipher_shift",
+            "test_encipher_rot13",
+            "test_encipher_affine",
+            "test_encipher_atbash",
+            "test_encipher_substitution",
+            "test_check_and_join",
+            "test_encipher_vigenere",
+            "test_decipher_vigenere",
+            "test_encipher_hill",
+            "test_decipher_hill",
+            "test_encipher_bifid5",
+            "test_bifid5_square",
+            "test_decipher_bifid5",
+            "test_encipher_bifid6",
+            "test_decipher_bifid6",
+            "test_bifid6_square",
+            "test_rsa_public_key",
+            "test_rsa_private_key",
+            "test_rsa_large_key",
+            "test_encipher_rsa",
+            "test_decipher_rsa",
+            "test_kid_rsa_public_key",
+            "test_kid_rsa_private_key",
+            "test_encipher_kid_rsa",
+            "test_decipher_kid_rsa",
+            "test_decode_morse",
+            "test_lfsr_sequence",
+            "test_lfsr_autocorrelation",
+            "test_lfsr_connection_polynomial",
+            "test_elgamal_private_key",
+            "test_elgamal",
+            "test_dh_private_key",
+            "test_dh_public_key",
+            "test_dh_shared_key",
+            "test_padded_key",
+            "test_bifid",
+            "test_encipher_decipher_gm",
+            "test_gm_private_key",
+            "test_gm_public_key",
+            "test_encipher_decipher_bg",
+            "test_bg_private_key"
+          ],
+          "failure": []
+        },
+        "FAIL_TO_FAIL": {
+          "success": [],
+          "failure": []
+        },
+        "PASS_TO_FAIL": {
+          "success": [],
+          "failure": []
+        }
+      }
+    },
+    "sympy__sympy-19346": {
+      "patch_is_None": false,
+      "patch_exists": true,
+      "patch_successfully_applied": true,
+      "resolved": true,
+      "tests_status": {
+        "FAIL_TO_PASS": {
+          "success": [
+            "test_dict"
+          ],
+          "failure": []
+        },
+        "PASS_TO_PASS": {
+          "success": [
+            "test_printmethod",
+            "test_more_than_255_args_issue_10259",
+            "test_Function",
+            "test_Geometry",
+            "test_Singletons",
+            "test_Integer",
+            "test_list",
+            "test_Matrix",
+            "test_empty_Matrix",
+            "test_Rational",
+            "test_Float",
+            "test_Symbol",
+            "test_Symbol_two_assumptions",
+            "test_Symbol_no_special_commutative_treatment",
+            "test_Wild",
+            "test_Dummy",
+            "test_Dummy_assumption",
+            "test_Dummy_from_Symbol",
+            "test_tuple",
+            "test_WildFunction",
+            "test_settins",
+            "test_AlgebraicNumber",
+            "test_PolyRing",
+            "test_FracField",
+            "test_PolyElement",
+            "test_FracElement",
+            "test_FractionField",
+            "test_PolynomialRingBase",
+            "test_DMP",
+            "test_FiniteExtension",
+            "test_ExtensionElement",
+            "test_BooleanAtom",
+            "test_Integers",
+            "test_Naturals",
+            "test_Naturals0",
+            "test_Reals",
+            "test_matrix_expressions",
+            "test_Cycle",
+            "test_Permutation",
+            "test_diffgeom"
+          ],
+          "failure": []
+        },
+        "FAIL_TO_FAIL": {
+          "success": [],
+          "failure": []
+        },
+        "PASS_TO_FAIL": {
+          "success": [],
+          "failure": []
+        }
+      }
+    }
+  }
+}

@@ -33,6 +33,7 @@ from .config import (
     utc_now,
     write_json,
 )
+from .checkout import CHECKOUT_PROBE_SCRIPT, validate_checkout_probe
 
 
 CODEX_ARCHIVE = Path.home() / ".cache/sforge/codex/codex-0.144.1-linux-x64.tgz"
@@ -623,14 +624,12 @@ def _image_checkout_probe(
             "never",
             "--rm",
             "--entrypoint",
-            "git",
+            "sh",
             image,
-            "-C",
-            "/testbed",
-            "rev-parse",
-            "HEAD",
-            f"{base_commit}^{{tree}}",
-            "HEAD^{tree}",
+            "-c",
+            CHECKOUT_PROBE_SCRIPT,
+            "swe-bench-checkout-probe",
+            base_commit,
         ],
         timeout=120,
     )
@@ -809,26 +808,27 @@ def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
         )
 
     method = profile["methods"][0]
-    image = profile["tasks"][0]["image"]
-    base_commit = profile["tasks"][0]["base_commit"]
-    checkout_probe = _image_checkout_probe(image, base_commit)
-    checkout_values = checkout_probe.stdout.splitlines()
-    checkout_valid = (
-        checkout_probe.returncode == 0
-        and len(checkout_values) == 3
-        and checkout_values[1] == checkout_values[2]
-    )
-    checks.append(
-        _check(
-            "image:dataset-base-tree",
-            checkout_valid,
-            base_commit=base_commit,
-            observed_head=checkout_values[0] if checkout_values else None,
-            base_tree=(checkout_values[1] if len(checkout_values) > 1 else None),
-            observed_tree=(checkout_values[2] if len(checkout_values) > 2 else None),
-            error=checkout_probe.stderr.strip()[-2000:],
+    for task in profile["tasks"]:
+        image = task["image"]
+        base_commit = task["base_commit"]
+        checkout_probe = _image_checkout_probe(image, base_commit)
+        checkout = validate_checkout_probe(checkout_probe.stdout, base_commit)
+        checkout_valid = checkout_probe.returncode == 0 and checkout["passed"]
+        checks.append(
+            _check(
+                f"image:{task['instance_id']}:official-checkout-baseline",
+                checkout_valid,
+                image=image,
+                **{
+                    key: value
+                    for key, value in checkout.items()
+                    if key != "passed"
+                },
+                probe_returncode=checkout_probe.returncode,
+                error=checkout_probe.stderr.strip()[-2000:],
+            )
         )
-    )
+    image = profile["tasks"][0]["image"]
     runtime: dict[str, Any]
     if method == "plain-codex":
         runtime = resolve_codex_runtime(profile)
@@ -858,14 +858,16 @@ def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
             ]
         )
         if runtime["archive_present"]:
-            probe = _codex_container_probe(image, runtime["archive"])
-            checks.append(
-                _check(
-                    "codex:container-runtime",
-                    probe.returncode == 0,
-                    version=(probe.stdout or probe.stderr).strip(),
+            for task in profile["tasks"]:
+                probe = _codex_container_probe(task["image"], runtime["archive"])
+                checks.append(
+                    _check(
+                        f"codex:{task['instance_id']}:container-runtime",
+                        probe.returncode == 0,
+                        image=task["image"],
+                        version=(probe.stdout or probe.stderr).strip(),
+                    )
                 )
-            )
         if api_config_valid:
             host_probe = openai_responses_probe(
                 str(runtime["api_base_url"]),
@@ -905,23 +907,25 @@ def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
                                 runtime_base_url=routed["runtime_api_base_url"],
                             )
                         )
-                        container_probe = codex_container_responses_probe(
-                            image,
-                            routed,
-                            model=str(profile["model"]),
-                        )
-                        container_recorded = True
-                        checks.append(
-                            _check(
-                                "codex:container-responses",
-                                bool(container_probe["passed"]),
-                                **{
-                                    key: value
-                                    for key, value in container_probe.items()
-                                    if key != "passed"
-                                },
+                        for task in profile["tasks"]:
+                            container_probe = codex_container_responses_probe(
+                                task["image"],
+                                routed,
+                                model=str(profile["model"]),
                             )
-                        )
+                            checks.append(
+                                _check(
+                                    f"codex:{task['instance_id']}:container-responses",
+                                    bool(container_probe["passed"]),
+                                    image=task["image"],
+                                    **{
+                                        key: value
+                                        for key, value in container_probe.items()
+                                        if key != "passed"
+                                    },
+                                )
+                            )
+                        container_recorded = True
             except Exception as error:
                 if not route_recorded:
                     checks.append(
@@ -932,13 +936,15 @@ def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
                         )
                     )
                 if not container_recorded:
-                    checks.append(
-                        _check(
-                            "codex:container-responses",
-                            False,
-                            error=f"{type(error).__name__}: {error}",
+                    for task in profile["tasks"]:
+                        checks.append(
+                            _check(
+                                f"codex:{task['instance_id']}:container-responses",
+                                False,
+                                image=task["image"],
+                                error=f"{type(error).__name__}: {error}",
+                            )
                         )
-                    )
     else:
         runtime = (
             resolve_goal_plus_runtime(profile)

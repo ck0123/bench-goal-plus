@@ -11,11 +11,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections import deque
 from pathlib import Path
 from typing import Any, Iterable
 
 from bench_runtime_paths import configure_temp_environment
+from bench_goal_plus.cell_scheduler import execute_cell_queue as execute_bounded_cell_queue
 
 from . import io
 from .context import current_paths
@@ -512,12 +512,7 @@ def execute_cell_queue(
     stop_requested: Any,
 ) -> int:
     controller_path = destination / "controller.json"
-    pending = deque(campaign["cells"])
-    active: dict[str, dict[str, Any]] = {}
-    overall_returncode = 0
-    stop_forwarded = False
-
-    def record_active() -> None:
+    def record_active(active: Any) -> None:
         controller["active_children"] = {
             cell_id: {
                 "pid": running["process"].pid,
@@ -529,69 +524,56 @@ def execute_cell_queue(
         io.write_json(controller_path, controller)
 
     controller["cell_concurrency"] = cell_concurrency
-    record_active()
-    while pending or active:
-        while pending and len(active) < cell_concurrency and not stop_requested():
-            cell_summary = pending.popleft()
-            cell_id = str(cell_summary["cell_id"])
+
+    def start(cell_summary: dict[str, Any]) -> dict[str, Any] | None:
+        return start_campaign_cell(
+            destination,
+            cell_summary,
+            judge_container_url=judge_container_url,
+            api_config=api_config,
+            api_key=api_key,
+            runtime_api_base_url=runtime_api_base_url,
+            bridge_host=bridge_host,
+        )
+
+    def fail(cell_summary: dict[str, Any], error: Exception) -> int:
+        cell_id = str(cell_summary["cell_id"])
+        cell_file = destination / "cells" / cell_id / "cell.json"
+        cell = io.read_json(cell_file)
+        cell.update(
+            {
+                "state": "failed",
+                "returncode": 1,
+                "finished_at": io.utc_now(),
+                "launch_error": str(error),
+            }
+        )
+        io.write_json(cell_file, cell)
+        update_campaign_cell(destination, cell_id, "failed")
+        return 1
+
+    def stop(running: dict[str, Any]) -> None:
+        process = running["process"]
+        if process.poll() is None:
             try:
-                running = start_campaign_cell(
-                    destination,
-                    cell_summary,
-                    judge_container_url=judge_container_url,
-                    api_config=api_config,
-                    api_key=api_key,
-                    runtime_api_base_url=runtime_api_base_url,
-                    bridge_host=bridge_host,
-                )
-            except Exception as exc:
-                cell_file = destination / "cells" / cell_id / "cell.json"
-                cell = io.read_json(cell_file)
-                cell.update(
-                    {
-                        "state": "failed",
-                        "returncode": 1,
-                        "finished_at": io.utc_now(),
-                        "launch_error": str(exc),
-                    }
-                )
-                io.write_json(cell_file, cell)
-                update_campaign_cell(destination, cell_id, "failed")
-                overall_returncode = overall_returncode or 1
-                continue
-            if running is not None:
-                active[cell_id] = running
-                record_active()
+                process.send_signal(signal.SIGINT)
+            except ProcessLookupError:
+                pass
 
-        if stop_requested() and not stop_forwarded:
-            for running in active.values():
-                process = running["process"]
-                if process.poll() is None:
-                    try:
-                        process.send_signal(signal.SIGINT)
-                    except ProcessLookupError:
-                        pass
-            stop_forwarded = True
-
-        completed = [
-            cell_id
-            for cell_id, running in active.items()
-            if running["process"].poll() is not None
-        ]
-        if not completed:
-            if not active:
-                break
-            time.sleep(0.25)
-            continue
-        for cell_id in completed:
-            running = active.pop(cell_id)
-            returncode = finish_campaign_cell(
-                destination, running, stop_requested=bool(stop_requested())
-            )
-            if returncode != 0:
-                overall_returncode = overall_returncode or returncode
-        record_active()
-    return overall_returncode
+    return execute_bounded_cell_queue(
+        campaign["cells"],
+        concurrency=cell_concurrency,
+        item_id=lambda cell: str(cell["cell_id"]),
+        start=start,
+        poll=lambda running: running["process"].poll() is not None,
+        finish=lambda running, stopping: finish_campaign_cell(
+            destination, running, stop_requested=stopping
+        ),
+        fail=fail,
+        record_active=record_active,
+        stop_requested=stop_requested,
+        stop=stop,
+    )
 
 
 class RuntimeResources:

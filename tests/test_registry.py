@@ -95,6 +95,34 @@ class RegistryTest(unittest.TestCase):
             STATUS.validate(data),
         )
 
+    def test_swe_bench_plain_codex_c2_evidence_is_explicit(self) -> None:
+        data = STATUS.load_registry()
+        item = next(
+            item for item in data["items"] if item["id"] == "swe-bench-verified"
+        )
+        summary_path = next(
+            path
+            for path in item["stage_evidence"]["plain_codex"]
+            if "plain-codex-terra-c2/summary.json" in path
+        )
+        summary = json.loads((ROOT / summary_path).read_text())
+
+        self.assertEqual(summary["status"], "completed")
+        self.assertEqual(summary["method"]["id"], "plain-codex")
+        self.assertEqual(
+            {key: summary["budget"][key] for key in ("T", "K", "C", "R")},
+            {"T": 1800, "K": 1, "C": 2, "R": 1},
+        )
+        self.assertEqual(summary["scheduler"]["max_active_observed"], 2)
+        self.assertEqual(len(summary["scheduler"]["simultaneous_cell_ids"]), 2)
+        self.assertEqual(summary["execution"]["official_evaluator_calls"], 2)
+        self.assertEqual(summary["result"]["evaluated_count"], 2)
+        self.assertEqual(summary["result"]["resolved_count"], 2)
+        self.assertTrue(summary["result"]["score_valid"])
+        self.assertTrue(
+            all(cell["patch_successfully_applied"] for cell in summary["result"]["cells"])
+        )
+
     def test_stage_evidence_must_be_in_flat_evidence_list(self) -> None:
         data = STATUS.load_registry()
         item = next(

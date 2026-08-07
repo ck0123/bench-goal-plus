@@ -6,12 +6,15 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from bench_goal_plus.cell_scheduler import execute_cell_queue as execute_bounded_cell_queue
 from bench_goal_plus.codex_provider import codex_responses_provider_args
 from bench_runtime_paths import configure_temp_environment, ensure_temp_root
 
@@ -26,6 +29,7 @@ from .config import (
     utc_now,
     write_json,
 )
+from .checkout import CHECKOUT_PROBE_SCRIPT, validate_checkout_probe
 from .environment import (
     CODEX_RUNTIME_TMPFS,
     codex_container_responses_probe,
@@ -42,6 +46,7 @@ from .goal_plus_evidence import collect_goal_plus_state, record_completion_check
 
 
 MANIFEST = "campaign.json"
+CONTROLLER = "controller.json"
 TERMINAL_STATES = {"completed", "partial", "failed"}
 HIDDEN_INSTANCE_FIELDS = {
     "patch",
@@ -86,7 +91,7 @@ def _git_value(path: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _load_pinned_instance(profile: dict[str, Any]) -> dict[str, Any]:
+def _load_pinned_instances(profile: dict[str, Any]) -> list[dict[str, Any]]:
     _configure_huggingface_cache()
     from datasets import load_dataset
 
@@ -95,19 +100,36 @@ def _load_pinned_instance(profile: dict[str, Any]) -> dict[str, Any]:
         split=profile["dataset"]["split"],
         revision=profile["dataset"]["revision"],
     )
-    task_id = profile["task_ids"][0]
-    matches = [dict(row) for row in dataset if row.get("instance_id") == task_id]
-    if len(matches) != 1:
-        raise SweBenchContractError(
-            f"pinned dataset returned {len(matches)} rows for {task_id}"
-        )
-    return matches[0]
+    requested = list(profile["task_ids"])
+    matches: dict[str, list[dict[str, Any]]] = {task_id: [] for task_id in requested}
+    for row in dataset:
+        task_id = row.get("instance_id")
+        if task_id in matches:
+            matches[str(task_id)].append(dict(row))
+    for task_id, rows in matches.items():
+        if len(rows) != 1:
+            raise SweBenchContractError(
+                f"pinned dataset returned {len(rows)} rows for {task_id}"
+            )
+    return [matches[task_id][0] for task_id in requested]
 
 
-def _validate_instance_image(instance: dict[str, Any], profile: dict[str, Any]) -> None:
+def _load_pinned_instance(profile: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility helper for existing one-task profiles and focused tests."""
+
+    if len(profile["task_ids"]) != 1:
+        raise SweBenchContractError("use _load_pinned_instances for multi-task profiles")
+    return _load_pinned_instances(profile)[0]
+
+
+def _validate_instance_image(
+    instance: dict[str, Any],
+    profile: dict[str, Any],
+    task: dict[str, Any] | None = None,
+) -> None:
     from swebench.harness.test_spec.test_spec import make_test_spec
 
-    task = profile["tasks"][0]
+    task = task or profile["tasks"][0]
     if instance.get("repo") != task["repo"]:
         raise SweBenchContractError("dataset repo does not match the pinned profile")
     if instance.get("base_commit") != task["base_commit"]:
@@ -122,14 +144,19 @@ def _validate_instance_image(instance: dict[str, Any], profile: dict[str, Any]) 
         )
 
 
-def _visible_task(instance: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+def _visible_task(
+    instance: dict[str, Any],
+    profile: dict[str, Any],
+    task: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    task = task or profile["tasks"][0]
     visible = {
         "instance_id": instance["instance_id"],
         "repo": instance["repo"],
         "base_commit": instance["base_commit"],
         "problem_statement": instance["problem_statement"],
         "version": instance.get("version"),
-        "image": profile["tasks"][0]["image"],
+        "image": task["image"],
     }
     if set(visible) & HIDDEN_INSTANCE_FIELDS:
         raise AssertionError("visible task allowlist includes a hidden field")
@@ -140,18 +167,48 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
     destination = campaign_dir(campaign_id)
     preserved = preserve_conflict(destination)
     destination.mkdir(parents=True, exist_ok=False)
-    cell_dir = destination / "cells" / profile["methods"][0]
     evaluator_dir = destination / "evaluator"
-    cell_dir.mkdir(parents=True)
     evaluator_dir.mkdir(parents=True)
 
-    instance = _load_pinned_instance(profile)
-    _validate_instance_image(instance, profile)
-    visible = _visible_task(instance, profile)
-    write_json(cell_dir / "task.json", visible)
+    instances = (
+        [_load_pinned_instance(profile)]
+        if len(profile["task_ids"]) == 1
+        else _load_pinned_instances(profile)
+    )
+    cells: list[dict[str, Any]] = []
+    visible_fields: set[str] = set()
+    method = profile["methods"][0]
+    for instance, task in zip(instances, profile["tasks"], strict=True):
+        _validate_instance_image(instance, profile, task)
+        visible = _visible_task(instance, profile, task)
+        visible_fields.update(visible)
+        cell_id = f"{method}--{instance['instance_id']}"
+        cell_dir = destination / "cells" / cell_id
+        cell_dir.mkdir(parents=True)
+        write_json(cell_dir / "task.json", visible)
+        cell = {
+            "cell_id": cell_id,
+            "task_id": instance["instance_id"],
+            "repo": instance["repo"],
+            "base_commit": instance["base_commit"],
+            "image": task["image"],
+            "method": method,
+            "model": profile["model"],
+            "reasoning_effort": profile["reasoning_effort"],
+            "state": "prepared",
+            "cell_file": str((cell_dir / "cell.json").relative_to(destination)),
+            "task_file": str((cell_dir / "task.json").relative_to(destination)),
+            "patch_file": str((cell_dir / "model.patch").relative_to(destination)),
+            "evaluator_dir": str(
+                (evaluator_dir / cell_id).relative_to(destination)
+            ),
+            "agent": {"state": "pending"},
+            "evaluation": {"state": "pending", "calls": 0},
+        }
+        cells.append(cell)
     evaluator_instances = evaluator_dir / "instances.json"
     evaluator_instances.write_text(
-        json.dumps([instance], indent=2, ensure_ascii=False) + "\n",
+        json.dumps(instances, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     evaluator_instances.chmod(0o600)
@@ -171,22 +228,9 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
             "provider": profile["model"].partition("/")[0],
         }
     )
-    cell = {
-        "cell_id": f"{profile['methods'][0]}--{instance['instance_id']}",
-        "task_id": instance["instance_id"],
-        "repo": instance["repo"],
-        "base_commit": instance["base_commit"],
-        "image": profile["tasks"][0]["image"],
-        "method": profile["methods"][0],
-        "model": profile["model"],
-        "reasoning_effort": profile["reasoning_effort"],
-        "agent_provider": provider_contract,
-        "state": "prepared",
-        "task_file": str((cell_dir / "task.json").relative_to(destination)),
-        "patch_file": str((cell_dir / "model.patch").relative_to(destination)),
-        "agent": {"state": "pending"},
-        "evaluation": {"state": "pending", "calls": 0},
-    }
+    for cell in cells:
+        cell["agent_provider"] = provider_contract
+        write_json(destination / cell["cell_file"], cell)
     manifest = {
         "schema_version": 1,
         "campaign_id": campaign_id,
@@ -203,7 +247,7 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
         "budget": {
             "wall_time_seconds": profile["wall_time_seconds"],
             "live_search_concurrency": 1,
-            "cell_concurrency": 1,
+            "cell_concurrency": profile["cell_concurrency"],
             "attempts": 1,
         },
         "container_retention": {
@@ -217,7 +261,7 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
             "evaluator_instances_file": str(
                 evaluator_instances.relative_to(destination)
             ),
-            "agent_visible_fields": sorted(visible),
+            "agent_visible_fields": sorted(visible_fields),
             "hidden_fields_excluded_from_agent": sorted(HIDDEN_INSTANCE_FIELDS),
         },
         "source": {
@@ -234,9 +278,24 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
         },
         "profile_snapshot": profile,
         "preserved_conflict": str(preserved) if preserved else None,
-        "cells": [cell],
+        "cells": cells,
     }
     write_json(destination / MANIFEST, manifest)
+    write_json(
+        destination / CONTROLLER,
+        {
+            "schema_version": 1,
+            "campaign_id": campaign_id,
+            "state": "prepared",
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+            "pid": None,
+            "pgid": None,
+            "command": None,
+            "log_file": "controller.log",
+            "returncode": None,
+        },
+    )
     print(json.dumps({"campaign": str(destination), "state": "prepared"}, indent=2))
     return destination
 
@@ -256,6 +315,73 @@ def _save_manifest(campaign: Path, manifest: dict[str, Any]) -> None:
     write_json(campaign / MANIFEST, manifest)
 
 
+def _controller(campaign: Path) -> dict[str, Any]:
+    path = campaign / CONTROLLER
+    if path.is_file():
+        payload = read_json(path)
+        if payload.get("schema_version") != 1:
+            raise SweBenchContractError("unsupported SWE-bench controller schema")
+        return payload
+    manifest = _manifest(campaign)
+    return {
+        "schema_version": 1,
+        "campaign_id": manifest["campaign_id"],
+        "state": manifest["state"],
+        "created_at": manifest.get("created_at") or utc_now(),
+        "updated_at": utc_now(),
+        "pid": None,
+        "pgid": None,
+        "command": None,
+        "log_file": "controller.log",
+        "returncode": None,
+    }
+
+
+def _save_controller(campaign: Path, controller: dict[str, Any]) -> None:
+    controller["updated_at"] = utc_now()
+    write_json(campaign / CONTROLLER, controller)
+
+
+def process_alive(pid: int | None) -> bool:
+    if not isinstance(pid, int) or pid < 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _cell_file(campaign: Path, cell: dict[str, Any]) -> Path:
+    if cell.get("cell_file"):
+        return campaign / str(cell["cell_file"])
+    if cell.get("task_file"):
+        return (campaign / str(cell["task_file"])).parent / "cell.json"
+    if cell.get("cell_id"):
+        return campaign / "cells" / str(cell["cell_id"]) / "cell.json"
+    raise SweBenchContractError("cell has no durable path")
+
+
+def _save_cell(campaign: Path, cell: dict[str, Any]) -> None:
+    cell["updated_at"] = utc_now()
+    write_json(_cell_file(campaign, cell), cell)
+
+
+def _persist_runtime_state(
+    campaign: Path,
+    manifest: dict[str, Any],
+    cell: dict[str, Any],
+    *,
+    persist_manifest: bool,
+) -> None:
+    if persist_manifest:
+        _save_manifest(campaign, manifest)
+    else:
+        _save_cell(campaign, cell)
+
+
 def _docker_checked(command: list[str], *, timeout: int = 120) -> str:
     result = _run(command, timeout=timeout)
     if result.returncode != 0:
@@ -265,8 +391,8 @@ def _docker_checked(command: list[str], *, timeout: int = 120) -> str:
     return result.stdout.rstrip("\n")
 
 
-def _container_name(campaign_id: str, method: str) -> str:
-    digest = hashlib.sha256(f"{campaign_id}:{method}".encode()).hexdigest()[:16]
+def _container_name(campaign_id: str, cell_id: str) -> str:
+    digest = hashlib.sha256(f"{campaign_id}:{cell_id}".encode()).hexdigest()[:16]
     return f"bgp-swe-agent-{digest}"
 
 
@@ -366,9 +492,12 @@ def _create_agent_container(
     campaign_id: str,
     profile: dict[str, Any],
     runtime: dict[str, Any] | None = None,
+    *,
+    cell: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     method = profile["methods"][0]
-    name = _container_name(campaign_id, method)
+    cell_id = str((cell or {}).get("cell_id") or method)
+    name = _container_name(campaign_id, cell_id)
     command = [
         "docker",
         "create",
@@ -380,6 +509,8 @@ def _create_agent_container(
         "bench-goal-plus.owner=swe-bench-native",
         "--label",
         f"bench-goal-plus.campaign={campaign_id}",
+        "--label",
+        f"bench-goal-plus.cell={cell_id}",
         "--workdir",
         "/testbed",
         "--tmpfs",
@@ -486,54 +617,38 @@ def _create_agent_container(
             )
     if runtime is None:
         raise AssertionError("Agent runtime was not resolved")
-    command.extend([profile["tasks"][0]["image"], "sleep", "infinity"])
+    command.extend([(cell or profile["tasks"][0])["image"], "sleep", "infinity"])
     container_id = _docker_checked(command)
     _docker_checked(["docker", "start", container_id])
     return container_id, runtime
 
 
 def _initialize_agent_container(
-    container_id: str, profile: dict[str, Any], runtime: dict[str, Any]
+    container_id: str,
+    profile: dict[str, Any],
+    runtime: dict[str, Any],
+    *,
+    cell: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    base_commit = profile["tasks"][0]["base_commit"]
-    observed = _docker_checked(
-        ["docker", "exec", container_id, "git", "-C", "/testbed", "rev-parse", "HEAD"]
-    )
-    base_tree = _docker_checked(
+    base_commit = (cell or profile["tasks"][0])["base_commit"]
+    probe_output = _docker_checked(
         [
             "docker",
             "exec",
             container_id,
-            "git",
-            "-C",
-            "/testbed",
-            "rev-parse",
-            f"{base_commit}^{{tree}}",
+            "sh",
+            "-c",
+            CHECKOUT_PROBE_SCRIPT,
+            "swe-bench-checkout-probe",
+            base_commit,
         ]
     )
-    observed_tree = _docker_checked(
-        [
-            "docker",
-            "exec",
-            container_id,
-            "git",
-            "-C",
-            "/testbed",
-            "rev-parse",
-            "HEAD^{tree}",
-        ]
-    )
-    if observed_tree != base_tree:
+    checkout = validate_checkout_probe(probe_output, base_commit)
+    if not checkout["passed"]:
         raise SweBenchContractError(
-            "Agent image checkout tree does not match the dataset base commit: "
-            f"HEAD {observed} ({observed_tree}) vs {base_commit} ({base_tree})"
+            "Agent image checkout is not a valid official baseline: "
+            + str(checkout["failure_reason"])
         )
-    _docker_checked(
-        ["docker", "exec", container_id, "git", "-C", "/testbed", "reset", "--hard", base_commit]
-    )
-    _docker_checked(
-        ["docker", "exec", container_id, "git", "-C", "/testbed", "clean", "-fdx"]
-    )
     if isinstance(runtime.get("models_file"), Path):
         _docker_checked(
             [
@@ -593,11 +708,7 @@ def _initialize_agent_container(
             ]
         )
     return {
-        "observed_head": observed,
-        "base_commit": base_commit,
-        "base_tree": base_tree,
-        "observed_tree": observed_tree,
-        "synthetic_head": observed != base_commit,
+        **checkout,
         "goal_plus_initialized": profile["methods"][0] == "goal-plus-pi",
     }
 
@@ -996,7 +1107,11 @@ def _export_goal_plus_state(
 
 
 def _run_agent(
-    campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]
+    campaign: Path,
+    manifest: dict[str, Any],
+    cell: dict[str, Any],
+    *,
+    persist_manifest: bool = True,
 ) -> dict[str, Any]:
     profile = manifest["profile_snapshot"]
     method = profile["methods"][0]
@@ -1019,7 +1134,9 @@ def _run_agent(
     returncode: int | None = None
     timed_out = False
     retain_container = bool(profile["retain_containers"])
-    container_name = _container_name(manifest["campaign_id"], profile["methods"][0])
+    container_name = _container_name(
+        manifest["campaign_id"], str(cell.get("cell_id") or method)
+    )
     cleanup: dict[str, Any] = {
         "policy": "retain" if retain_container else "remove",
         "attempted": False,
@@ -1038,7 +1155,7 @@ def _run_agent(
     try:
         if method == "plain-codex":
             runtime = resources.enter_context(
-                routed_codex_runtime(profile, campaign)
+                routed_codex_runtime(profile, cell_dir)
             )
             host_probe = openai_responses_probe(
                 str(runtime["runtime_api_base_url"]),
@@ -1054,7 +1171,7 @@ def _run_agent(
                 runtime = resources.enter_context(
                     routed_pi_runtime(
                         profile,
-                        campaign,
+                        cell_dir,
                         goal_plus=method == "goal-plus-pi",
                     )
                 )
@@ -1075,7 +1192,7 @@ def _run_agent(
                 )
                 host_probe = None
         container_id, runtime = _create_agent_container(
-            manifest["campaign_id"], profile, runtime
+            manifest["campaign_id"], profile, runtime, cell=cell
         )
         cell["agent"] = {
             "state": "running",
@@ -1086,7 +1203,12 @@ def _run_agent(
                 "credentials_persisted": False,
             },
         }
-        _save_manifest(campaign, manifest)
+        _persist_runtime_state(
+            campaign,
+            manifest,
+            cell,
+            persist_manifest=persist_manifest,
+        )
         if method == "plain-codex":
             runtime_public = {
                 "kind": "codex-openai-compatible-responses",
@@ -1162,7 +1284,9 @@ def _run_agent(
                         "evidence_annotator": "disabled",
                     }
                 )
-        image_checkout = _initialize_agent_container(container_id, profile, runtime)
+        image_checkout = _initialize_agent_container(
+            container_id, profile, runtime, cell=cell
+        )
         if method == "plain-codex":
             container_probe = codex_container_responses_probe(
                 container_id,
@@ -1194,7 +1318,9 @@ def _run_agent(
                 + timedelta(seconds=profile["wall_time_seconds"])
             ).isoformat()
             runtime["main_session_id"] = "swe-bench-main-" + hashlib.sha256(
-                manifest["campaign_id"].encode("utf-8")
+                f"{manifest['campaign_id']}:{cell.get('cell_id') or method}".encode(
+                    "utf-8"
+                )
             ).hexdigest()[:12]
             runtime["goal_prompt"] = prompt
             runtime_public["outer_deadline_at"] = runtime["outer_deadline_at"]
@@ -1258,7 +1384,7 @@ def _run_agent(
                 "diff",
                 "--binary",
                 "--full-index",
-                profile["tasks"][0]["base_commit"],
+                str(image_checkout["patch_base_commit"]),
             ]
         )
         status = _docker_checked(
@@ -1300,7 +1426,12 @@ def _run_agent(
             }
             if agent_error:
                 cell["agent"]["error"] = agent_error
-            _save_manifest(campaign, manifest)
+            _persist_runtime_state(
+                campaign,
+                manifest,
+                cell,
+                persist_manifest=persist_manifest,
+            )
         resources.close()
 
     (cell_dir / "agent-events.jsonl").write_text(stdout, encoding="utf-8")
@@ -1355,14 +1486,24 @@ def _run_agent(
 
 
 def _official_evaluation(
-    campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]
+    campaign: Path,
+    manifest: dict[str, Any],
+    cell: dict[str, Any],
+    *,
+    persist_manifest: bool = True,
 ) -> dict[str, Any]:
     if cell["evaluation"].get("calls") != 0:
         raise SweBenchContractError(
             "official evaluator has already been attempted; create a new campaign"
         )
     profile = manifest["profile_snapshot"]
-    evaluator_dir = campaign / "evaluator"
+    evaluator_dir = campaign / str(cell.get("evaluator_dir") or "evaluator")
+    evaluator_dir.mkdir(parents=True, exist_ok=True)
+    instances_file = campaign / str(
+        (manifest.get("dataset") or {}).get(
+            "evaluator_instances_file", "evaluator/instances.json"
+        )
+    )
     patch = (campaign / cell["patch_file"]).read_text(encoding="utf-8")
     model_label = (
         f"bench-goal-plus-{cell['method']}-{cell['model']}".replace("/", "-")
@@ -1378,13 +1519,15 @@ def _official_evaluation(
     predictions_path.write_text(
         json.dumps(predictions, indent=2) + "\n", encoding="utf-8"
     )
-    run_id = manifest["campaign_id"]
+    run_id = str(manifest["campaign_id"])
+    if cell.get("evaluator_dir"):
+        run_id += "-" + hashlib.sha256(str(cell["cell_id"]).encode()).hexdigest()[:12]
     command = [
         str(ROOT / ".bench-env" / "venv" / "bin" / "python"),
         "-m",
         "swebench.harness.run_evaluation",
         "--dataset_name",
-        str(evaluator_dir / "instances.json"),
+        str(instances_file),
         "--split",
         profile["dataset"]["split"],
         "--instance_ids",
@@ -1416,7 +1559,12 @@ def _official_evaluation(
         "dataset_revision": profile["dataset"]["revision"],
     }
     cell["evaluation"] = evaluation
-    _save_manifest(campaign, manifest)
+    _persist_runtime_state(
+        campaign,
+        manifest,
+        cell,
+        persist_manifest=persist_manifest,
+    )
     started = time.monotonic()
     timed_out = False
     try:
@@ -1488,21 +1636,25 @@ def _official_evaluation(
     return evaluation
 
 
-def execute_campaign(campaign: Path) -> int:
+def _execute_campaign_cell(campaign: Path, cell_id: str) -> int:
     manifest = _manifest(campaign)
-    if manifest["state"] != "prepared":
-        raise SweBenchContractError(
-            f"campaign must be prepared, got {manifest['state']!r}"
-        )
-    cell = manifest["cells"][0]
-    manifest["state"] = "running"
-    manifest["started_at"] = utc_now()
-    cell["state"] = "running"
-    _save_manifest(campaign, manifest)
+    summary = next(
+        (cell for cell in manifest["cells"] if cell["cell_id"] == cell_id), None
+    )
+    if summary is None:
+        raise SweBenchContractError(f"unknown campaign cell: {cell_id}")
+    cell = read_json(_cell_file(campaign, summary))
+    cell.update({"state": "running", "started_at": utc_now()})
+    _save_cell(campaign, cell)
     exit_code = 0
     try:
-        cell["agent"] = _run_agent(campaign, manifest, cell)
-        _save_manifest(campaign, manifest)
+        cell["agent"] = _run_agent(
+            campaign,
+            manifest,
+            cell,
+            persist_manifest=False,
+        )
+        _save_cell(campaign, cell)
         cleanup = (cell["agent"].get("container") or {}).get("cleanup") or {}
         if not _container_disposition_isolated(cleanup):
             raise SweBenchContractError(
@@ -1510,7 +1662,12 @@ def execute_campaign(campaign: Path) -> int:
                 "official evaluation is blocked"
             )
         if cell["agent"]["patch_exists"]:
-            cell["evaluation"] = _official_evaluation(campaign, manifest, cell)
+            cell["evaluation"] = _official_evaluation(
+                campaign,
+                manifest,
+                cell,
+                persist_manifest=False,
+            )
         goal_plus_completion = (
             ((cell["agent"].get("goal_plus") or {}).get("completion") or {})
             if cell.get("method") == "goal-plus-pi"
@@ -1520,7 +1677,6 @@ def execute_campaign(campaign: Path) -> int:
         topology_complete = goal_plus_completion.get("passed") is True
         if score_complete and topology_complete:
             cell["state"] = "completed"
-            manifest["state"] = "completed"
         else:
             cell["state"] = "partial"
             reasons = []
@@ -1536,21 +1692,295 @@ def execute_campaign(campaign: Path) -> int:
                     )
                 )
             cell["incomplete_reason"] = "; ".join(reasons)
-            manifest["state"] = "partial"
             exit_code = 1
     except Exception as error:
         cell["state"] = "failed"
         cell["error"] = f"{type(error).__name__}: {error}"
-        manifest["state"] = "failed"
         exit_code = 1
-    manifest["completed_at"] = utc_now()
-    _save_manifest(campaign, manifest)
-    print(json.dumps(status_payload(campaign), indent=2, ensure_ascii=False))
+    cell["completed_at"] = utc_now()
+    _save_cell(campaign, cell)
     return exit_code
+
+
+def _sync_manifest_cell(
+    campaign: Path, manifest: dict[str, Any], cell_id: str
+) -> dict[str, Any]:
+    for index, summary in enumerate(manifest["cells"]):
+        if summary["cell_id"] == cell_id:
+            cell = read_json(_cell_file(campaign, summary))
+            manifest["cells"][index] = cell
+            return cell
+    raise SweBenchContractError(f"unknown campaign cell: {cell_id}")
+
+
+def _execute_campaign_body(campaign: Path) -> int:
+    manifest = _manifest(campaign)
+    if manifest["state"] != "prepared":
+        raise SweBenchContractError(
+            f"campaign must be prepared, got {manifest['state']!r}"
+        )
+    cell_concurrency = int(
+        (manifest.get("budget") or {}).get("cell_concurrency") or 1
+    )
+    if cell_concurrency > len(manifest["cells"]):
+        raise SweBenchContractError("C cannot exceed the number of campaign cells")
+
+    for cell in manifest["cells"]:
+        if not cell.get("cell_file"):
+            cell["cell_file"] = str(
+                Path("cells") / str(cell["cell_id"]) / "cell.json"
+            )
+        cell_path = _cell_file(campaign, cell)
+        if not cell_path.is_file():
+            write_json(cell_path, cell)
+
+    manifest["state"] = "running"
+    manifest["started_at"] = utc_now()
+    manifest["scheduler"] = {
+        "cell_concurrency": cell_concurrency,
+        "active_cell_ids": [],
+        "max_active_observed": 0,
+        "events": [],
+    }
+    _save_manifest(campaign, manifest)
+
+    executor = ThreadPoolExecutor(
+        max_workers=cell_concurrency,
+        thread_name_prefix="swe-bench-cell",
+    )
+    try:
+        def record_active(active: Any) -> None:
+            cell_ids = sorted(active)
+            scheduler = manifest["scheduler"]
+            scheduler["active_cell_ids"] = cell_ids
+            scheduler["max_active_observed"] = max(
+                int(scheduler["max_active_observed"]), len(cell_ids)
+            )
+            scheduler["events"].append(
+                {"at": utc_now(), "active_cell_ids": cell_ids}
+            )
+            _save_manifest(campaign, manifest)
+
+        def start(cell: dict[str, Any]) -> Future[int]:
+            return executor.submit(
+                _execute_campaign_cell, campaign, str(cell["cell_id"])
+            )
+
+        def finish(future: Future[int], _stopping: bool) -> int:
+            completed_id = next(
+                cell_id
+                for cell_id, active_future in active_futures.items()
+                if active_future is future
+            )
+            try:
+                returncode = int(future.result())
+            except Exception as error:
+                failed = read_json(
+                    _cell_file(
+                        campaign,
+                        next(
+                            cell
+                            for cell in manifest["cells"]
+                            if cell["cell_id"] == completed_id
+                        ),
+                    )
+                )
+                failed.update(
+                    {
+                        "state": "failed",
+                        "completed_at": utc_now(),
+                        "controller_error": f"{type(error).__name__}: {error}",
+                    }
+                )
+                _save_cell(campaign, failed)
+                returncode = 1
+            _sync_manifest_cell(campaign, manifest, completed_id)
+            _save_manifest(campaign, manifest)
+            return returncode
+
+        def fail(cell: dict[str, Any], error: Exception) -> int:
+            failed = read_json(_cell_file(campaign, cell))
+            failed.update(
+                {
+                    "state": "failed",
+                    "completed_at": utc_now(),
+                    "launch_error": f"{type(error).__name__}: {error}",
+                }
+            )
+            _save_cell(campaign, failed)
+            _sync_manifest_cell(campaign, manifest, str(cell["cell_id"]))
+            _save_manifest(campaign, manifest)
+            return 1
+
+        active_futures: dict[str, Future[int]] = {}
+
+        def track_active(active: Any) -> None:
+            active_futures.clear()
+            active_futures.update(active)
+            record_active(active)
+
+        scheduler_returncode = execute_bounded_cell_queue(
+            list(manifest["cells"]),
+            concurrency=cell_concurrency,
+            item_id=lambda cell: str(cell["cell_id"]),
+            start=start,
+            poll=lambda future: future.done(),
+            finish=finish,
+            fail=fail,
+            record_active=track_active,
+            stop_requested=lambda: False,
+        )
+    finally:
+        executor.shutdown(wait=True)
+
+    for cell in list(manifest["cells"]):
+        _sync_manifest_cell(campaign, manifest, str(cell["cell_id"]))
+    states = {str(cell.get("state")) for cell in manifest["cells"]}
+    if states == {"completed"}:
+        manifest["state"] = "completed"
+        exit_code = 0
+    elif states & {"completed", "partial"}:
+        manifest["state"] = "partial"
+        exit_code = scheduler_returncode or 1
+    else:
+        manifest["state"] = "failed"
+        exit_code = scheduler_returncode or 1
+    manifest["completed_at"] = utc_now()
+    manifest["scheduler"]["returncode"] = scheduler_returncode
+    _save_manifest(campaign, manifest)
+    return exit_code
+
+
+def execute_campaign(campaign: Path) -> int:
+    manifest = _manifest(campaign)
+    if manifest["state"] != "prepared":
+        raise SweBenchContractError(
+            f"campaign must be prepared, got {manifest['state']!r}"
+        )
+    controller = _controller(campaign)
+    controller.update(
+        {
+            "state": "running",
+            "started_at": controller.get("started_at") or utc_now(),
+            "pid": os.getpid(),
+            "pgid": os.getpgrp(),
+            "returncode": None,
+        }
+    )
+    _save_controller(campaign, controller)
+    try:
+        returncode = _execute_campaign_body(campaign)
+    except Exception as error:
+        failed_manifest = _manifest(campaign)
+        if failed_manifest.get("state") in {"prepared", "running"}:
+            failed_manifest.update(
+                {
+                    "state": "failed",
+                    "completed_at": utc_now(),
+                    "controller_error": f"{type(error).__name__}: {error}",
+                }
+            )
+            _save_manifest(campaign, failed_manifest)
+        controller.update(
+            {
+                "state": "failed",
+                "finished_at": utc_now(),
+                "returncode": 1,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+        _save_controller(campaign, controller)
+        raise
+
+    final_state = _manifest(campaign)["state"]
+    controller.update(
+        {
+            "state": final_state,
+            "finished_at": utc_now(),
+            "returncode": returncode,
+        }
+    )
+    _save_controller(campaign, controller)
+    print(json.dumps(status_payload(campaign), indent=2, ensure_ascii=False))
+    return returncode
+
+
+def launch(campaign: Path, *, detach: bool) -> int:
+    manifest = _manifest(campaign)
+    controller = _controller(campaign)
+    if process_alive(controller.get("pid")):
+        raise SweBenchContractError(
+            f"campaign controller is already running: {controller['pid']}"
+        )
+    if manifest["state"] != "prepared":
+        raise SweBenchContractError(
+            f"campaign must be prepared, got {manifest['state']!r}"
+        )
+    if not detach:
+        return execute_campaign(campaign)
+
+    command = [
+        sys.executable,
+        str(ROOT / "experiments" / "swe_bench_verified" / "experiment.py"),
+        "_execute",
+        "--campaign",
+        manifest["campaign_id"],
+    ]
+    controller.update(
+        {
+            "state": "launching",
+            "launched_at": controller.get("launched_at") or utc_now(),
+            "command": command,
+            "log_file": "controller.log",
+            "returncode": None,
+        }
+    )
+    _save_controller(campaign, controller)
+    log = (campaign / "controller.log").open("a", encoding="utf-8")
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT,
+            env=dict(configure_temp_environment(dict(os.environ))),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+    except Exception as error:
+        controller.update(
+            {
+                "state": "failed",
+                "finished_at": utc_now(),
+                "returncode": 1,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+        _save_controller(campaign, controller)
+        raise
+    finally:
+        log.close()
+
+    controller = _controller(campaign)
+    controller.update(
+        {
+            "pid": process.pid,
+            "pgid": process.pid,
+            "command": command,
+            "launched_at": controller.get("launched_at") or utc_now(),
+        }
+    )
+    if controller.get("state") in {"prepared", "launching"}:
+        controller["state"] = "launching"
+    _save_controller(campaign, controller)
+    print(json.dumps({"pid": process.pid, "campaign": str(campaign)}))
+    return 0
 
 
 def status_payload(campaign: Path) -> dict[str, Any]:
     manifest = _manifest(campaign)
+    controller = _controller(campaign)
     counts: dict[str, int] = {}
     for cell in manifest.get("cells", []):
         state = str(cell.get("state") or "unknown")
@@ -1566,6 +1996,14 @@ def status_payload(campaign: Path) -> dict[str, Any]:
         "model": manifest["model"],
         "agent_provider": manifest.get("agent_provider"),
         "budget": manifest["budget"],
+        "controller": {
+            "state": controller.get("state"),
+            "pid": controller.get("pid"),
+            "pgid": controller.get("pgid"),
+            "alive": process_alive(controller.get("pid")),
+            "returncode": controller.get("returncode"),
+            "log_file": controller.get("log_file"),
+        },
         "cells": [
             {
                 "cell_id": cell["cell_id"],

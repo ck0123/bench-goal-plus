@@ -117,11 +117,13 @@ ID. It must not contact Hugging Face or start a container. The full doctor may s
 diagnostic containers, always with `--pull never`; it must not pull, build, tag, commit, or remove an
 image.
 
-The official task image can have a synthetic build commit above the dataset's `base_commit`.
-Do not rewrite the profile to the image's current HEAD and do not modify the image. The full doctor
-must prove that `base_commit^{tree}` and `HEAD^{tree}` are identical; the Agent container can then be
-reset to the official dataset base while the immutable image remains untouched. A tree mismatch is a
-blocking asset/version error.
+The official task image can have a setup commit above the dataset's `base_commit`. Do not rewrite the
+profile to the image's current HEAD and do not modify the image. Full doctor accepts a clean checkout
+at `base_commit`, or a clean HEAD with exactly one parent equal to `base_commit`, author and committer
+email `setup@swebench.config`, and subject `SWE-bench`. The setup commit may contain required
+dependency or test-configuration changes, so tree equality is diagnostic rather than a gate. The
+Agent must preserve the validated HEAD, including ignored build artifacts, and export only the model
+diff relative to that HEAD; do not reset to the dataset base or run `git clean -fdx`.
 
 The complete dataset row is loaded host-side during `prepare`, not during the read-only inventory
 gate. On hosts where `huggingface.co` is unreachable, use a transport-only mirror while retaining the
