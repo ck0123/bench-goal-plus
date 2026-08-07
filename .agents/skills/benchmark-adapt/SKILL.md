@@ -29,6 +29,9 @@ description: 把新 benchmark、task family，或现有 runner 的新 method/pro
    prepare 和 launch 使用同一解析结果，并在准备环境前拒绝冲突或不完整配置。
 6. 固定 `T/K/C/R` 语义和资源上限。无法安全迁移并发时先声明 `K=1`，用小任务验证后再开放。
 7. 保留 native raw metric；增加 manifest、status、final evidence、telemetry coverage 和统一报告字段。
+   为 benchmark 接入开放式 ViewAgent 补充评价时，完整执行
+   [supplemental-view-evaluation.md](references/supplemental-view-evaluation.md)；adapter 只映射
+   可见任务背景、候选产物、硬 Evidence 和 peer incumbent，不定义评价维度。
 8. 增加 registry/adapter/lifecycle/report 测试，完成 model-free seed smoke，再做最小真实 E2E。
 9. 更新对应 Skill reference，而不是把 benchmark 特例堆进根 `AGENTS.md`。
 

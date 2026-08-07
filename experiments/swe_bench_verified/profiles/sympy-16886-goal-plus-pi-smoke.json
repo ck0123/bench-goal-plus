@@ -28,6 +28,7 @@
     "worker_runtime_seconds": 1500,
     "closeout_reserve_seconds": 300,
     "visible_verifier_timeout_seconds": 300,
-    "evidence_annotator": "disabled"
+    "evidence_annotator": "disabled",
+    "supplemental_evaluation_enabled": false
   }
 }

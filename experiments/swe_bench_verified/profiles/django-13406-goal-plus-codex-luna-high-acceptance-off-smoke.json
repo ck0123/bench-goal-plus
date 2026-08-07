@@ -1,26 +1,26 @@
 {
   "schema_version": 1,
-  "id": "sympy-16886-goal-plus-pi-luna-high-smoke",
+  "id": "django-13406-goal-plus-codex-luna-high-acceptance-off-smoke",
   "benchmark_id": "swe-bench-verified",
   "dataset": {
     "name": "SWE-bench/SWE-bench_Verified",
     "split": "test",
     "revision": "91aa3ed51b709be6457e12d00300a6a596d4c6a3"
   },
-  "task_ids": ["sympy__sympy-16886"],
+  "task_ids": ["django__django-13406"],
   "tasks": [
     {
-      "instance_id": "sympy__sympy-16886",
-      "repo": "sympy/sympy",
-      "image": "swebench/sweb.eval.x86_64.sympy_1776_sympy-16886:latest",
-      "base_commit": "c50643a49811e9fe2f4851adff4313ad46f7325e"
+      "instance_id": "django__django-13406",
+      "repo": "django/django",
+      "image": "swebench/sweb.eval.x86_64.django_1776_django-13406:latest",
+      "base_commit": "84609b3205905097d7d3038d32e6101f012c0619"
     }
   ],
-  "methods": ["goal-plus-pi"],
-  "model": "bench-openai/gpt-5.6-luna",
+  "methods": ["goal-plus-codex"],
+  "model": "gpt-5.6-luna",
   "reasoning_effort": "high",
   "agent_provider": {
-    "id": "bench-openai",
+    "id": "bench_proxy",
     "name": "Benchmark OpenAI-compatible proxy",
     "auth_mode": "openai-compatible",
     "base_url_env": "OPENAI_BASE_URL",
@@ -39,9 +39,9 @@
     "evidence_annotator": {
       "kind": "codex",
       "model": "gpt-5.6-luna",
-      "reasoning_effort": "high",
+      "reasoning_effort": "medium",
       "timeout_seconds": 300
     },
-    "supplemental_evaluation_enabled": true
+    "supplemental_evaluation_enabled": false
   }
 }

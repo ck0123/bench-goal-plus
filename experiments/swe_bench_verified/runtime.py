@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -27,15 +27,18 @@ from .config import (
     write_json,
 )
 from .environment import (
+    CODEX_HOME_TMPFS,
     CODEX_RUNTIME_TMPFS,
     codex_container_responses_probe,
     goal_plus_install_script,
     goal_plus_runtime_environment,
     openai_responses_probe,
     resolve_codex_runtime,
+    resolve_goal_plus_codex_runtime,
     resolve_goal_plus_runtime,
     resolve_pi_runtime,
     routed_codex_runtime,
+    routed_goal_plus_codex_runtime,
     routed_pi_runtime,
 )
 from .goal_plus_evidence import collect_goal_plus_state, record_completion_check
@@ -160,12 +163,14 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
     swebench_commit = _git_value(SWEBENCH_ROOT, "rev-parse", "HEAD")
     goal_plus_commit = (
         _git_value(GOAL_PLUS_ROOT, "rev-parse", "HEAD")
-        if profile["methods"][0] == "goal-plus-pi"
+        if profile["methods"][0] in {"goal-plus-codex", "goal-plus-pi"}
         else None
     )
     provider_contract = (
         dict(profile["agent_provider"])
         if profile.get("agent_provider") is not None
+        else {"auth_mode": "chatgpt"}
+        if profile["methods"][0] == "goal-plus-codex"
         else {
             "auth_mode": "provider-api",
             "provider": profile["model"].partition("/")[0],
@@ -180,7 +185,13 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
         "method": profile["methods"][0],
         "model": profile["model"],
         "reasoning_effort": profile["reasoning_effort"],
+        "seed": profile.get("seed", 1),
         "agent_provider": provider_contract,
+        "supplemental_evaluation_enabled": (
+            profile["goal_plus"]["supplemental_evaluation_enabled"]
+            if profile["methods"][0] in {"goal-plus-codex", "goal-plus-pi"}
+            else None
+        ),
         "state": "prepared",
         "task_file": str((cell_dir / "task.json").relative_to(destination)),
         "patch_file": str((cell_dir / "model.patch").relative_to(destination)),
@@ -199,11 +210,12 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
         "methods": profile["methods"],
         "model": profile["model"],
         "reasoning_effort": profile["reasoning_effort"],
+        "seed": profile.get("seed", 1),
         "agent_provider": provider_contract,
         "budget": {
             "wall_time_seconds": profile["wall_time_seconds"],
-            "live_search_concurrency": 1,
-            "cell_concurrency": 1,
+            "live_search_concurrency": profile["concurrency"],
+            "cell_concurrency": profile["cell_concurrency"],
             "attempts": 1,
         },
         "container_retention": {
@@ -268,6 +280,205 @@ def _docker_checked(command: list[str], *, timeout: int = 120) -> str:
 def _container_name(campaign_id: str, method: str) -> str:
     digest = hashlib.sha256(f"{campaign_id}:{method}".encode()).hexdigest()[:16]
     return f"bgp-swe-agent-{digest}"
+
+
+def _network_name(campaign_id: str) -> str:
+    digest = hashlib.sha256(campaign_id.encode()).hexdigest()[:16]
+    return f"bgp-swe-net-{digest}"
+
+
+@contextmanager
+def _agent_network(
+    campaign_id: str, profile: dict[str, Any]
+) -> Iterable[dict[str, Any]]:
+    policy = profile.get("agent_network_policy", "default")
+    if policy == "default":
+        yield {
+            "policy": "default",
+            "enforced": False,
+            "docker_internal": False,
+            "cleanup": {"attempted": False, "removed": None, "error": None},
+        }
+        return
+
+    name = _network_name(campaign_id)
+    network_id: str | None = None
+    metadata: dict[str, Any] = {
+        "policy": policy,
+        "enforced": False,
+        "name": name,
+        "id": None,
+        "docker_internal": None,
+        "gateway": None,
+        "cleanup": {"attempted": False, "removed": False, "error": None},
+    }
+    try:
+        network_id = _docker_checked(
+            [
+                "docker",
+                "network",
+                "create",
+                "--driver",
+                "bridge",
+                "--internal",
+                "--label",
+                "bench-goal-plus.owner=swe-bench-native",
+                "--label",
+                f"bench-goal-plus.campaign={campaign_id}",
+                name,
+            ]
+        )
+        inspected = json.loads(
+            _docker_checked(["docker", "network", "inspect", network_id])
+        )
+        network = inspected[0] if isinstance(inspected, list) and inspected else None
+        ipam = network.get("IPAM") if isinstance(network, dict) else None
+        configs = ipam.get("Config") if isinstance(ipam, dict) else None
+        gateway = (
+            configs[0].get("Gateway")
+            if isinstance(configs, list)
+            and configs
+            and isinstance(configs[0], dict)
+            else None
+        )
+        internal = network.get("Internal") if isinstance(network, dict) else None
+        if internal is not True or not isinstance(gateway, str) or not gateway:
+            raise SweBenchContractError(
+                "Docker did not create the required internal Agent network"
+            )
+        metadata.update(
+            {
+                "enforced": True,
+                "id": network_id,
+                "docker_internal": True,
+                "gateway": gateway,
+            }
+        )
+        yield metadata
+    finally:
+        if network_id is not None and profile["retain_containers"]:
+            metadata["cleanup"] = {
+                "attempted": False,
+                "removed": False,
+                "retained_with_agent_container": True,
+                "error": None,
+            }
+        elif network_id is not None:
+            try:
+                result = _run(["docker", "network", "rm", network_id], timeout=120)
+                removed = result.returncode == 0
+                metadata["cleanup"] = {
+                    "attempted": True,
+                    "removed": removed,
+                    "error": (
+                        result.stderr.strip()
+                        or result.stdout.strip()
+                        or "docker network rm failed"
+                    )
+                    if not removed
+                    else None,
+                }
+            except (OSError, subprocess.TimeoutExpired) as error:
+                metadata["cleanup"] = {
+                    "attempted": True,
+                    "removed": False,
+                    "error": f"{type(error).__name__}: {error}",
+                }
+
+
+_PUBLIC_EGRESS_PROBE = """
+import socket
+
+try:
+    connection = socket.create_connection(("1.1.1.1", 443), timeout=3)
+except OSError as error:
+    print("PUBLIC_EGRESS_BLOCKED", type(error).__name__)
+else:
+    connection.close()
+    raise SystemExit("PUBLIC_EGRESS_AVAILABLE")
+"""
+
+
+@contextmanager
+def _temporary_setup_egress(
+    container_id: str, network: dict[str, Any]
+) -> Iterable[dict[str, Any]]:
+    setup_egress = {
+        "required": network["policy"] != "default",
+        "network": None,
+        "connected": False,
+        "disconnected_before_agent": None,
+    }
+    network["setup_egress"] = setup_egress
+    if not setup_egress["required"]:
+        yield setup_egress
+        return
+
+    _docker_checked(["docker", "network", "connect", "bridge", container_id])
+    setup_egress.update({"network": "bridge", "connected": True})
+    try:
+        yield setup_egress
+    finally:
+        _docker_checked(
+            ["docker", "network", "disconnect", "bridge", container_id]
+        )
+        setup_egress["disconnected_before_agent"] = True
+
+
+def _verify_agent_network(
+    container_id: str, network: dict[str, Any]
+) -> dict[str, Any]:
+    if network["policy"] == "default":
+        return {
+            "passed": True,
+            "policy": "default",
+            "docker_network_mode": None,
+            "public_egress_probe": "not_required",
+        }
+    inspected = json.loads(_docker_checked(["docker", "inspect", container_id]))
+    container = inspected[0] if isinstance(inspected, list) and inspected else None
+    host_config = container.get("HostConfig") if isinstance(container, dict) else None
+    network_mode = (
+        host_config.get("NetworkMode") if isinstance(host_config, dict) else None
+    )
+    network_settings = (
+        container.get("NetworkSettings") if isinstance(container, dict) else None
+    )
+    attached = (
+        network_settings.get("Networks")
+        if isinstance(network_settings, dict)
+        else None
+    )
+    attached_networks = sorted(attached) if isinstance(attached, dict) else []
+    probe = _run(
+        ["docker", "exec", container_id, "python", "-c", _PUBLIC_EGRESS_PROBE],
+        timeout=15,
+    )
+    probe_passed = (
+        probe.returncode == 0 and "PUBLIC_EGRESS_BLOCKED" in probe.stdout
+    )
+    passed = (
+        network_mode == network["name"]
+        and attached_networks == [network["name"]]
+        and probe_passed
+    )
+    result = {
+        "passed": passed,
+        "policy": network["policy"],
+        "docker_network_mode": network_mode,
+        "expected_network_mode": network["name"],
+        "attached_networks": attached_networks,
+        "public_egress_probe": "blocked" if probe_passed else "available_or_failed",
+        "probe_returncode": probe.returncode,
+        "probe_stdout": probe.stdout.strip(),
+        "probe_stderr": probe.stderr.strip(),
+    }
+    if not passed:
+        raise SweBenchContractError(
+            "Agent public-egress isolation probe failed: "
+            + json.dumps(result, sort_keys=True)
+        )
+    return result
 
 
 def _dispose_agent_container(container_id: str, *, retain: bool) -> dict[str, Any]:
@@ -366,6 +577,8 @@ def _create_agent_container(
     campaign_id: str,
     profile: dict[str, Any],
     runtime: dict[str, Any] | None = None,
+    *,
+    network_name: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     method = profile["methods"][0]
     name = _container_name(campaign_id, method)
@@ -385,27 +598,47 @@ def _create_agent_container(
         "--tmpfs",
         "/opt/agent-tmp:rw,nosuid,nodev,size=256m",
     ]
-    if method == "plain-codex":
-        runtime = runtime or resolve_codex_runtime(profile)
+    if network_name is not None:
+        command.extend(["--network", network_name])
+    if method in {"plain-codex", "goal-plus-codex"}:
+        runtime = runtime or (
+            resolve_goal_plus_codex_runtime(profile)
+            if method == "goal-plus-codex"
+            else resolve_codex_runtime(profile)
+        )
         if (
             not runtime["archive_present"]
             or not runtime["credential_present"]
-            or not runtime["api_base_url"]
-            or not runtime.get("runtime_api_base_url")
+            or (
+                runtime.get("auth_mode") == "openai-compatible"
+                and (
+                    not runtime["api_base_url"]
+                    or not runtime.get("runtime_api_base_url")
+                )
+            )
         ):
             raise SweBenchContractError(
-                "Codex runtime archive or OpenAI-compatible provider is missing"
+                "Codex runtime archive or credential is missing"
             )
         command.extend(
             [
                 "--tmpfs",
-                "/opt/codex-home:rw,nosuid,nodev,size=32m",
+                CODEX_HOME_TMPFS,
                 "--tmpfs",
                 CODEX_RUNTIME_TMPFS,
                 "--mount",
                 f"type=bind,src={runtime['archive']},dst=/opt/runtime/codex.tgz,readonly",
             ]
         )
+        if method == "goal-plus-codex" and runtime["auth_mode"] == "chatgpt":
+            command.extend(
+                [
+                    "--mount",
+                    "type=bind,"
+                    f"src={runtime['auth_file']},"
+                    "dst=/opt/codex-home/auth.json,readonly",
+                ]
+            )
     else:
         runtime = runtime or (
             resolve_goal_plus_runtime(profile)
@@ -440,48 +673,66 @@ def _create_agent_container(
                     f"type=bind,src={models_file.parent},dst=/opt/pi-provider,readonly",
                 ]
             )
-        if method == "goal-plus-pi":
-            required_assets = (
-                "goal_plus_root",
-                "goal_plus_dependency_lock",
-                "goal_plus_visible_verifier",
-                "goal_plus_controller",
-                "goal_plus_pip_cache",
+    if method in {"goal-plus-codex", "goal-plus-pi"}:
+        required_assets = (
+            "goal_plus_root",
+            "goal_plus_dependency_lock",
+            "goal_plus_visible_verifier",
+            "goal_plus_controller",
+            "goal_plus_pip_cache",
+        )
+        if method == "goal-plus-pi" and runtime.get(
+            "goal_plus_evidence_annotator"
+        ) is not None:
+            required_assets = (*required_assets, "goal_plus_codex_archive")
+        missing = [
+            name
+            for name in required_assets
+            if not isinstance(runtime.get(name), Path) or not runtime[name].exists()
+        ]
+        if missing:
+            raise SweBenchContractError(
+                "Goal Plus container assets are missing: " + ", ".join(missing)
             )
-            missing = [
-                name
-                for name in required_assets
-                if not isinstance(runtime.get(name), Path)
-                or not runtime[name].exists()
+        command.extend(
+            [
+                "--tmpfs",
+                "/opt/goal-plus-runtime:rw,exec,nosuid,nodev,size=512m",
+                "--mount",
+                "type=bind,"
+                f"src={runtime['goal_plus_root']},"
+                "dst=/opt/goal-plus,readonly",
+                "--mount",
+                "type=bind,"
+                f"src={runtime['goal_plus_dependency_lock']},"
+                "dst=/opt/goal-plus-runtime-requirements.lock,readonly",
+                "--mount",
+                "type=bind,"
+                f"src={runtime['goal_plus_visible_verifier'].parent},"
+                "dst=/testbed/.goal-plus-verifiers,readonly",
+                "--mount",
+                "type=bind,"
+                f"src={runtime['goal_plus_controller']},"
+                "dst=/opt/swebench-goal-plus-controller.py,readonly",
+                "--mount",
+                "type=bind,"
+                f"src={runtime['goal_plus_pip_cache']},"
+                "dst=/opt/pip-cache",
             ]
-            if missing:
-                raise SweBenchContractError(
-                    "Goal Plus container assets are missing: " + ", ".join(missing)
-                )
+        )
+        if method == "goal-plus-pi" and runtime.get(
+            "goal_plus_evidence_annotator"
+        ) is not None:
             command.extend(
                 [
                     "--tmpfs",
-                    "/opt/goal-plus-runtime:rw,exec,nosuid,nodev,size=512m",
+                    CODEX_RUNTIME_TMPFS,
+                    "--tmpfs",
+                    CODEX_HOME_TMPFS,
                     "--mount",
                     "type=bind,"
-                    f"src={runtime['goal_plus_root']},"
-                    "dst=/opt/goal-plus,readonly",
-                    "--mount",
-                    "type=bind,"
-                    f"src={runtime['goal_plus_dependency_lock']},"
-                    "dst=/opt/goal-plus-runtime-requirements.lock,readonly",
-                    "--mount",
-                    "type=bind,"
-                    f"src={runtime['goal_plus_visible_verifier']},"
-                    "dst=/opt/swebench-visible-test-verifier.py,readonly",
-                    "--mount",
-                    "type=bind,"
-                    f"src={runtime['goal_plus_controller']},"
-                    "dst=/opt/swebench-goal-plus-controller.py,readonly",
-                    "--mount",
-                    "type=bind,"
-                    f"src={runtime['goal_plus_pip_cache']},"
-                    "dst=/opt/pip-cache",
+                    f"src={runtime['goal_plus_codex_archive']},"
+                    "dst=/opt/runtime/codex.tgz,readonly",
                 ]
             )
     if runtime is None:
@@ -495,7 +746,8 @@ def _create_agent_container(
 def _initialize_agent_container(
     container_id: str, profile: dict[str, Any], runtime: dict[str, Any]
 ) -> dict[str, Any]:
-    base_commit = profile["tasks"][0]["base_commit"]
+    task = profile["tasks"][0]
+    base_commit = task["base_commit"]
     observed = _docker_checked(
         ["docker", "exec", container_id, "git", "-C", "/testbed", "rev-parse", "HEAD"]
     )
@@ -523,16 +775,88 @@ def _initialize_agent_container(
             "HEAD^{tree}",
         ]
     )
+    image_setup_verification = None
     if observed_tree != base_tree:
-        raise SweBenchContractError(
-            "Agent image checkout tree does not match the dataset base commit: "
-            f"HEAD {observed} ({observed_tree}) vs {base_commit} ({base_tree})"
+        image_setup = task.get("image_setup")
+        setup_patch = _docker_checked(
+            [
+                "docker",
+                "exec",
+                container_id,
+                "git",
+                "-C",
+                "/testbed",
+                "diff",
+                "--binary",
+                f"{base_commit}..HEAD",
+            ]
         )
+        setup_files = _docker_checked(
+            [
+                "docker",
+                "exec",
+                container_id,
+                "git",
+                "-C",
+                "/testbed",
+                "diff",
+                "--name-only",
+                f"{base_commit}..HEAD",
+            ]
+        ).splitlines()
+        canonical_patch = setup_patch.rstrip("\n") + "\n" if setup_patch else ""
+        patch_sha256 = hashlib.sha256(canonical_patch.encode("utf-8")).hexdigest()
+        setup_valid = bool(
+            isinstance(image_setup, dict)
+            and observed == image_setup.get("head")
+            and observed_tree == image_setup.get("tree")
+            and patch_sha256 == image_setup.get("patch_sha256")
+            and setup_files == image_setup.get("files")
+        )
+        if not setup_valid:
+            raise SweBenchContractError(
+                "Agent image checkout tree does not match the dataset base commit or "
+                "the profile-frozen official image setup: "
+                f"HEAD {observed} ({observed_tree}) vs {base_commit} ({base_tree})"
+            )
+        _docker_checked(
+            [
+                "docker",
+                "exec",
+                container_id,
+                "git",
+                "-C",
+                "/testbed",
+                "merge-base",
+                "--is-ancestor",
+                base_commit,
+                "HEAD",
+            ]
+        )
+        image_setup_verification = {
+            "head": observed,
+            "tree": observed_tree,
+            "patch_sha256": patch_sha256,
+            "files": setup_files,
+            "provenance": image_setup["provenance"],
+            "passed": True,
+        }
     _docker_checked(
         ["docker", "exec", container_id, "git", "-C", "/testbed", "reset", "--hard", base_commit]
     )
     _docker_checked(
-        ["docker", "exec", container_id, "git", "-C", "/testbed", "clean", "-fdx"]
+        [
+            "docker",
+            "exec",
+            container_id,
+            "git",
+            "-C",
+            "/testbed",
+            "clean",
+            "-fdx",
+            "-e",
+            ".goal-plus-verifiers/",
+        ]
     )
     if isinstance(runtime.get("models_file"), Path):
         _docker_checked(
@@ -546,7 +870,8 @@ def _initialize_agent_container(
                 "cp /opt/pi-provider/models.json /opt/pi-home/.pi/agent/models.json",
             ]
         )
-    if profile["methods"][0] == "plain-codex":
+    method = profile["methods"][0]
+    if method in {"plain-codex", "goal-plus-codex"}:
         _docker_checked(
             [
                 "docker",
@@ -558,24 +883,9 @@ def _initialize_agent_container(
             ],
             timeout=120,
         )
-    elif profile["methods"][0] == "goal-plus-pi":
-        environment = goal_plus_runtime_environment()
-        install_command = ["docker", "exec"]
-        for name, value in environment.items():
-            install_command.extend(["-e", f"{name}={value}"])
-        if os.environ.get("PIP_INDEX_URL"):
-            install_command.extend(["-e", "PIP_INDEX_URL"])
-        install_command.extend(
-            [
-                container_id,
-                "sh",
-                "-lc",
-                goal_plus_install_script()
-                + " && python -c \"import fastmcp, goal_plus, plotly, pydantic\""
-                + " && pi --version",
-            ]
-        )
-        _docker_checked(install_command, timeout=600)
+    elif method == "goal-plus-pi" and runtime.get(
+        "goal_plus_evidence_annotator"
+    ) is not None:
         _docker_checked(
             [
                 "docker",
@@ -583,22 +893,83 @@ def _initialize_agent_container(
                 container_id,
                 "sh",
                 "-lc",
-                "mkdir -p /testbed/.goal-plus-verifiers && "
-                "printf '\\n.gp/\\n.goal-plus-verifiers/\\n' "
-                ">> /testbed/.git/info/exclude && "
-                "cp /opt/swebench-visible-test-verifier.py "
-                "/testbed/.goal-plus-verifiers/visible_test_verifier.py && "
-                "chmod 0555 "
-                "/testbed/.goal-plus-verifiers/visible_test_verifier.py",
+                "mkdir -p /opt/codex && "
+                "tar -xzf /opt/runtime/codex.tgz -C /opt/codex",
+            ],
+            timeout=120,
+        )
+    if method in {"goal-plus-codex", "goal-plus-pi"}:
+        environment = goal_plus_runtime_environment()
+        install_command = ["docker", "exec"]
+        for name, value in environment.items():
+            install_command.extend(["-e", f"{name}={value}"])
+        if os.environ.get("PIP_INDEX_URL"):
+            install_command.extend(["-e", "PIP_INDEX_URL"])
+        install_script = goal_plus_install_script(
+            include_pi=method == "goal-plus-pi"
+        )
+        if runtime.get("goal_plus_evidence_annotator") is not None:
+            install_script += (
+                " && ln -sf "
+                "/opt/codex/package/vendor/x86_64-unknown-linux-musl/bin/codex "
+                "/opt/goal-plus-bin/codex"
+            )
+        version_probe = (
+            "pi --version" if method == "goal-plus-pi" else "codex --version"
+        )
+        install_command.extend(
+            [
+                container_id,
+                "sh",
+                "-lc",
+                install_script
+                + " && python -c \"import fastmcp, goal_plus, plotly, pydantic\""
+                + f" && {version_probe}",
             ]
         )
+        _docker_checked(install_command, timeout=600)
+        asset_copy = (
+            "cp -a /opt/goal-plus/.codex /testbed/.codex && "
+            if method == "goal-plus-codex"
+            else ""
+        )
+        _docker_checked(
+            [
+                "docker",
+                "exec",
+                container_id,
+                "sh",
+                "-lc",
+                asset_copy
+                + "printf '\\n.gp/\\n.codex/\\n.goal-plus-verifiers/\\n' "
+                ">> /testbed/.git/info/exclude",
+            ]
+        )
+        observed_verifier = _docker_checked(
+            [
+                "docker",
+                "exec",
+                container_id,
+                "sha256sum",
+                "/testbed/.goal-plus-verifiers/visible_test_verifier.py",
+            ]
+        ).split()
+        expected_verifier = hashlib.sha256(
+            runtime["goal_plus_visible_verifier"].read_bytes()
+        ).hexdigest()
+        if not observed_verifier or observed_verifier[0] != expected_verifier:
+            raise SweBenchContractError(
+                "read-only visible verifier mount does not match the controller asset"
+            )
     return {
         "observed_head": observed,
         "base_commit": base_commit,
         "base_tree": base_tree,
         "observed_tree": observed_tree,
         "synthetic_head": observed != base_commit,
-        "goal_plus_initialized": profile["methods"][0] == "goal-plus-pi",
+        "image_setup": image_setup_verification,
+        "goal_plus_initialized": profile["methods"][0]
+        in {"goal-plus-codex", "goal-plus-pi"},
     }
 
 
@@ -624,6 +995,45 @@ def build_goal_plus_prompt(task: dict[str, Any], profile: dict[str, Any]) -> str
             "Agent task unexpectedly contains hidden fields: " + ", ".join(sorted(hidden))
         )
     goal_plus = profile["goal_plus"]
+    annotator = goal_plus["evidence_annotator"]
+    annotator_timeout = (
+        annotator["timeout_seconds"] if isinstance(annotator, dict) else 300
+    )
+    codex_host = profile["methods"][0] == "goal-plus-codex"
+    worker_host = "codex" if codex_host else "pi-rpc"
+    if codex_host and profile["concurrency"] > 1:
+        worker_instruction = (
+            "Keep each candidate on its existing bound Codex worker session; "
+            "do not create replacement lanes."
+        )
+    elif codex_host:
+        worker_instruction = (
+            "Use the bound Codex worker session; do not create replacement lanes."
+        )
+    else:
+        worker_instruction = (
+            "Continue the same bound Pi worker session; do not create replacement lanes."
+        )
+    minimum_budget_instruction = ""
+    if "worker_min_runtime_seconds" in goal_plus:
+        minimum_budget_instruction = (
+            "Set strategy.worker_budget.min_runtime_seconds="
+            f"{goal_plus['worker_min_runtime_seconds']} and "
+            "strategy.worker_budget.min_verifier_runs="
+            f"{goal_plus['worker_min_verifier_runs']}. These are lower-bound search "
+            "gates: keep the same worker active until both are satisfied. "
+        )
+    if profile["concurrency"] == 1:
+        candidate_instruction = "Use one fixed initial candidate. "
+    else:
+        candidate_instruction = (
+            f"Use exactly {profile['concurrency']} fixed initial candidates with "
+            "distinct public-evidence-based hypotheses. Start them together in one "
+            "batch and bind exactly one worker session to each candidate; do not "
+            "serialize or create replacement lanes. After both candidates have "
+            "settled Evidence, keep searching so at least one worker reads a completed "
+            "peer supplemental View before its next verifier attempt. "
+        )
     return (
         "/goal-plus mode=autonomous Solve the public repository issue below in "
         "/testbed. Treat this as verifier-guided code repair and enter Search Mode. "
@@ -632,27 +1042,131 @@ def build_goal_plus_prompt(task: dict[str, Any], profile: dict[str, Any]) -> str
         "after this Goal Plus session.\n\n"
         "Freeze exactly one SearchSpec discovered from the public issue and repository. "
         "Use source_path=/testbed, metric_name=visible_test_score, direction=maximize, "
-        "strategy.name=random, strategy.worker_host=pi-rpc, and "
+        f"strategy.name=random, strategy.worker_host={worker_host}, and "
         "strategy.orchestration_mode=parallel_loops. Set budget.max_parallel="
         f"{profile['concurrency']} and do not set the deprecated max_candidates field. "
         "Set strategy.worker_budget.max_runtime_seconds="
-        f"{goal_plus['worker_runtime_seconds']} and "
+        f"{goal_plus['worker_runtime_seconds']}. "
+        f"{minimum_budget_instruction}"
+        "Set "
         "strategy.config.closeout_reserve_seconds="
-        f"{goal_plus['closeout_reserve_seconds']}. Use one fixed initial candidate and "
-        "continue the same bound Pi worker session; do not create replacement lanes.\n\n"
+        f"{goal_plus['closeout_reserve_seconds']} and strategy.config.seed="
+        f"{profile.get('seed', 1)}. {candidate_instruction}"
+        "Set strategy.evidence_annotator.host=codex and "
+        "strategy.evidence_annotator.timeout_seconds="
+        f"{annotator_timeout}; "
+        "leave its model and provider unset because the harness supplies the ViewAgent. "
+        f"{worker_instruction}\n\n"
+        "Do not add acceptance_view, a soft rubric, or predefined evaluation dimensions "
+        "to SearchSpec. The harness may enable an independent ViewAgent after each "
+        "verifier-settled Evidence commit; it derives open-ended, task-specific observations "
+        "from the actual cumulative diff and an immutable snapshot of other candidates' "
+        "settled hard-score incumbents. Those observations are non-gating, do not choose a "
+        "winner, and never change candidate settlement or the official binary result.\n\n"
         "Choose a focused visible test command using only the public issue and repository. "
-        "Both process and promotion ranking verifiers must invoke the materialized "
-        "artifact /testbed/.goal-plus-verifiers/visible_test_verifier.py with cwd=/testbed "
-        "and the candidate-relative command: "
-        "python .goal-plus-verifiers/visible_test_verifier.py "
+        "Before freeze, inspect the repository's native test instructions and confirm the "
+        "chosen runner and imports exist in the task image. A command that fails because "
+        "pytest, a plugin, or another dependency is unavailable is an invalid verifier; "
+        "use the repository-native runner or a focused Python assertion that works in the "
+        "existing environment. When translating public tests into a focused assertion, "
+        "cover both the reported failure and adjacent existing assertions for the same "
+        "API or branch. First write a public behavior inventory covering the reported "
+        "failure, compatibility obligations evidenced by the current implementation or "
+        "tests, and nearby branches that distinguish a narrow patch from a robust repair. "
+        "Make the underlying visible command fail on the unfixed target behavior and pass "
+        "only when every runnable item in that inventory passes. Avoid a single substring, "
+        "single return value, or happy-path-only assertion when the repository exposes a "
+        "more structured or precise public contract. Preserve existing assertions "
+        "byte-for-byte where practical, "
+        "and do not turn wording, formatting, or behavior that the public issue leaves "
+        "ambiguous into a stricter hard requirement. Prefer the repository's established "
+        "diagnostic form unless the issue explicitly requires an exact replacement. "
+        "Include both implementation files and the relevant existing test files in "
+        "edit_surface when a regression test is an appropriate repair artifact; do not "
+        "exclude tests merely to minimize the edit surface. Added tests remain candidate "
+        "artifacts and must not redefine or weaken the frozen verifier. Do not edit public "
+        "tests merely to make a candidate pass the focused verifier. "
+        "Do not install packages or access the network. "
+        "Freeze exactly one process_verifiers entry with role=ranking_signal and "
+        "one separate promotion_verifiers entry with role=promotion_gate. Never put "
+        "the promotion gate in process_verifiers. Both entries must directly invoke the "
+        "materialized artifact /testbed/.goal-plus-verifiers/visible_test_verifier.py "
+        "which is benchmark-owned and read-only; never create, copy, replace, chmod, "
+        "or otherwise modify it. Set cwd=/testbed. The ranking command must use: "
+        "python .goal-plus-verifiers/visible_test_verifier.py --ranking-signal "
         f"--timeout-seconds {goal_plus['visible_verifier_timeout_seconds']} -- "
-        "<your visible test command>. Include that wrapper path in verifier_artifacts. "
+        "<your visible test command>. This permits a legitimate failing baseline to emit "
+        "visible_test_score=0 while freeze preflight still succeeds. The promotion command "
+        "must use the same candidate-relative command without --ranking-signal so a failing "
+        "test exits nonzero and blocks promotion. Do not put either invocation inside an "
+        "outer shell, Python subprocess normalizer, or other exit-code suppressor. Before "
+        "freeze, run the underlying visible command directly and confirm any failure is the "
+        "target behavior rather than a missing runner, import, plugin, or dependency. "
+        "Include that wrapper path in verifier_artifacts. "
         "Keep .gp and .goal-plus-verifiers outside the editable artifact surface. "
         "After worker completion, close the pool, select and promote verifier-backed "
         "Evidence, apply the promotion patch to /testbed, record the Search result, "
         "and finish the Goal Plus record.\n\n"
         f"Public issue:\n{task['problem_statement']}\n"
     )
+
+
+def _goal_plus_supplemental_evaluation_environment(
+    profile: dict[str, Any],
+) -> dict[str, str]:
+    enabled = bool(profile["goal_plus"]["supplemental_evaluation_enabled"])
+    return {
+        "GOAL_PLUS_SUPPLEMENTAL_EVALUATION_ENABLED": "1" if enabled else "0",
+        "GOAL_PLUS_SUPPLEMENTAL_EVALUATION_REQUIRED": "1" if enabled else "0",
+    }
+
+
+def _goal_plus_evidence_annotator_environment(
+    profile: dict[str, Any], runtime: dict[str, Any]
+) -> dict[str, str]:
+    annotator = profile["goal_plus"]["evidence_annotator"]
+    if annotator == "disabled":
+        return {"GOAL_PLUS_EVIDENCE_ANNOTATOR_DISABLED": "1"}
+    environment = {
+        "CODEX_HOME": "/opt/codex-home",
+        "GOAL_PLUS_EVIDENCE_ANNOTATOR_DISABLED": "0",
+        "GOAL_PLUS_EVIDENCE_ANNOTATOR_MODEL": str(annotator["model"]),
+        "GOAL_PLUS_EVIDENCE_ANNOTATOR_REASONING_EFFORT": str(
+            annotator["reasoning_effort"]
+        ),
+    }
+    provider = profile.get("agent_provider")
+    if provider is None:
+        return environment
+    environment.update(
+        {
+            "GOAL_PLUS_EVIDENCE_ANNOTATOR_BASE_URL": str(
+                runtime["runtime_api_base_url"]
+            ),
+            "GOAL_PLUS_EVIDENCE_ANNOTATOR_PROVIDER_ID": str(provider["id"]),
+            "GOAL_PLUS_EVIDENCE_ANNOTATOR_PROVIDER_NAME": str(provider["name"]),
+            "GOAL_PLUS_EVIDENCE_ANNOTATOR_API_KEY_ENV": str(
+                provider["api_key_env"]
+            ),
+            "GOAL_PLUS_EVIDENCE_ANNOTATOR_WIRE_API": str(provider["wire_api"]),
+        }
+    )
+    return environment
+
+
+def _goal_plus_evidence_annotator_public(profile: dict[str, Any]) -> Any:
+    annotator = profile["goal_plus"]["evidence_annotator"]
+    if annotator == "disabled":
+        return "disabled"
+    provider = profile.get("agent_provider")
+    return {
+        "kind": "codex",
+        "model": annotator["model"],
+        "reasoning_effort": annotator["reasoning_effort"],
+        "timeout_seconds": annotator["timeout_seconds"],
+        "provider_id": provider["id"] if provider else "chatgpt",
+        "wire_api": provider["wire_api"] if provider else "native-codex",
+    }
 
 
 def _agent_command(
@@ -669,6 +1183,88 @@ def _agent_command(
         "-e",
         "TEMP=/opt/agent-tmp",
     ]
+    if profile.get("agent_network_policy") == "public-egress-blocked":
+        proxy = "http://127.0.0.1:9"
+        no_proxy = str(runtime.get("bridge_host") or "")
+        for name, value in (
+            ("HTTP_PROXY", proxy),
+            ("HTTPS_PROXY", proxy),
+            ("ALL_PROXY", proxy),
+            ("http_proxy", proxy),
+            ("https_proxy", proxy),
+            ("all_proxy", proxy),
+            ("NO_PROXY", no_proxy),
+            ("no_proxy", no_proxy),
+        ):
+            common.extend(["-e", f"{name}={value}"])
+    if profile["methods"][0] == "goal-plus-codex":
+        custom_provider = profile.get("agent_provider") is not None
+        goal_plus_environment = {
+            **goal_plus_runtime_environment(),
+            **_goal_plus_supplemental_evaluation_environment(profile),
+            **_goal_plus_evidence_annotator_environment(profile, runtime),
+            "HOME": "/opt/codex-home",
+            "CODEX_HOME": "/opt/codex-home",
+            "GOAL_PLUS_ROOT": "/testbed/.gp",
+            "GOAL_PLUS_SEARCH_ROOT": "/testbed/.gp",
+            "GOAL_PLUS_SOURCE_PATH": "/opt/goal-plus",
+            "GOAL_PLUS_OUTER_DEADLINE_AT": str(runtime["outer_deadline_at"]),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        command = [*common]
+        for name, value in goal_plus_environment.items():
+            command.extend(["-e", f"{name}={value}"])
+        provider_args: list[str] = []
+        if custom_provider:
+            command.extend(["-e", str(runtime["api_key_env"])])
+            if runtime.get("bridge_host"):
+                command.extend(
+                    [
+                        "-e",
+                        f"NO_PROXY={runtime['bridge_host']}",
+                        "-e",
+                        f"no_proxy={runtime['bridge_host']}",
+                    ]
+                )
+            provider_args = codex_responses_provider_args(
+                str(runtime["runtime_api_base_url"]),
+                provider_id=str(runtime["provider_id"]),
+                provider_name=str(runtime["provider_name"]),
+                api_key_env=str(runtime["api_key_env"]),
+            )
+        command.extend(
+            [
+                container_id,
+                "sh",
+                "-lc",
+                'export PATH=/opt/goal-plus-bin:$PATH; exec "$@"',
+                "swe-bench-goal-plus-codex",
+                "/opt/codex/package/vendor/x86_64-unknown-linux-musl/bin/codex",
+                "exec",
+                "--json",
+                "--color",
+                "never",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--dangerously-bypass-hook-trust",
+                *provider_args,
+                "--config",
+                f'model_reasoning_effort="{profile["reasoning_effort"]}"',
+                "--config",
+                'mcp_servers.goal-plus.command="/opt/goal-plus-bin/goal-plus"',
+                "--config",
+                'mcp_servers.goal-plus.args=["--root", ".gp"]',
+                "--config",
+                "mcp_servers.goal-plus.startup_timeout_sec=10",
+                "--config",
+                "mcp_servers.goal-plus.tool_timeout_sec=300",
+                "-C",
+                "/testbed",
+                "-m",
+                profile["model"],
+                "-",
+            ]
+        )
+        return command
     if profile["methods"][0] == "plain-codex":
         provider_args = codex_responses_provider_args(
             str(runtime["runtime_api_base_url"]),
@@ -718,13 +1314,14 @@ def _agent_command(
     if profile["methods"][0] == "goal-plus-pi":
         goal_plus_environment = {
             **goal_plus_runtime_environment(),
+            **_goal_plus_supplemental_evaluation_environment(profile),
+            **_goal_plus_evidence_annotator_environment(profile, runtime),
             "HOME": "/opt/pi-home",
             "PI_CODING_AGENT_DIR": "/opt/pi-home/.pi/agent",
             "GOAL_PLUS_ROOT": "/testbed/.gp",
             "GOAL_PLUS_SEARCH_ROOT": "/testbed/.gp",
             "GOAL_PLUS_SOURCE_PATH": "/opt/goal-plus",
             "GOAL_PLUS_PI_MODEL": profile["model"],
-            "GOAL_PLUS_EVIDENCE_ANNOTATOR_DISABLED": "1",
             "GOAL_PLUS_OUTER_DEADLINE_AT": str(runtime["outer_deadline_at"]),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
@@ -868,21 +1465,42 @@ def _goal_plus_closeout(
     profile: dict[str, Any],
     runtime: dict[str, Any],
 ) -> dict[str, Any]:
+    is_pi = profile["methods"][0] == "goal-plus-pi"
+    annotator = profile["goal_plus"]["evidence_annotator"]
+    annotator_timeout = (
+        int(annotator["timeout_seconds"]) if isinstance(annotator, dict) else 0
+    )
     environment = {
         **goal_plus_runtime_environment(),
-        "HOME": "/opt/pi-home",
-        "PI_CODING_AGENT_DIR": "/opt/pi-home/.pi/agent",
+        **_goal_plus_supplemental_evaluation_environment(profile),
+        **_goal_plus_evidence_annotator_environment(profile, runtime),
+        "HOME": "/opt/pi-home" if is_pi else "/opt/codex-home",
+        "PATH": "/opt/goal-plus-bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "GOAL_PLUS_ROOT": "/testbed/.gp",
         "GOAL_PLUS_SEARCH_ROOT": "/testbed/.gp",
         "GOAL_PLUS_SOURCE_PATH": "/opt/goal-plus",
-        "GOAL_PLUS_PI_MODEL": profile["model"],
-        "GOAL_PLUS_EVIDENCE_ANNOTATOR_DISABLED": "1",
         "GOAL_PLUS_OUTER_DEADLINE_AT": str(runtime["outer_deadline_at"]),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    if is_pi:
+        environment["PI_CODING_AGENT_DIR"] = "/opt/pi-home/.pi/agent"
+        environment["GOAL_PLUS_PI_MODEL"] = profile["model"]
     command = ["docker", "exec"]
     for name, value in environment.items():
         command.extend(["-e", f"{name}={value}"])
+    if is_pi:
+        command.extend(["-e", str(runtime["credential_env"])])
+    elif profile.get("agent_provider") is not None:
+        command.extend(["-e", str(runtime["api_key_env"])])
+        if runtime.get("bridge_host"):
+            command.extend(
+                [
+                    "-e",
+                    f"NO_PROXY={runtime['bridge_host']}",
+                    "-e",
+                    f"no_proxy={runtime['bridge_host']}",
+                ]
+            )
     command.extend(
         [
             container_id,
@@ -900,6 +1518,7 @@ def _goal_plus_closeout(
         600,
         profile["goal_plus"]["closeout_reserve_seconds"]
         + profile["goal_plus"]["visible_verifier_timeout_seconds"]
+        + annotator_timeout
         + 120,
     )
     try:
@@ -975,6 +1594,21 @@ def _export_goal_plus_state(
         expected_visible_verifier_timeout_seconds=profile["goal_plus"][
             "visible_verifier_timeout_seconds"
         ],
+        expected_worker_min_runtime_seconds=profile["goal_plus"].get(
+            "worker_min_runtime_seconds"
+        ),
+        expected_worker_min_verifier_runs=profile["goal_plus"].get(
+            "worker_min_verifier_runs"
+        ),
+        expected_supplemental_evaluation_enabled=profile["goal_plus"][
+            "supplemental_evaluation_enabled"
+        ],
+        expected_evidence_annotator_enabled=isinstance(
+            profile["goal_plus"]["evidence_annotator"], dict
+        ),
+        expected_worker_host=(
+            "codex" if profile["methods"][0] == "goal-plus-codex" else "pi-rpc"
+        ),
     )
     record_completion_check(
         state,
@@ -995,6 +1629,41 @@ def _export_goal_plus_state(
     }
 
 
+def _container_responses_probe_with_retry(
+    container_id: str,
+    runtime: dict[str, Any],
+    *,
+    model: str,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    result: dict[str, Any] = {"passed": False, "http_status": None}
+    for attempt in range(1, max_attempts + 1):
+        result = codex_container_responses_probe(
+            container_id,
+            runtime,
+            model=model,
+            existing_container=True,
+        )
+        attempts.append({"attempt": attempt, **result})
+        if result.get("passed") is True:
+            break
+        status = result.get("http_status")
+        retryable = (
+            status is None
+            or status in {408, 425, 429}
+            or (isinstance(status, int) and 500 <= status <= 599)
+        )
+        if not retryable or attempt == max_attempts:
+            break
+        time.sleep(float(attempt))
+    return {
+        **result,
+        "attempt_count": len(attempts),
+        "attempts": attempts,
+    }
+
+
 def _run_agent(
     campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1003,7 +1672,7 @@ def _run_agent(
     task = read_json(campaign / cell["task_file"])
     prompt = (
         build_goal_plus_prompt(task, profile)
-        if method == "goal-plus-pi"
+        if method in {"goal-plus-codex", "goal-plus-pi"}
         else build_agent_prompt(task)
     )
     cell_dir = (campaign / cell["task_file"]).parent
@@ -1036,9 +1705,19 @@ def _run_agent(
     agent_error: str | None = None
     resources = ExitStack()
     try:
+        network = resources.enter_context(
+            _agent_network(manifest["campaign_id"], profile)
+        )
+        bridge_listen_host = (
+            str(network["gateway"]) if network.get("enforced") else None
+        )
         if method == "plain-codex":
             runtime = resources.enter_context(
-                routed_codex_runtime(profile, campaign)
+                routed_codex_runtime(
+                    profile,
+                    campaign,
+                    bridge_listen_host=bridge_listen_host,
+                )
             )
             host_probe = openai_responses_probe(
                 str(runtime["runtime_api_base_url"]),
@@ -1049,6 +1728,27 @@ def _run_agent(
                 raise SweBenchContractError(
                     "OpenAI-compatible Responses probe failed through the runtime route"
                 )
+        elif method == "goal-plus-codex":
+            if profile.get("agent_provider") is not None:
+                runtime = resources.enter_context(
+                    routed_goal_plus_codex_runtime(
+                        profile,
+                        campaign,
+                        bridge_listen_host=bridge_listen_host,
+                    )
+                )
+                host_probe = openai_responses_probe(
+                    str(runtime["runtime_api_base_url"]),
+                    api_key_env=str(runtime["api_key_env"]),
+                    model=str(profile["model"]),
+                )
+                if not host_probe["passed"]:
+                    raise SweBenchContractError(
+                        "Goal Plus Codex Responses probe failed through the runtime route"
+                    )
+            else:
+                runtime = resolve_goal_plus_codex_runtime(profile)
+                host_probe = None
         else:
             if profile.get("agent_provider") is not None:
                 runtime = resources.enter_context(
@@ -1056,6 +1756,7 @@ def _run_agent(
                         profile,
                         campaign,
                         goal_plus=method == "goal-plus-pi",
+                        bridge_listen_host=bridge_listen_host,
                     )
                 )
                 host_probe = openai_responses_probe(
@@ -1074,8 +1775,18 @@ def _run_agent(
                     else resolve_pi_runtime(profile)
                 )
                 host_probe = None
+        if network.get("enforced") and runtime.get("bridge") is None:
+            raise SweBenchContractError(
+                "public-egress-blocked requires a loopback provider endpoint "
+                "routed through the internal-network gateway"
+            )
         container_id, runtime = _create_agent_container(
-            manifest["campaign_id"], profile, runtime
+            manifest["campaign_id"],
+            profile,
+            runtime,
+            network_name=(
+                str(network["name"]) if network.get("enforced") else None
+            ),
         )
         cell["agent"] = {
             "state": "running",
@@ -1109,6 +1820,45 @@ def _run_agent(
                 ),
                 "host_responses_probe": host_probe,
             }
+        elif method == "goal-plus-codex":
+            runtime_public = {
+                "kind": (
+                    "goal-plus-codex-openai-compatible-responses"
+                    if profile.get("agent_provider") is not None
+                    else "goal-plus-codex-chatgpt"
+                ),
+                "archive": str(runtime["archive"]),
+                "auth_mode": runtime["auth_mode"],
+                "goal_plus_root": str(runtime["goal_plus_root"]),
+                "goal_plus_commit": manifest["source"].get("goal_plus_commit"),
+                "dependency_lock": str(runtime["goal_plus_dependency_lock"]),
+                "visible_verifier": str(runtime["goal_plus_visible_verifier"]),
+                "controller": str(runtime["goal_plus_controller"]),
+                "pip_cache": str(runtime["goal_plus_pip_cache"]),
+                "evidence_annotator": _goal_plus_evidence_annotator_public(profile),
+                "credentials_persisted": False,
+            }
+            if profile.get("agent_provider") is not None:
+                runtime_public.update(
+                    {
+                        "provider": runtime["provider_id"],
+                        "wire_api": runtime["wire_api"],
+                        "base_url_env": runtime["base_url_env"],
+                        "api_key_env": runtime["api_key_env"],
+                        "api_base_url": runtime["api_base_url"],
+                        "runtime_api_base_url": runtime["runtime_api_base_url"],
+                        "bridge": (
+                            {
+                                key: value
+                                for key, value in runtime["bridge"].items()
+                                if key != "pid"
+                            }
+                            if runtime["bridge"]
+                            else None
+                        ),
+                        "host_responses_probe": host_probe,
+                    }
+                )
         else:
             runtime_public = {
                 "kind": (
@@ -1159,28 +1909,52 @@ def _run_agent(
                         ),
                         "controller": str(runtime["goal_plus_controller"]),
                         "pip_cache": str(runtime["goal_plus_pip_cache"]),
-                        "evidence_annotator": "disabled",
+                        "evidence_annotator": _goal_plus_evidence_annotator_public(
+                            profile
+                        ),
+                        "codex_archive": (
+                            str(runtime["goal_plus_codex_archive"])
+                            if runtime.get("goal_plus_evidence_annotator") is not None
+                            else None
+                        ),
                     }
                 )
-        image_checkout = _initialize_agent_container(container_id, profile, runtime)
+        runtime_public["agent_network"] = network
+        with _temporary_setup_egress(container_id, network):
+            image_checkout = _initialize_agent_container(
+                container_id, profile, runtime
+            )
+        network["verification"] = _verify_agent_network(container_id, network)
         if method == "plain-codex":
-            container_probe = codex_container_responses_probe(
+            container_probe = _container_responses_probe_with_retry(
                 container_id,
                 runtime,
                 model=str(profile["model"]),
-                existing_container=True,
             )
             runtime_public["container_responses_probe"] = container_probe
             if not container_probe["passed"]:
                 raise SweBenchContractError(
                     "OpenAI-compatible Responses probe failed in the Agent container"
                 )
-        elif runtime.get("custom_provider"):
-            container_probe = codex_container_responses_probe(
+        elif (
+            method == "goal-plus-codex"
+            and profile.get("agent_provider") is not None
+        ):
+            container_probe = _container_responses_probe_with_retry(
+                container_id,
+                runtime,
+                model=str(profile["model"]),
+            )
+            runtime_public["container_responses_probe"] = container_probe
+            if not container_probe["passed"]:
+                raise SweBenchContractError(
+                    "Goal Plus Codex Responses probe failed in the Agent container"
+                )
+        elif method != "goal-plus-codex" and runtime.get("custom_provider"):
+            container_probe = _container_responses_probe_with_retry(
                 container_id,
                 runtime,
                 model=str(runtime["model_id"]),
-                existing_container=True,
             )
             runtime_public["container_responses_probe"] = container_probe
             if not container_probe["passed"]:
@@ -1188,7 +1962,7 @@ def _run_agent(
                     "Pi OpenAI-compatible Responses probe failed in the Agent container"
                 )
         setup_runtime_seconds = time.monotonic() - started
-        if method == "goal-plus-pi":
+        if method in {"goal-plus-codex", "goal-plus-pi"}:
             runtime["outer_deadline_at"] = (
                 datetime.now(timezone.utc)
                 + timedelta(seconds=profile["wall_time_seconds"])
@@ -1219,11 +1993,26 @@ def _run_agent(
             stderr = _text(error.stderr)
             timed_out = True
             trajectory_runtime_seconds = time.monotonic() - trajectory_started
-            _docker_checked(["docker", "stop", "--time", "10", container_id], timeout=30)
-            _docker_checked(["docker", "start", container_id], timeout=30)
+            if method == "goal-plus-codex":
+                _docker_checked(
+                    [
+                        "docker",
+                        "exec",
+                        container_id,
+                        "sh",
+                        "-lc",
+                        "pkill -TERM -x codex 2>/dev/null || true",
+                    ],
+                    timeout=30,
+                )
+            else:
+                _docker_checked(
+                    ["docker", "stop", "--time", "10", container_id], timeout=30
+                )
+                _docker_checked(["docker", "start", container_id], timeout=30)
 
         finalization_started = time.monotonic()
-        if method == "goal-plus-pi":
+        if method in {"goal-plus-codex", "goal-plus-pi"}:
             goal_plus_closeout = _goal_plus_closeout(container_id, profile, runtime)
             goal_plus_state = _export_goal_plus_state(
                 container_id,
@@ -1239,10 +2028,13 @@ def _run_agent(
             )
             record_completion_check(
                 goal_plus_state,
-                "evidence_annotator_disabled",
-                expected="disabled",
+                "evidence_annotator_runtime",
+                expected=_goal_plus_evidence_annotator_public(profile),
                 actual=runtime_public.get("evidence_annotator"),
-                passed=runtime_public.get("evidence_annotator") == "disabled",
+                passed=(
+                    runtime_public.get("evidence_annotator")
+                    == _goal_plus_evidence_annotator_public(profile)
+                ),
             )
         _docker_checked(
             ["docker", "exec", container_id, "git", "-C", "/testbed", "add", "-N", "."]
@@ -1300,8 +2092,11 @@ def _run_agent(
             }
             if agent_error:
                 cell["agent"]["error"] = agent_error
-            _save_manifest(campaign, manifest)
         resources.close()
+        if container_id:
+            if runtime_public:
+                cell["agent"]["runtime"] = runtime_public
+            _save_manifest(campaign, manifest)
 
     (cell_dir / "agent-events.jsonl").write_text(stdout, encoding="utf-8")
     (cell_dir / "agent-stderr.txt").write_text(stderr, encoding="utf-8")
@@ -1321,7 +2116,7 @@ def _run_agent(
         patch_exists
         and (
             goal_plus_complete
-            if method == "goal-plus-pi"
+            if method in {"goal-plus-codex", "goal-plus-pi"}
             else returncode == 0
         )
     )
@@ -1513,7 +2308,7 @@ def execute_campaign(campaign: Path) -> int:
             cell["evaluation"] = _official_evaluation(campaign, manifest, cell)
         goal_plus_completion = (
             ((cell["agent"].get("goal_plus") or {}).get("completion") or {})
-            if cell.get("method") == "goal-plus-pi"
+            if cell.get("method") in {"goal-plus-codex", "goal-plus-pi"}
             else {"passed": True, "reason": None}
         )
         score_complete = cell["evaluation"].get("state") == "completed"

@@ -194,8 +194,9 @@ PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 The current target has external image provisioning. If the exact task image is absent, report the
 missing tag and stop; do not automatically pull, retag a substitute, or mutate another user's image.
 The Codex runtime archive and Pi Node/package installations may be mounted read-only from the selected
-host environment. SWE Plain Codex does not mount OAuth: its profile freezes `OPENAI_BASE_URL`,
-`OPENAI_API_KEY`, and Responses. When the base URL is loopback, the Linux host must provide `ip`
+host environment. SWE Plain/Goal Plus Codex does not mount OAuth: its profile freezes
+`OPENAI_BASE_URL`, `OPENAI_API_KEY`, and Responses. When the base URL is loopback, the Linux host
+must provide `ip`
 (`iproute2`/`iproute`) plus `systemd-socket-activate` and `systemd-socket-proxyd` (`systemd`); use the
 distribution packages documented in `host-auth.md`. Doctor must verify host and task-container
 `POST /responses` for the exact model. A `chatgpt.com` request is a fail-closed provider-routing error.

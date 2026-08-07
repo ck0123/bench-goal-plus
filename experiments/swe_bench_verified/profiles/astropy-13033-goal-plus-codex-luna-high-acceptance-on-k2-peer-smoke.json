@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "id": "astropy-13033-goal-plus-codex-luna-high-acceptance-on-k2-peer-smoke",
+  "benchmark_id": "swe-bench-verified",
+  "dataset": {
+    "name": "SWE-bench/SWE-bench_Verified",
+    "split": "test",
+    "revision": "91aa3ed51b709be6457e12d00300a6a596d4c6a3"
+  },
+  "task_ids": [
+    "astropy__astropy-13033"
+  ],
+  "tasks": [
+    {
+      "instance_id": "astropy__astropy-13033",
+      "repo": "astropy/astropy",
+      "image": "swebench/sweb.eval.x86_64.astropy_1776_astropy-13033:latest",
+      "base_commit": "298ccb478e6bf092953bca67a3d29dc6c35f6752",
+      "image_setup": {
+        "head": "7cf8cbecebcc15f66672bda464677d6f9bab56ba",
+        "tree": "5e7722a78e2dd470dbd8a2cdd40a0ff8a8146d34",
+        "patch_sha256": "fc209d9c3eb5752c0367f71979b3a31b503f532d55deaefd8dec4d462abc4d66",
+        "files": [
+          "pyproject.toml"
+        ],
+        "provenance": "SWE-bench Astropy 4.3 pre_install setuptools pin"
+      }
+    }
+  ],
+  "methods": [
+    "goal-plus-codex"
+  ],
+  "model": "gpt-5.6-luna",
+  "reasoning_effort": "high",
+  "agent_provider": {
+    "id": "bench_proxy",
+    "name": "Benchmark OpenAI-compatible proxy",
+    "auth_mode": "openai-compatible",
+    "base_url_env": "OPENAI_BASE_URL",
+    "api_key_env": "OPENAI_API_KEY",
+    "wire_api": "responses"
+  },
+  "wall_time_seconds": 1800,
+  "concurrency": 2,
+  "cell_concurrency": 1,
+  "retain_containers": false,
+  "agent_network_policy": "public-egress-blocked",
+  "evaluator_timeout_seconds": 1800,
+  "goal_plus": {
+    "worker_runtime_seconds": 1500,
+    "worker_min_runtime_seconds": 600,
+    "worker_min_verifier_runs": 2,
+    "closeout_reserve_seconds": 300,
+    "visible_verifier_timeout_seconds": 300,
+    "evidence_annotator": {
+      "kind": "codex",
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "medium",
+      "timeout_seconds": 300
+    },
+    "supplemental_evaluation_enabled": true
+  }
+}

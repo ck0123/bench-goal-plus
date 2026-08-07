@@ -37,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--wall-time-seconds", type=int)
     prepare_parser.add_argument("--concurrency", type=int)
     prepare_parser.add_argument("--cell-concurrency", type=int)
+    prepare_parser.add_argument("--seed", type=int, default=1)
     prepare_parser.add_argument("--retain-containers", action="store_true")
 
     for command in ("run", "status", "finalize"):
@@ -68,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             cell_concurrency=(
                 args.cell_concurrency if args.command == "prepare" else None
             ),
+            seed=args.seed if args.command == "prepare" else None,
             retain_containers=(
                 args.retain_containers if args.command == "prepare" else None
             ),
