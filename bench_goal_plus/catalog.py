@@ -143,6 +143,7 @@ class Catalog:
                 "cell_concurrency",
                 "retain_containers",
                 "official_evaluator",
+                "attempt_seed",
             )
             if not all(isinstance(raw_capabilities.get(name), bool) for name in bool_fields):
                 raise ContractError(f"{runner_id}: capability flags must be boolean")

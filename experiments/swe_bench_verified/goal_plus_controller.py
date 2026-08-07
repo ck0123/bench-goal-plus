@@ -131,6 +131,7 @@ def _existing_promotion(
 
 def closeout(root: Path, source: Path, *, pool_timeout_seconds: int) -> dict[str, Any]:
     """Drain host workers and idempotently finish every linked Search run."""
+    from goal_plus.evidence_annotator import drain_evidence_annotations
     from goal_plus.goal_plus import FileGoalPlusRuntime
     from goal_plus.runtime import FileSearchRuntime
     from goal_plus.tools import SearchTools
@@ -171,21 +172,33 @@ def closeout(root: Path, source: Path, *, pool_timeout_seconds: int) -> dict[str
                 continue
 
             verified_in_closeout: list[str] = []
+            annotated_in_closeout = 0
             existing_promotion = _existing_promotion(run_path)
+            existing_selection = (
+                None
+                if existing_promotion is not None
+                else _existing_selection(run_path)
+            )
+            if existing_promotion is None and existing_selection is None:
+                for candidate_path in candidates:
+                    candidate = _read_json(candidate_path)
+                    if not candidate.get("iterations"):
+                        tools.search_run_verifier(
+                            run_id,
+                            str(candidate["candidate_id"]),
+                            hypothesis="controller post-budget final verification",
+                        )
+                        verified_in_closeout.append(str(candidate["candidate_id"]))
+
+            annotated_in_closeout = drain_evidence_annotations(
+                root,
+                run_id,
+                wait_for_retries=True,
+            )
             if existing_promotion is not None:
                 run, candidate_id, selection, promotion = existing_promotion
             else:
-                existing_selection = _existing_selection(run_path)
                 if existing_selection is None:
-                    for candidate_path in candidates:
-                        candidate = _read_json(candidate_path)
-                        if not candidate.get("iterations"):
-                            tools.search_run_verifier(
-                                run_id,
-                                str(candidate["candidate_id"]),
-                                hypothesis="controller post-budget final verification",
-                            )
-                            verified_in_closeout.append(str(candidate["candidate_id"]))
                     selection = tools.search_select(run_id)
                     candidate_id = str(selection["selected_candidate_id"])
                     run = _read_json(run_path)
@@ -233,6 +246,7 @@ def closeout(root: Path, source: Path, *, pool_timeout_seconds: int) -> dict[str
                     "goal_plus_ids": goal_ids,
                     "candidate_count": len(candidates),
                     "verified_in_closeout": verified_in_closeout,
+                    "annotated_in_closeout": annotated_in_closeout,
                     "selection": selection,
                     "promotion": promotion,
                     "source_patch_status": patch_status,

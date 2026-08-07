@@ -31,6 +31,7 @@
         "cell_concurrency": true,
         "retain_containers": false,
         "official_evaluator": true,
+        "attempt_seed": false,
         "resume_semantics": "stopped campaigns are finalized as partial; retry uses a new campaign"
       }
     },
@@ -42,6 +43,7 @@
       "supported_methods": [
         "plain-codex",
         "plain-pi",
+        "goal-plus-codex",
         "goal-plus-pi"
       ],
       "method_contracts": {
@@ -60,6 +62,7 @@
         "cell_concurrency": false,
         "retain_containers": true,
         "official_evaluator": true,
+        "attempt_seed": true,
         "resume_semantics": "initial acceptance supports one non-resumable task attempt; retry uses a new campaign"
       }
     },
@@ -81,6 +84,7 @@
         "cell_concurrency": false,
         "retain_containers": false,
         "official_evaluator": true,
+        "attempt_seed": false,
         "resume_semantics": "stopped campaigns are finalized as partial; retry uses a new campaign"
       }
     },
@@ -105,6 +109,7 @@
         "cell_concurrency": false,
         "retain_containers": false,
         "official_evaluator": true,
+        "attempt_seed": true,
         "resume_semantics": "rerun only prepared or interrupted cells"
       }
     },
@@ -127,6 +132,7 @@
         "cell_concurrency": false,
         "retain_containers": false,
         "official_evaluator": true,
+        "attempt_seed": true,
         "resume_semantics": "run-batch skips cells already present in campaign-results.json"
       }
     }
@@ -422,6 +428,73 @@
       }
     },
     {
+      "id": "swe-bench-verified-sympy-16886-goal-plus-codex-acceptance-smoke",
+      "description": "One-instance SWE-bench Verified Goal Plus + Codex open supplemental-evaluation smoke with T=300, K=1, C=1, R=1.",
+      "benchmarks": ["swe-bench-verified"],
+      "profile": "sympy-16886-goal-plus-codex-acceptance-smoke",
+      "campaign_id_template": "swe-bench-verified-sympy-16886-goal-plus-codex-acceptance-5m-k1-c1-r1-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": ["goal-plus-codex"],
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "low",
+        "supplemental_evaluation_enabled": true,
+        "wall_time_seconds": 300,
+        "concurrency": 1,
+        "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "swe-bench-verified-sympy-16886-goal-plus-codex-acceptance-off-smoke",
+      "description": "One-instance SWE-bench Verified Goal Plus + Codex Responses mechanism ablation with open supplemental evaluation disabled (legacy preset ID).",
+      "benchmarks": ["swe-bench-verified"],
+      "profile": "sympy-16886-goal-plus-codex-luna-high-acceptance-off-smoke",
+      "campaign_id_template": "swe-bench-verified-sympy-16886-goal-plus-codex-acceptance-off-gpt-5-6-luna-high-30m-k1-c1-r1-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": ["goal-plus-codex"],
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "high",
+        "agent_provider": {
+          "id": "bench_proxy",
+          "name": "Benchmark OpenAI-compatible proxy",
+          "auth_mode": "openai-compatible",
+          "base_url_env": "OPENAI_BASE_URL",
+          "api_key_env": "OPENAI_API_KEY",
+          "wire_api": "responses"
+        },
+        "supplemental_evaluation_enabled": false,
+        "wall_time_seconds": 1800,
+        "concurrency": 1,
+        "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "swe-bench-verified-sympy-16886-goal-plus-codex-acceptance-on-smoke",
+      "description": "One-instance SWE-bench Verified Goal Plus + Codex Responses mechanism ablation with open supplemental evaluation enabled (legacy preset ID).",
+      "benchmarks": ["swe-bench-verified"],
+      "profile": "sympy-16886-goal-plus-codex-luna-high-acceptance-on-smoke",
+      "campaign_id_template": "swe-bench-verified-sympy-16886-goal-plus-codex-acceptance-on-gpt-5-6-luna-high-30m-k1-c1-r1-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": ["goal-plus-codex"],
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "high",
+        "agent_provider": {
+          "id": "bench_proxy",
+          "name": "Benchmark OpenAI-compatible proxy",
+          "auth_mode": "openai-compatible",
+          "base_url_env": "OPENAI_BASE_URL",
+          "api_key_env": "OPENAI_API_KEY",
+          "wire_api": "responses"
+        },
+        "supplemental_evaluation_enabled": true,
+        "wall_time_seconds": 1800,
+        "concurrency": 1,
+        "cell_concurrency": 1
+      }
+    },
+    {
       "id": "swe-bench-verified-sympy-16886-pi-smoke",
       "description": "One-instance SWE-bench Verified Plain Pi official-harness smoke with T=1800, K=1, C=1, R=1.",
       "benchmarks": ["swe-bench-verified"],
@@ -474,6 +547,156 @@
         },
         "wall_time_seconds": 1800,
         "concurrency": 1,
+        "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "swe-bench-verified-sympy-16886-acceptance-view-off-smoke",
+      "description": "One-instance SWE-bench Verified Goal Plus + Pi mechanism ablation with open supplemental evaluation disabled (legacy preset ID).",
+      "benchmarks": ["swe-bench-verified"],
+      "profile": "sympy-16886-goal-plus-pi-luna-high-acceptance-off-smoke",
+      "campaign_id_template": "swe-bench-verified-sympy-16886-acceptance-view-off-gpt-5-6-luna-high-30m-k1-c1-r1-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": ["goal-plus-pi"],
+        "model": "bench-openai/gpt-5.6-luna",
+        "reasoning_effort": "high",
+        "agent_provider": {
+          "id": "bench-openai",
+          "name": "Benchmark OpenAI-compatible proxy",
+          "auth_mode": "openai-compatible",
+          "base_url_env": "OPENAI_BASE_URL",
+          "api_key_env": "OPENAI_API_KEY",
+          "wire_api": "responses"
+        },
+        "supplemental_evaluation_enabled": false,
+        "wall_time_seconds": 1800,
+        "concurrency": 1,
+        "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "swe-bench-verified-sympy-16886-acceptance-view-on-smoke",
+      "description": "One-instance SWE-bench Verified Goal Plus + Pi mechanism ablation with open supplemental evaluation enabled (legacy preset ID).",
+      "benchmarks": ["swe-bench-verified"],
+      "profile": "sympy-16886-goal-plus-pi-luna-high-smoke",
+      "campaign_id_template": "swe-bench-verified-sympy-16886-acceptance-view-on-gpt-5-6-luna-high-30m-k1-c1-r1-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": ["goal-plus-pi"],
+        "model": "bench-openai/gpt-5.6-luna",
+        "reasoning_effort": "high",
+        "agent_provider": {
+          "id": "bench-openai",
+          "name": "Benchmark OpenAI-compatible proxy",
+          "auth_mode": "openai-compatible",
+          "base_url_env": "OPENAI_BASE_URL",
+          "api_key_env": "OPENAI_API_KEY",
+          "wire_api": "responses"
+        },
+        "supplemental_evaluation_enabled": true,
+        "wall_time_seconds": 1800,
+        "concurrency": 1,
+        "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "swe-bench-verified-django-13406-goal-plus-pi-deepseek-v4-flash-on",
+      "description": "Django 13406 Goal Plus + Pi run using DeepSeek V4 Flash over Responses with open supplemental evaluation enabled and T=1800, K=1, C=1, R=1.",
+      "benchmarks": ["swe-bench-verified"],
+      "profile": "django-13406-goal-plus-pi-deepseek-v4-flash-acceptance-on-smoke",
+      "campaign_id_template": "swe-bench-verified-django-13406-goal-plus-pi-deepseek-v4-flash-on-30m-k1-c1-r1-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": ["goal-plus-pi"],
+        "model": "deepseek-responses/deepseek-v4-flash",
+        "reasoning_effort": "medium",
+        "agent_provider": {
+          "id": "deepseek-responses",
+          "name": "DeepSeek Responses API",
+          "auth_mode": "openai-compatible",
+          "base_url_env": "DEEPSEEK_BASE_URL",
+          "api_key_env": "DEEPSEEK_API_KEY",
+          "wire_api": "responses"
+        },
+        "supplemental_evaluation_enabled": true,
+        "wall_time_seconds": 1800,
+        "concurrency": 1,
+        "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "swe-bench-verified-astropy-13033-goal-plus-pi-deepseek-v4-flash-on",
+      "description": "Astropy 13033 Goal Plus + Pi run using DeepSeek V4 Flash over Responses with open supplemental evaluation enabled and T=1800, K=1, C=1, R=1.",
+      "benchmarks": ["swe-bench-verified"],
+      "profile": "astropy-13033-goal-plus-pi-deepseek-v4-flash-acceptance-on-smoke",
+      "campaign_id_template": "swe-bench-verified-astropy-13033-goal-plus-pi-deepseek-v4-flash-on-30m-k1-c1-r1-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": ["goal-plus-pi"],
+        "model": "deepseek-responses/deepseek-v4-flash",
+        "reasoning_effort": "medium",
+        "agent_provider": {
+          "id": "deepseek-responses",
+          "name": "DeepSeek Responses API",
+          "auth_mode": "openai-compatible",
+          "base_url_env": "DEEPSEEK_BASE_URL",
+          "api_key_env": "DEEPSEEK_API_KEY",
+          "wire_api": "responses"
+        },
+        "supplemental_evaluation_enabled": true,
+        "wall_time_seconds": 1800,
+        "concurrency": 1,
+        "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "swe-bench-verified-astropy-13033-goal-plus-codex-luna-high-k2-peer-smoke",
+      "description": "Astropy 13033 Goal Plus + Codex dynamic peer-comparison mechanism experiment using Luna/high with T=1800, K=2, C=1, R=1.",
+      "benchmarks": ["swe-bench-verified"],
+      "profile": "astropy-13033-goal-plus-codex-luna-high-acceptance-on-k2-peer-smoke",
+      "campaign_id_template": "swe-bench-verified-astropy-13033-goal-plus-codex-luna-high-k2-peer-30m-c1-r1-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": ["goal-plus-codex"],
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "high",
+        "agent_provider": {
+          "id": "bench_proxy",
+          "name": "Benchmark OpenAI-compatible proxy",
+          "auth_mode": "openai-compatible",
+          "base_url_env": "OPENAI_BASE_URL",
+          "api_key_env": "OPENAI_API_KEY",
+          "wire_api": "responses"
+        },
+        "supplemental_evaluation_enabled": true,
+        "wall_time_seconds": 1800,
+        "concurrency": 2,
+        "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "swe-bench-verified-astropy-13033-goal-plus-codex-sol-medium-k2-peer-smoke",
+      "description": "Astropy 13033 Goal Plus + Codex dynamic peer-comparison mechanism experiment using Sol/medium with T=1800, K=2, C=1, R=1.",
+      "benchmarks": ["swe-bench-verified"],
+      "profile": "astropy-13033-goal-plus-codex-sol-medium-acceptance-on-k2-peer-smoke",
+      "campaign_id_template": "swe-bench-verified-astropy-13033-goal-plus-codex-sol-medium-k2-peer-30m-c1-r1-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": ["goal-plus-codex"],
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "medium",
+        "agent_provider": {
+          "id": "bench_proxy",
+          "name": "Benchmark OpenAI-compatible proxy",
+          "auth_mode": "openai-compatible",
+          "base_url_env": "OPENAI_BASE_URL",
+          "api_key_env": "OPENAI_API_KEY",
+          "wire_api": "responses"
+        },
+        "supplemental_evaluation_enabled": true,
+        "wall_time_seconds": 1800,
+        "concurrency": 2,
         "cell_concurrency": 1
       }
     }

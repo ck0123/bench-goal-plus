@@ -88,6 +88,8 @@ class NativeProfileRunner(BenchmarkRunner):
         ):
             if value is not None:
                 command.extend([flag, str(value)])
+        if self.definition.capabilities.attempt_seed:
+            command.extend(["--seed", str(spec.seeds[0])])
         for method in spec.methods:
             command.extend(["--method", method])
         if spec.retain_containers:
