@@ -1350,6 +1350,7 @@ def _agent_command(
                 "/opt/pi/dist/cli.js",
                 "--mode",
                 "json",
+                "--print",
                 "--provider",
                 str(runtime["provider"]),
                 "--model",
@@ -1983,7 +1984,9 @@ def _run_agent(
         try:
             result = _run(
                 command,
-                input_text=None if method == "goal-plus-pi" else prompt,
+                # Pi reads piped stdin before it processes positional prompts. An
+                # explicit empty input closes stdin immediately for this one-shot run.
+                input_text="" if method == "goal-plus-pi" else prompt,
                 timeout=profile["wall_time_seconds"],
             )
             stdout, stderr, returncode = result.stdout, result.stderr, result.returncode
@@ -2002,6 +2005,18 @@ def _run_agent(
                         "sh",
                         "-lc",
                         "pkill -TERM -x codex 2>/dev/null || true",
+                    ],
+                    timeout=30,
+                )
+            elif method == "goal-plus-pi":
+                _docker_checked(
+                    [
+                        "docker",
+                        "exec",
+                        container_id,
+                        "sh",
+                        "-lc",
+                        "pkill -TERM -x node 2>/dev/null || true",
                     ],
                     timeout=30,
                 )
