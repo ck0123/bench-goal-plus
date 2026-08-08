@@ -16,6 +16,7 @@ class RunnerCapabilities:
     cell_concurrency: bool
     retain_containers: bool
     official_evaluator: bool
+    attempt_seed: bool
     resume_semantics: str
 
     def as_dict(self) -> dict[str, Any]:

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "id": "sympy-16886-goal-plus-pi-luna-high-smoke",
+  "id": "sympy-16886-goal-plus-codex-acceptance-smoke",
   "benchmark_id": "swe-bench-verified",
   "dataset": {
     "name": "SWE-bench/SWE-bench_Verified",
@@ -16,31 +16,23 @@
       "base_commit": "c50643a49811e9fe2f4851adff4313ad46f7325e"
     }
   ],
-  "methods": ["goal-plus-pi"],
-  "model": "bench-openai/gpt-5.6-luna",
-  "reasoning_effort": "high",
-  "agent_provider": {
-    "id": "bench-openai",
-    "name": "Benchmark OpenAI-compatible proxy",
-    "auth_mode": "openai-compatible",
-    "base_url_env": "OPENAI_BASE_URL",
-    "api_key_env": "OPENAI_API_KEY",
-    "wire_api": "responses"
-  },
-  "wall_time_seconds": 1800,
+  "methods": ["goal-plus-codex"],
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "low",
+  "wall_time_seconds": 300,
   "concurrency": 1,
   "cell_concurrency": 1,
   "retain_containers": false,
   "evaluator_timeout_seconds": 1800,
   "goal_plus": {
-    "worker_runtime_seconds": 1500,
-    "closeout_reserve_seconds": 300,
-    "visible_verifier_timeout_seconds": 300,
+    "worker_runtime_seconds": 180,
+    "closeout_reserve_seconds": 120,
+    "visible_verifier_timeout_seconds": 120,
     "evidence_annotator": {
       "kind": "codex",
-      "model": "gpt-5.6-luna",
-      "reasoning_effort": "high",
-      "timeout_seconds": 300
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "low",
+      "timeout_seconds": 120
     },
     "supplemental_evaluation_enabled": true
   }

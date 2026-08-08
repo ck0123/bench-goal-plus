@@ -34,7 +34,7 @@ offline/network-isolated protocol 已满足；正式 Linux 运行也不能跳过
 | EdgeBench Goal Plus + Pi provider API | Pi 显式 provider/model 与 API credential | Pi built-in provider 使用标准 key env；自定义 endpoint 使用 `SFORGE_PI_MODELS_FILE` 或 `~/.pi/agent/models.json` | 使用 `goal-plus-pi-provider`；model 必须写成 `PROVIDER/MODEL` |
 | EdgeBench Claude | Anthropic-compatible API | `SFORGE_AGENT_*` 或 `ANTHROPIC_*` env | key 和 base URL 都必需 |
 | Common/OpenEvolve 的 Codex 路径 | Codex native login，或显式 OpenAI-compatible endpoint | 省略 `--api-base` 使用 native login；显式 endpoint 使用 `OPENAI_API_KEY` | custom provider 使用 Responses wire API |
-| SWE-bench Verified Plain Codex | profile 固定的 OpenAI-compatible API | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | 只使用 Responses；不读取 OAuth；Linux loopback endpoint 必须桥入 task container |
+| SWE-bench Verified Plain/Goal Plus Codex | profile 固定的 OpenAI-compatible API | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | 只使用 Responses；不读取 OAuth；Linux loopback endpoint 必须桥入 task container |
 | SWE-bench Verified Plain/Goal Plus Pi | Pi built-in provider API，或 profile-frozen OpenAI-compatible provider | profile 中的 `PROVIDER/MODEL` + provider 标准 key env，或 `OPENAI_BASE_URL` + `OPENAI_API_KEY` | Z.AI profile 使用 `zai/glm-5.2`；Luna profile 使用 `bench-openai/gpt-5.6-luna` + Responses；均不读取 EdgeBench Pi OAuth |
 | Common/OpenEvolve 的 Pi、native OpenEvolve、SkyDiscover | OpenAI-compatible API | `--api-base` + `OPENAI_API_KEY` | 不是 Codex OAuth 路径 |
 
@@ -79,7 +79,7 @@ export SFORGE_AGENT_API_BASE_URL='https://api.example.com/v1'
 controller 会从 host 和 Work container 各做一次鉴权 probe。manifest 只记录使用了哪个环境
 变量，不记录值。
 
-### SWE-bench Verified Plain Codex API
+### SWE-bench Verified Plain/Goal Plus Codex API
 
 SWE-bench 的冻结 Codex profile 不使用上面的 EdgeBench fallback 优先级。它精确选择：
 

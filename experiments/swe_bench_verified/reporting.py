@@ -8,7 +8,11 @@ from typing import Any
 
 from .config import SweBenchContractError, read_json, utc_now, write_json
 from .goal_plus_evidence import collect_goal_plus_state, record_completion_check
-from .runtime import MANIFEST, TERMINAL_STATES
+from .runtime import (
+    MANIFEST,
+    TERMINAL_STATES,
+    _goal_plus_evidence_annotator_public,
+)
 
 
 def _container_isolated(agent: dict[str, Any]) -> bool:
@@ -18,15 +22,39 @@ def _container_isolated(agent: dict[str, Any]) -> bool:
     )
 
 
+def _agent_network_verified(
+    agent: dict[str, Any], profile: dict[str, Any]
+) -> bool:
+    policy = profile.get("agent_network_policy", "default")
+    if policy == "default":
+        return True
+    network = (agent.get("runtime") or {}).get("agent_network") or {}
+    verification = network.get("verification") or {}
+    cleanup = network.get("cleanup") or {}
+    container_cleanup = (agent.get("container") or {}).get("cleanup") or {}
+    network_closed = cleanup.get("removed") is True or (
+        cleanup.get("retained_with_agent_container") is True
+        and container_cleanup.get("stopped") is True
+    )
+    return bool(
+        network.get("policy") == policy
+        and network.get("enforced") is True
+        and network.get("docker_internal") is True
+        and verification.get("passed") is True
+        and verification.get("public_egress_probe") == "blocked"
+        and network_closed
+    )
+
+
 def _revalidate_goal_plus_cell(
     campaign: Path,
     manifest: dict[str, Any],
     cell: dict[str, Any],
 ) -> bool:
-    if cell.get("method") != "goal-plus-pi" or cell.get("state") not in {
-        "completed",
-        "partial",
-    }:
+    if (
+        cell.get("method") not in {"goal-plus-codex", "goal-plus-pi"}
+        or cell.get("state") not in {"completed", "partial"}
+    ):
         return False
     profile = manifest.get("profile_snapshot") or {}
     goal_plus_profile = profile.get("goal_plus") or {}
@@ -41,6 +69,9 @@ def _revalidate_goal_plus_cell(
         refreshed = collect_goal_plus_state(
             state_root,
             expected_k=int(profile["concurrency"]),
+            expected_worker_host=(
+                "codex" if cell["method"] == "goal-plus-codex" else "pi-rpc"
+            ),
             expected_worker_runtime_seconds=int(
                 goal_plus_profile["worker_runtime_seconds"]
             ),
@@ -49,6 +80,18 @@ def _revalidate_goal_plus_cell(
             ),
             expected_visible_verifier_timeout_seconds=int(
                 goal_plus_profile["visible_verifier_timeout_seconds"]
+            ),
+            expected_worker_min_runtime_seconds=goal_plus_profile.get(
+                "worker_min_runtime_seconds"
+            ),
+            expected_worker_min_verifier_runs=goal_plus_profile.get(
+                "worker_min_verifier_runs"
+            ),
+            expected_supplemental_evaluation_enabled=bool(
+                goal_plus_profile["supplemental_evaluation_enabled"]
+            ),
+            expected_evidence_annotator_enabled=isinstance(
+                goal_plus_profile["evidence_annotator"], dict
             ),
         )
     except (KeyError, TypeError, ValueError):
@@ -60,6 +103,7 @@ def _revalidate_goal_plus_cell(
     export = previous_goal_plus.get("export") or {}
     closeout = agent.get("goal_plus_closeout") or {}
     annotator = (agent.get("runtime") or {}).get("evidence_annotator")
+    expected_annotator = _goal_plus_evidence_annotator_public(profile)
     record_completion_check(
         refreshed,
         "state_export",
@@ -76,10 +120,10 @@ def _revalidate_goal_plus_cell(
     )
     record_completion_check(
         refreshed,
-        "evidence_annotator_disabled",
-        expected="disabled",
+        "evidence_annotator_runtime",
+        expected=expected_annotator,
         actual=annotator,
-        passed=annotator == "disabled",
+        passed=annotator == expected_annotator,
     )
     refreshed["export"] = export
     agent["goal_plus"] = refreshed
@@ -104,6 +148,8 @@ def _revalidate_goal_plus_cell(
         failures.append("Agent did not produce a non-empty patch")
     if not _container_isolated(agent):
         failures.append("Agent container isolation is incomplete")
+    if not _agent_network_verified(agent, profile):
+        failures.append("Agent public-egress isolation evidence is incomplete")
     if evaluation.get("state") != "completed":
         failures.append("official evaluator did not produce a valid report")
     if evaluation.get("calls") != 1:
@@ -152,6 +198,7 @@ def _record(campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]) -> d
     goal_plus = agent.get("goal_plus") or {}
     goal_plus_completion = goal_plus.get("completion") or {}
     resolved = evaluation.get("resolved")
+    profile = manifest.get("profile_snapshot") or {}
     final_metric = int(resolved) if isinstance(resolved, bool) else None
     return {
         "benchmark_id": "swe-bench-verified",
@@ -160,7 +207,7 @@ def _record(campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]) -> d
         "method": cell["method"],
         "model": cell["model"],
         "reasoning_effort": cell["reasoning_effort"],
-        "seed": 1,
+        "seed": manifest.get("seed", profile.get("seed", 1)),
         "status": "succeeded" if cell["state"] == "completed" else cell["state"],
         "incomplete_reason": cell.get("incomplete_reason") or cell.get("error"),
         "budget": {
@@ -180,10 +227,14 @@ def _record(campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]) -> d
             "image": cell["image"],
             "base_commit": cell["base_commit"],
             "agent_provider": cell.get("agent_provider"),
+            "agent_network_policy": profile.get(
+                "agent_network_policy", "default"
+            ),
             "official_evaluator": True,
             "official_evaluator_once": evaluation.get("calls") == 1,
             "goal_plus": {
-                "required": cell["method"] == "goal-plus-pi",
+                "required": cell["method"] in {"goal-plus-codex", "goal-plus-pi"},
+                "supplemental_evaluation_enabled": cell.get("supplemental_evaluation_enabled"),
                 "completion": goal_plus_completion or None,
                 "actual_subagent_count": goal_plus.get("actual_subagent_count"),
                 "runs": goal_plus.get("runs") or [],
@@ -218,9 +269,12 @@ def _record(campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]) -> d
                 or {"coverage": "unavailable"},
                 "goal_plus_workers": goal_plus.get("worker_usage")
                 or {"coverage": "unavailable"},
+                "view_agent": goal_plus.get("evidence_annotator_usage")
+                or {"coverage": "unavailable"},
             },
             "goal_plus_closeout": agent.get("goal_plus_closeout"),
             "agent_container": agent.get("container"),
+            "agent_network": (agent.get("runtime") or {}).get("agent_network"),
         },
         "patch": {
             "exists": agent.get("patch_exists"),
