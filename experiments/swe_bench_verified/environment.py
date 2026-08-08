@@ -40,6 +40,7 @@ from .config import (
 CODEX_ARCHIVE = Path.home() / ".cache/sforge/codex/codex-0.144.1-linux-x64.tgz"
 CODEX_RUNTIME_TMPFS = "/opt/codex:rw,exec,nosuid,nodev,size=512m"
 CODEX_HOME_TMPFS = "/opt/codex-home:rw,nosuid,nodev,size=256m"
+RESPONSES_PROBE_MAX_OUTPUT_TOKENS = 256
 GOAL_PLUS_DEPENDENCY_LOCK = (
     ROOT / "environment" / "swe-bench-goal-plus-requirements.lock"
 )
@@ -259,7 +260,7 @@ def openai_responses_probe(
         {
             "model": model,
             "input": "Reply with exactly WIRE_OK.",
-            "max_output_tokens": 16,
+            "max_output_tokens": RESPONSES_PROBE_MAX_OUTPUT_TOKENS,
         }
     ).encode("utf-8")
     request = urllib.request.Request(
@@ -644,10 +645,13 @@ import urllib.request
 
 model = os.environ["SWEBENCH_API_MODEL"]
 key = os.environ[os.environ["SWEBENCH_API_KEY_ENV"]]
+max_output_tokens = int(
+    os.environ["SWEBENCH_RESPONSES_PROBE_MAX_OUTPUT_TOKENS"]
+)
 payload = json.dumps({
     "model": model,
     "input": "Reply with exactly WIRE_OK.",
-    "max_output_tokens": 16,
+    "max_output_tokens": max_output_tokens,
 }).encode("utf-8")
 request = urllib.request.Request(
     os.environ["SWEBENCH_API_BASE_URL"].rstrip("/") + "/responses",
@@ -693,6 +697,9 @@ def codex_container_responses_probe(
             "SWEBENCH_API_BASE_URL": str(runtime["runtime_api_base_url"]),
             "SWEBENCH_API_KEY_ENV": str(runtime["api_key_env"]),
             "SWEBENCH_API_MODEL": model,
+            "SWEBENCH_RESPONSES_PROBE_MAX_OUTPUT_TOKENS": str(
+                RESPONSES_PROBE_MAX_OUTPUT_TOKENS
+            ),
         }
     )
     inherited_names = [
@@ -700,6 +707,7 @@ def codex_container_responses_probe(
         "SWEBENCH_API_BASE_URL",
         "SWEBENCH_API_KEY_ENV",
         "SWEBENCH_API_MODEL",
+        "SWEBENCH_RESPONSES_PROBE_MAX_OUTPUT_TOKENS",
     ]
     if existing_container:
         command = ["docker", "exec"]

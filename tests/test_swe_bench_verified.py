@@ -2414,8 +2414,50 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertEqual(command[:4], ["docker", "run", "--pull", "never"])
         self.assertIn("OPENAI_API_KEY", command)
+        self.assertIn("SWEBENCH_RESPONSES_PROBE_MAX_OUTPUT_TOKENS", command)
+        self.assertEqual(
+            capture.call_args.kwargs["environment"][
+                "SWEBENCH_RESPONSES_PROBE_MAX_OUTPUT_TOKENS"
+            ],
+            "256",
+        )
         self.assertFalse(any(secret in argument for argument in command))
         self.assertNotIn(f"OPENAI_API_KEY={secret}", command)
+
+    def test_host_responses_probe_allows_reasoning_before_wire_output(self) -> None:
+        secret = "not-for-command-lines"
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = json.dumps(
+            {
+                "object": "response",
+                "model": "deepseek-v4-flash",
+                "status": "completed",
+            }
+        ).encode("utf-8")
+        response.__enter__.return_value = response
+        opener = mock.MagicMock()
+        opener.open.return_value = response
+
+        with (
+            mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": secret}, clear=False),
+            mock.patch.object(
+                environment.urllib.request,
+                "build_opener",
+                return_value=opener,
+            ),
+        ):
+            result = environment.openai_responses_probe(
+                "https://api.deepseek.com/v1",
+                api_key_env="DEEPSEEK_API_KEY",
+                model="deepseek-v4-flash",
+            )
+
+        request = opener.open.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertTrue(result["passed"])
+        self.assertEqual(payload["max_output_tokens"], 256)
+        self.assertNotIn(secret, request.full_url)
 
     def test_container_responses_probe_retries_transient_502(self) -> None:
         failed = {"passed": False, "http_status": 502, "error": "bad gateway"}
