@@ -14,6 +14,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from bench_goal_plus.allowlisted_connect_proxy import (
+    start_allowlisted_connect_proxy,
+)
 from bench_goal_plus.loopback_bridge import (
     bridged_url,
     default_route_ipv4,
@@ -61,6 +64,15 @@ PI_API_KEYS = {
     "anthropic": ("ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
 }
 
+PI_BUILTIN_PROVIDER_ENDPOINTS = {
+    "deepseek": {
+        "base_url": "https://api.deepseek.com",
+        "host": "api.deepseek.com",
+        "port": 443,
+        "wire_api": "openai-completions",
+    }
+}
+
 PI_RESPONSES_PROVIDER_COMPAT = {
     "deepseek-responses": {
         "provider": {
@@ -72,6 +84,8 @@ PI_RESPONSES_PROVIDER_COMPAT = {
         "max_tokens": 384_000,
     }
 }
+
+DOCKER_COLD_PROBE_TIMEOUT_SECONDS = 300
 
 
 def run_capture(
@@ -89,6 +103,66 @@ def run_capture(
         check=False,
         timeout=timeout,
     )
+
+
+@contextmanager
+def isolated_container_network(seed: str) -> Iterator[dict[str, Any]]:
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+    name = f"bgp-swe-doctor-{digest}"
+    created = run_capture(
+        [
+            "docker",
+            "network",
+            "create",
+            "--driver",
+            "bridge",
+            "--internal",
+            "--label",
+            "bench-goal-plus.owner=swe-bench-doctor",
+            name,
+        ],
+        timeout=120,
+    )
+    if created.returncode != 0:
+        raise SweBenchContractError(
+            created.stderr.strip()
+            or created.stdout.strip()
+            or "failed to create isolated Docker network"
+        )
+    network = {
+        "id": created.stdout.strip(),
+        "name": name,
+        "internal": True,
+        "external_route": False,
+        "removed": False,
+    }
+    try:
+        inspected = run_capture(["docker", "network", "inspect", name])
+        if inspected.returncode != 0:
+            raise SweBenchContractError(
+                inspected.stderr.strip()
+                or inspected.stdout.strip()
+                or "failed to inspect isolated Docker network"
+            )
+        payload = json.loads(inspected.stdout)
+        details = payload[0]
+        gateway = ((details.get("IPAM") or {}).get("Config") or [{}])[0].get(
+            "Gateway"
+        )
+        if details.get("Internal") is not True or not isinstance(gateway, str):
+            raise SweBenchContractError(
+                "isolated Docker network is not internal or has no IPv4 gateway"
+            )
+        network["gateway"] = gateway
+        yield network
+    finally:
+        removed = run_capture(["docker", "network", "rm", name], timeout=120)
+        network["removed"] = removed.returncode == 0
+        network["remove_error"] = (
+            removed.stderr.strip() or removed.stdout.strip() or None
+            if removed.returncode != 0
+            else None
+        )
 
 
 def image_inventory(profile: dict[str, Any]) -> dict[str, Any]:
@@ -288,6 +362,77 @@ def openai_responses_probe(
         return {"passed": False, "http_status": None, "error": str(error)}
 
 
+def openai_chat_completions_probe(
+    base_url: str,
+    *,
+    api_key_env: str,
+    model: str,
+    proxy_url: str | None = None,
+    timeout: float = 45.0,
+) -> dict[str, Any]:
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        return {
+            "passed": False,
+            "http_status": None,
+            "error": f"missing credential environment variable: {api_key_env}",
+        }
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply with exactly WIRE_OK."}],
+            "max_tokens": 16,
+            "stream": False,
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    proxy_handler = (
+        urllib.request.ProxyHandler({"https": proxy_url})
+        if proxy_url
+        else urllib.request.ProxyHandler({})
+    )
+    result: dict[str, Any] = {"passed": False, "http_status": None}
+    try:
+        with urllib.request.build_opener(proxy_handler).open(
+            request, timeout=timeout
+        ) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            choices = body.get("choices") if isinstance(body, dict) else None
+            result.update(
+                {
+                    "http_status": response.status,
+                    "object": body.get("object") if isinstance(body, dict) else None,
+                    "model": body.get("model") if isinstance(body, dict) else None,
+                    "choice_count": len(choices) if isinstance(choices, list) else None,
+                }
+            )
+            result["passed"] = bool(
+                200 <= response.status < 300
+                and body.get("object") == "chat.completion"
+                and isinstance(choices, list)
+                and choices
+            )
+    except urllib.error.HTTPError as error:
+        result["http_status"] = error.code
+        try:
+            body = json.loads(error.read().decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            body = None
+        if isinstance(body, dict) and isinstance(body.get("error"), dict):
+            result["error_type"] = body["error"].get("type")
+            result["error_code"] = body["error"].get("code")
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
+        result["error"] = f"{type(error).__name__}: {error}"
+    return result
+
+
 @contextmanager
 def routed_codex_runtime(
     profile: dict[str, Any],
@@ -366,6 +511,9 @@ def resolve_pi_runtime(profile: dict[str, Any]) -> dict[str, Any]:
         "credential_present": key_source is not None,
         "custom_provider": custom_provider,
         "models_file": None,
+        "provider_endpoint": PI_BUILTIN_PROVIDER_ENDPOINTS.get(provider),
+        "provider_proxy": None,
+        "provider_proxy_url": None,
     }
     if custom_provider:
         runtime.update(
@@ -437,12 +585,38 @@ def routed_pi_runtime(
     *,
     goal_plus: bool = False,
     bridge_listen_host: str | None = None,
+    bridge_host: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     runtime = (
         resolve_goal_plus_runtime(profile) if goal_plus else resolve_pi_runtime(profile)
     )
     if not runtime["custom_provider"]:
-        yield runtime
+        if profile.get("container_network") != "internal-provider-proxy":
+            yield runtime
+            return
+        endpoint = runtime.get("provider_endpoint")
+        if not isinstance(endpoint, dict) or not runtime["credential_present"]:
+            raise SweBenchContractError(
+                "Pi built-in provider endpoint or credential is missing"
+            )
+        proxy_bridge_host = bridge_host or bridge_listen_host
+        if not proxy_bridge_host:
+            raise SweBenchContractError(
+                "Pi built-in provider proxy requires an internal Docker gateway"
+            )
+        metadata, closer = start_allowlisted_connect_proxy(
+            listen_host=proxy_bridge_host,
+            allowed_targets=[(str(endpoint["host"]), int(endpoint["port"]))],
+            name="pi-built-in-provider",
+        )
+        runtime["provider_proxy"] = metadata
+        runtime["provider_proxy_url"] = (
+            f"http://{proxy_bridge_host}:{int(metadata['listen_port'])}"
+        )
+        try:
+            yield runtime
+        finally:
+            closer()
         return
     if not runtime.get("api_base_url") or not runtime["credential_present"]:
         raise SweBenchContractError(
@@ -454,12 +628,13 @@ def routed_pi_runtime(
     closer = None
     try:
         target = loopback_target(str(runtime["api_base_url"]))
-        if bridge_listen_host is not None and target is None:
+        requested_bridge_host = bridge_host or bridge_listen_host
+        if requested_bridge_host is not None and target is None:
             raise SweBenchContractError(
                 "an isolated Agent network requires a loopback provider endpoint"
             )
         if target is not None:
-            bridge_host = bridge_listen_host or default_route_ipv4(root=ROOT)
+            bridge_host = requested_bridge_host or default_route_ipv4(root=ROOT)
             _, metadata, closer = start_socket_bridge(
                 destination,
                 name="pi-agent-api",
@@ -528,6 +703,8 @@ def goal_plus_runtime_environment() -> dict[str, str]:
         "TMP": "/opt/agent-tmp",
         "TEMP": "/opt/agent-tmp",
         "PIP_CACHE_DIR": "/opt/pip-cache",
+        "PIP_FIND_LINKS": "/opt/pip-cache/downloads",
+        "PIP_NO_INDEX": "1",
         "PYTHONPATH": "/opt/goal-plus-runtime:/opt/goal-plus/src",
     }
 
@@ -536,7 +713,9 @@ def resolve_goal_plus_runtime(profile: dict[str, Any]) -> dict[str, Any]:
     runtime = resolve_pi_runtime(profile)
     annotator = profile["goal_plus"]["evidence_annotator"]
     codex_runtime = (
-        resolve_codex_runtime(profile) if isinstance(annotator, dict) else None
+        resolve_codex_runtime(profile)
+        if isinstance(annotator, dict) and annotator.get("kind") == "codex"
+        else None
     )
     runtime.update(
         {
@@ -598,6 +777,61 @@ def resolve_goal_plus_codex_runtime(profile: dict[str, Any]) -> dict[str, Any]:
     return runtime
 
 
+def pi_worker_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Project a role-separated Goal Plus profile onto the Pi worker contract."""
+    goal_plus = profile["goal_plus"]
+    worker = dict(profile)
+    worker["methods"] = ["plain-pi"]
+    worker["model"] = str(goal_plus["worker_model"])
+    worker["reasoning_effort"] = str(goal_plus["worker_reasoning_effort"])
+    worker.pop("agent_provider", None)
+    return worker
+
+
+def has_pi_worker_override(profile: dict[str, Any]) -> bool:
+    goal_plus = profile.get("goal_plus")
+    return isinstance(goal_plus, dict) and {
+        "worker_model",
+        "worker_reasoning_effort",
+    }.issubset(goal_plus)
+
+
+def _merge_pi_worker_runtime(
+    runtime: dict[str, Any], worker: dict[str, Any]
+) -> dict[str, Any]:
+    runtime.update(
+        {
+            "node_root": worker["node_root"],
+            "node_binary": worker["node_binary"],
+            "package_root": worker["package_root"],
+            "pi_cli": worker["pi_cli"],
+            "worker_provider": worker["provider"],
+            "worker_model_id": worker["model_id"],
+            "worker_credential_env": worker["credential_env"],
+            "worker_credential_present": worker["credential_present"],
+            "worker_custom_provider": worker["custom_provider"],
+            "worker_provider_endpoint": worker["provider_endpoint"],
+            "provider_proxy": worker.get("provider_proxy"),
+            "provider_proxy_url": worker.get("provider_proxy_url"),
+        }
+    )
+    return runtime
+
+
+def resolve_goal_plus_codex_pi_runtime(profile: dict[str, Any]) -> dict[str, Any]:
+    runtime = resolve_goal_plus_codex_runtime(profile)
+    return _merge_pi_worker_runtime(runtime, resolve_pi_runtime(pi_worker_profile(profile)))
+
+
+def resolve_goal_plus_pi_runtime(profile: dict[str, Any]) -> dict[str, Any]:
+    runtime = resolve_goal_plus_runtime(profile)
+    if not has_pi_worker_override(profile):
+        return runtime
+    return _merge_pi_worker_runtime(
+        runtime, resolve_pi_runtime(pi_worker_profile(profile))
+    )
+
+
 @contextmanager
 def routed_goal_plus_codex_runtime(
     profile: dict[str, Any],
@@ -615,6 +849,56 @@ def routed_goal_plus_codex_runtime(
         yield runtime
 
 
+@contextmanager
+def routed_goal_plus_codex_pi_runtime(
+    profile: dict[str, Any],
+    destination: Path,
+    *,
+    bridge_listen_host: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    with routed_goal_plus_codex_runtime(
+        profile,
+        destination,
+        bridge_listen_host=bridge_listen_host,
+    ) as main_runtime:
+        with routed_pi_runtime(
+            pi_worker_profile(profile),
+            destination,
+            bridge_listen_host=bridge_listen_host,
+            bridge_host=bridge_listen_host,
+        ) as worker_runtime:
+            runtime = dict(main_runtime)
+            yield _merge_pi_worker_runtime(runtime, worker_runtime)
+
+
+@contextmanager
+def routed_goal_plus_pi_runtime(
+    profile: dict[str, Any],
+    destination: Path,
+    *,
+    bridge_listen_host: str | None = None,
+    bridge_host: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    with routed_pi_runtime(
+        profile,
+        destination,
+        goal_plus=True,
+        bridge_listen_host=bridge_listen_host,
+        bridge_host=bridge_host,
+    ) as main_runtime:
+        if not has_pi_worker_override(profile):
+            yield main_runtime
+            return
+        with routed_pi_runtime(
+            pi_worker_profile(profile),
+            destination,
+            bridge_listen_host=bridge_listen_host,
+            bridge_host=bridge_host,
+        ) as worker_runtime:
+            runtime = dict(main_runtime)
+            yield _merge_pi_worker_runtime(runtime, worker_runtime)
+
+
 def _codex_container_probe(image: str, archive: Path) -> subprocess.CompletedProcess[str]:
     return run_capture(
         [
@@ -623,6 +907,8 @@ def _codex_container_probe(image: str, archive: Path) -> subprocess.CompletedPro
             "--pull",
             "never",
             "--rm",
+            "--network",
+            "none",
             "--tmpfs",
             CODEX_RUNTIME_TMPFS,
             "--mount",
@@ -633,7 +919,7 @@ def _codex_container_probe(image: str, archive: Path) -> subprocess.CompletedPro
             "mkdir -p /opt/codex && tar -xzf /opt/runtime/codex.tgz -C /opt/codex && "
             "/opt/codex/package/vendor/x86_64-unknown-linux-musl/bin/codex --version",
         ],
-        timeout=120,
+        timeout=DOCKER_COLD_PROBE_TIMEOUT_SECONDS,
     )
 
 
@@ -690,6 +976,7 @@ def codex_container_responses_probe(
     *,
     model: str,
     existing_container: bool = False,
+    network_name: str | None = None,
 ) -> dict[str, Any]:
     environment = dict(configure_temp_environment(dict(os.environ)))
     environment.update(
@@ -724,9 +1011,133 @@ def codex_container_responses_probe(
             "--entrypoint",
             "python",
         ]
+        if network_name is not None:
+            command.extend(["--network", network_name])
         for name in inherited_names:
             command.extend(["-e", name])
         command.extend([target, "-c", _CONTAINER_RESPONSES_PROBE])
+    completed = run_capture(command, timeout=90, environment=environment)
+    try:
+        payload = json.loads(completed.stdout.splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        payload = {"passed": False, "http_status": None}
+    payload["passed"] = completed.returncode == 0 and payload.get("passed") is True
+    if completed.stderr:
+        payload["stderr"] = completed.stderr.strip()[-400:]
+    return payload
+
+
+def pi_provider_proxy_environment(runtime: dict[str, Any]) -> dict[str, str]:
+    proxy_url = runtime.get("provider_proxy_url")
+    if not isinstance(proxy_url, str) or not proxy_url:
+        return {}
+    return {
+        "HTTP_PROXY": proxy_url,
+        "HTTPS_PROXY": proxy_url,
+        "http_proxy": proxy_url,
+        "https_proxy": proxy_url,
+        "NO_PROXY": "127.0.0.1,localhost,::1",
+        "no_proxy": "127.0.0.1,localhost,::1",
+    }
+
+
+_CONTAINER_CHAT_COMPLETIONS_PROBE = """
+import json
+import os
+import urllib.error
+import urllib.request
+
+model = os.environ["SWEBENCH_API_MODEL"]
+key = os.environ[os.environ["SWEBENCH_API_KEY_ENV"]]
+payload = json.dumps({
+    "model": model,
+    "messages": [{"role": "user", "content": "Reply with exactly WIRE_OK."}],
+    "max_tokens": 16,
+    "stream": False,
+}).encode("utf-8")
+request = urllib.request.Request(
+    os.environ["SWEBENCH_API_BASE_URL"].rstrip("/") + "/chat/completions",
+    data=payload,
+    headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+)
+result = {"passed": False, "http_status": None}
+try:
+    with urllib.request.build_opener().open(request, timeout=45) as response:
+        body = json.loads(response.read().decode("utf-8"))
+        choices = body.get("choices") if isinstance(body, dict) else None
+        result.update({
+            "http_status": response.status,
+            "object": body.get("object") if isinstance(body, dict) else None,
+            "model": body.get("model") if isinstance(body, dict) else None,
+            "choice_count": len(choices) if isinstance(choices, list) else None,
+        })
+        result["passed"] = bool(
+            200 <= response.status < 300
+            and body.get("object") == "chat.completion"
+            and isinstance(choices, list)
+            and choices
+        )
+except urllib.error.HTTPError as error:
+    result["http_status"] = error.code
+except Exception as error:
+    result["error"] = type(error).__name__ + ": " + str(error)
+print(json.dumps(result, sort_keys=True))
+raise SystemExit(0 if result["passed"] else 1)
+""".strip()
+
+
+def pi_container_chat_completions_probe(
+    target: str,
+    runtime: dict[str, Any],
+    *,
+    model: str,
+    existing_container: bool = False,
+    network_name: str | None = None,
+) -> dict[str, Any]:
+    endpoint = runtime.get("provider_endpoint")
+    if not isinstance(endpoint, dict):
+        return {
+            "passed": False,
+            "http_status": None,
+            "error": "Pi built-in provider endpoint is missing",
+        }
+    credential_env = str(runtime["credential_env"])
+    environment = dict(configure_temp_environment(dict(os.environ)))
+    environment.update(
+        {
+            "SWEBENCH_API_BASE_URL": str(endpoint["base_url"]),
+            "SWEBENCH_API_KEY_ENV": credential_env,
+            "SWEBENCH_API_MODEL": model,
+            **pi_provider_proxy_environment(runtime),
+        }
+    )
+    inherited_names = [
+        credential_env,
+        "SWEBENCH_API_BASE_URL",
+        "SWEBENCH_API_KEY_ENV",
+        "SWEBENCH_API_MODEL",
+        *pi_provider_proxy_environment(runtime),
+    ]
+    if existing_container:
+        command = ["docker", "exec"]
+        for name in inherited_names:
+            command.extend(["-e", name])
+        command.extend([target, "python", "-c", _CONTAINER_CHAT_COMPLETIONS_PROBE])
+    else:
+        command = [
+            "docker",
+            "run",
+            "--pull",
+            "never",
+            "--rm",
+            "--entrypoint",
+            "python",
+        ]
+        if network_name is not None:
+            command.extend(["--network", network_name])
+        for name in inherited_names:
+            command.extend(["-e", name])
+        command.extend([target, "-c", _CONTAINER_CHAT_COMPLETIONS_PROBE])
     completed = run_capture(command, timeout=90, environment=environment)
     try:
         payload = json.loads(completed.stdout.splitlines()[-1])
@@ -748,6 +1159,8 @@ def _image_checkout_probe(
             "--pull",
             "never",
             "--rm",
+            "--network",
+            "none",
             "--entrypoint",
             "git",
             image,
@@ -758,7 +1171,7 @@ def _image_checkout_probe(
             f"{base_commit}^{{tree}}",
             "HEAD^{tree}",
         ],
-        timeout=120,
+        timeout=DOCKER_COLD_PROBE_TIMEOUT_SECONDS,
     )
 
 
@@ -771,6 +1184,8 @@ def _image_setup_probe(
         "--pull",
         "never",
         "--rm",
+        "--network",
+        "none",
         "--entrypoint",
         "git",
         image,
@@ -778,10 +1193,12 @@ def _image_setup_probe(
         "/testbed",
     ]
     patch = run_capture(
-        [*prefix, "diff", "--binary", f"{base_commit}..HEAD"], timeout=120
+        [*prefix, "diff", "--binary", f"{base_commit}..HEAD"],
+        timeout=DOCKER_COLD_PROBE_TIMEOUT_SECONDS,
     )
     files = run_capture(
-        [*prefix, "diff", "--name-only", f"{base_commit}..HEAD"], timeout=120
+        [*prefix, "diff", "--name-only", f"{base_commit}..HEAD"],
+        timeout=DOCKER_COLD_PROBE_TIMEOUT_SECONDS,
     )
     return patch, files
 
@@ -797,6 +1214,8 @@ def _pi_container_probe(
         "--pull",
         "never",
         "--rm",
+        "--network",
+        "none",
         "-e",
         credential_env,
         "--mount",
@@ -848,7 +1267,14 @@ def _pi_container_probe(
                 provider,
             ]
         )
-    return run_capture(command, timeout=120)
+    return run_capture(command, timeout=DOCKER_COLD_PROBE_TIMEOUT_SECONDS)
+
+
+def _pi_model_probe_passed(
+    probe: subprocess.CompletedProcess[str], model_id: str
+) -> bool:
+    combined = "\n".join((probe.stdout or "", probe.stderr or ""))
+    return bool(probe.returncode == 0 and model_id in combined.split())
 
 
 def _goal_plus_container_probe(
@@ -863,13 +1289,18 @@ def _goal_plus_container_probe(
         "--pull",
         "never",
         "--rm",
+        "--network",
+        "none",
         "--tmpfs",
         "/opt/agent-tmp:rw,nosuid,nodev,size=256m",
         "--tmpfs",
         "/opt/goal-plus-runtime:rw,exec,nosuid,nodev,size=512m",
     ]
-    annotator_enabled = runtime.get("goal_plus_evidence_annotator") is not None
-    if annotator_enabled:
+    annotator = runtime.get("goal_plus_evidence_annotator")
+    codex_annotator_enabled = bool(
+        isinstance(annotator, dict) and annotator.get("kind") == "codex"
+    )
+    if codex_annotator_enabled:
         command.extend(
             [
                 "--tmpfs",
@@ -916,15 +1347,22 @@ def _goal_plus_container_probe(
             (
                 "mkdir -p /opt/codex && "
                 "tar -xzf /opt/runtime/codex.tgz -C /opt/codex && "
-                if annotator_enabled
+                if codex_annotator_enabled
                 else ""
             )
             + goal_plus_install_script()
             + " && python -c \"import fastmcp, goal_plus, plotly, pydantic\""
             + " && pi --version"
+            + " && mkdir -p /opt/agent-tmp/pi-extension-smoke/sessions"
+            + " && GOAL_PLUS_ROOT=/opt/agent-tmp/pi-extension-smoke"
+            + " GOAL_PLUS_PI_ROLE=worker GOAL_PLUS_SOURCE_PATH=/opt/goal-plus"
+            + " timeout 15 pi --mode rpc --approve"
+            + " --session-dir /opt/agent-tmp/pi-extension-smoke/sessions"
+            + " --session-id doctor --no-extensions"
+            + " -e /opt/goal-plus/.pi/extensions/goal-plus.ts </dev/null"
             + (
                 " && /opt/codex/package/vendor/x86_64-unknown-linux-musl/bin/codex --version"
-                if annotator_enabled
+                if codex_annotator_enabled
                 else ""
             )
             + " && python -m goal_plus.pi_tool --help >/dev/null"
@@ -943,6 +1381,8 @@ def _goal_plus_codex_container_probe(
         "--pull",
         "never",
         "--rm",
+        "--network",
+        "none",
         "--tmpfs",
         "/opt/agent-tmp:rw,nosuid,nodev,size=256m",
         "--tmpfs",
@@ -994,6 +1434,99 @@ def _goal_plus_codex_container_probe(
 
 
 def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
+    method = profile["methods"][0]
+    if method == "goal-plus-pi" and has_pi_worker_override(profile):
+        annotator = profile["goal_plus"]["evidence_annotator"]
+        main_profile = dict(profile)
+        main_goal_plus = dict(profile["goal_plus"])
+        main_goal_plus.pop("worker_model", None)
+        main_goal_plus.pop("worker_reasoning_effort", None)
+        main_profile["goal_plus"] = main_goal_plus
+        main_profile["concurrency"] = 1
+        main_profile["cell_concurrency"] = 1
+        main_profile["container_network"] = "internal-api-only"
+
+        worker_profile = pi_worker_profile(profile)
+        worker_profile["methods"] = ["goal-plus-pi"]
+        worker_goal_plus = dict(profile["goal_plus"])
+        worker_goal_plus.pop("worker_model", None)
+        worker_goal_plus.pop("worker_reasoning_effort", None)
+        worker_goal_plus["evidence_annotator"] = "disabled"
+        worker_goal_plus["supplemental_evaluation_enabled"] = False
+        worker_profile["goal_plus"] = worker_goal_plus
+        worker_profile["concurrency"] = 1
+        worker_profile["cell_concurrency"] = 1
+
+        main = doctor_payload(main_profile)
+        worker = doctor_payload(worker_profile)
+        checks = [
+            {**item, "name": f"main:{item['name']}"} for item in main["checks"]
+        ] + [
+            {**item, "name": f"worker:{item['name']}"}
+            for item in worker["checks"]
+        ]
+        return {
+            "schema_version": 1,
+            "benchmark_id": "swe-bench-verified",
+            "profile": profile["id"],
+            "method": method,
+            "model": profile["model"],
+            "worker_model": profile["goal_plus"]["worker_model"],
+            "view_model": (
+                annotator.get("model") if isinstance(annotator, dict) else None
+            ),
+            "ok": main["ok"] and worker["ok"],
+            "checks": checks,
+            "inventory": main["inventory"],
+            "packages": main["packages"],
+            "swebench_commit": main["swebench_commit"],
+            "components": {"main": main, "worker": worker},
+            "checked_at": utc_now(),
+        }
+
+    if method == "goal-plus-codex-pi":
+        annotator = profile["goal_plus"]["evidence_annotator"]
+        main_profile = dict(profile)
+        main_profile["methods"] = ["goal-plus-codex"]
+        main_profile["concurrency"] = 1
+        main_profile["cell_concurrency"] = 1
+
+        worker_profile = pi_worker_profile(profile)
+        worker_profile["methods"] = ["goal-plus-pi"]
+        worker_goal_plus = dict(profile["goal_plus"])
+        worker_goal_plus.pop("worker_model", None)
+        worker_goal_plus.pop("worker_reasoning_effort", None)
+        worker_goal_plus["evidence_annotator"] = "disabled"
+        worker_goal_plus["supplemental_evaluation_enabled"] = False
+        worker_profile["goal_plus"] = worker_goal_plus
+
+        main = doctor_payload(main_profile)
+        worker = doctor_payload(worker_profile)
+        checks = [
+            {**item, "name": f"main:{item['name']}"} for item in main["checks"]
+        ] + [
+            {**item, "name": f"worker:{item['name']}"}
+            for item in worker["checks"]
+        ]
+        return {
+            "schema_version": 1,
+            "benchmark_id": "swe-bench-verified",
+            "profile": profile["id"],
+            "method": method,
+            "model": profile["model"],
+            "worker_model": profile["goal_plus"]["worker_model"],
+            "view_model": (
+                annotator.get("model") if isinstance(annotator, dict) else None
+            ),
+            "ok": main["ok"] and worker["ok"],
+            "checks": checks,
+            "inventory": main["inventory"],
+            "packages": main["packages"],
+            "swebench_commit": main["swebench_commit"],
+            "components": {"main": main, "worker": worker},
+            "checked_at": utc_now(),
+        }
+
     inventory = image_inventory(profile)
     checks: list[dict[str, Any]] = [
         _check("inventory:exact-images", inventory["ok"]),
@@ -1043,62 +1576,74 @@ def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
             _check(f"package:{name}", version is not None, version=version)
         )
 
-    method = profile["methods"][0]
+    task_count = len(profile["tasks"])
+    for task in profile["tasks"]:
+        image = task["image"]
+        base_commit = task["base_commit"]
+        checkout_probe = _image_checkout_probe(image, base_commit)
+        checkout_values = checkout_probe.stdout.splitlines()
+        checkout_valid = (
+            checkout_probe.returncode == 0
+            and len(checkout_values) == 3
+            and checkout_values[1] == checkout_values[2]
+        )
+        image_setup_evidence = None
+        if (
+            checkout_probe.returncode == 0
+            and len(checkout_values) == 3
+            and not checkout_valid
+            and isinstance(task.get("image_setup"), dict)
+        ):
+            setup_patch, setup_files = _image_setup_probe(image, base_commit)
+            setup_contract = task["image_setup"]
+            canonical_patch = (
+                setup_patch.stdout.rstrip("\n") + "\n" if setup_patch.stdout else ""
+            )
+            setup_patch_sha256 = hashlib.sha256(
+                canonical_patch.encode("utf-8")
+            ).hexdigest()
+            observed_setup_files = setup_files.stdout.splitlines()
+            setup_valid = bool(
+                setup_patch.returncode == 0
+                and setup_files.returncode == 0
+                and checkout_values[0] == setup_contract.get("head")
+                and checkout_values[2] == setup_contract.get("tree")
+                and setup_patch_sha256 == setup_contract.get("patch_sha256")
+                and observed_setup_files == setup_contract.get("files")
+            )
+            checkout_valid = setup_valid
+            image_setup_evidence = {
+                "passed": setup_valid,
+                "head": checkout_values[0],
+                "tree": checkout_values[2],
+                "patch_sha256": setup_patch_sha256,
+                "files": observed_setup_files,
+                "provenance": setup_contract.get("provenance"),
+            }
+        check_name = "image:dataset-base-tree"
+        if task_count > 1:
+            check_name = f"image:{task['instance_id']}:dataset-base-tree"
+        checks.append(
+            _check(
+                check_name,
+                checkout_valid,
+                task_id=task["instance_id"],
+                image=image,
+                network_mode="none",
+                base_commit=base_commit,
+                observed_head=checkout_values[0] if checkout_values else None,
+                base_tree=(
+                    checkout_values[1] if len(checkout_values) > 1 else None
+                ),
+                observed_tree=(
+                    checkout_values[2] if len(checkout_values) > 2 else None
+                ),
+                image_setup=image_setup_evidence,
+                error=checkout_probe.stderr.strip()[-2000:],
+            )
+        )
     task = profile["tasks"][0]
     image = task["image"]
-    base_commit = task["base_commit"]
-    checkout_probe = _image_checkout_probe(image, base_commit)
-    checkout_values = checkout_probe.stdout.splitlines()
-    checkout_valid = (
-        checkout_probe.returncode == 0
-        and len(checkout_values) == 3
-        and checkout_values[1] == checkout_values[2]
-    )
-    image_setup_evidence = None
-    if (
-        checkout_probe.returncode == 0
-        and len(checkout_values) == 3
-        and not checkout_valid
-        and isinstance(task.get("image_setup"), dict)
-    ):
-        setup_patch, setup_files = _image_setup_probe(image, base_commit)
-        setup_contract = task["image_setup"]
-        canonical_patch = (
-            setup_patch.stdout.rstrip("\n") + "\n" if setup_patch.stdout else ""
-        )
-        setup_patch_sha256 = hashlib.sha256(
-            canonical_patch.encode("utf-8")
-        ).hexdigest()
-        observed_setup_files = setup_files.stdout.splitlines()
-        setup_valid = bool(
-            setup_patch.returncode == 0
-            and setup_files.returncode == 0
-            and checkout_values[0] == setup_contract.get("head")
-            and checkout_values[2] == setup_contract.get("tree")
-            and setup_patch_sha256 == setup_contract.get("patch_sha256")
-            and observed_setup_files == setup_contract.get("files")
-        )
-        checkout_valid = setup_valid
-        image_setup_evidence = {
-            "passed": setup_valid,
-            "head": checkout_values[0],
-            "tree": checkout_values[2],
-            "patch_sha256": setup_patch_sha256,
-            "files": observed_setup_files,
-            "provenance": setup_contract.get("provenance"),
-        }
-    checks.append(
-        _check(
-            "image:dataset-base-tree",
-            checkout_valid,
-            base_commit=base_commit,
-            observed_head=checkout_values[0] if checkout_values else None,
-            base_tree=(checkout_values[1] if len(checkout_values) > 1 else None),
-            observed_tree=(checkout_values[2] if len(checkout_values) > 2 else None),
-            image_setup=image_setup_evidence,
-            error=checkout_probe.stderr.strip()[-2000:],
-        )
-    )
     runtime: dict[str, Any]
     if method == "goal-plus-codex":
         runtime = resolve_goal_plus_codex_runtime(profile)
@@ -1479,6 +2024,7 @@ def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
             route_recorded = False
             container_recorded = False
             model_recorded = False
+            api_network: dict[str, Any] | None = None
             try:
                 if not paths_present or not api_config_valid:
                     raise SweBenchContractError(
@@ -1488,67 +2034,78 @@ def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
                     prefix="pi-api-doctor-",
                     namespace="swe-bench-verified",
                 ) as destination:
-                    with routed_pi_runtime(
-                        profile,
-                        destination,
-                        goal_plus=method == "goal-plus-pi",
-                    ) as routed:
-                        route_recorded = True
-                        checks.append(
-                            _check(
-                                "pi:container-api-route",
-                                True,
-                                loopback_bridge=routed["bridge"] is not None,
-                                bridge=(
-                                    {
+                    with isolated_container_network(str(destination)) as api_network:
+                        with routed_pi_runtime(
+                            profile,
+                            destination,
+                            goal_plus=method == "goal-plus-pi",
+                            bridge_host=str(api_network["gateway"]),
+                        ) as routed:
+                            route_recorded = True
+                            checks.append(
+                                _check(
+                                    "pi:container-api-route",
+                                    True,
+                                    loopback_bridge=routed["bridge"] is not None,
+                                    network={
+                                        "id": api_network["id"],
+                                        "name": api_network["name"],
+                                        "internal": api_network["internal"],
+                                        "external_route": api_network[
+                                            "external_route"
+                                        ],
+                                    },
+                                    bridge=(
+                                        {
+                                            key: value
+                                            for key, value in routed["bridge"].items()
+                                            if key != "pid"
+                                        }
+                                        if routed["bridge"]
+                                        else None
+                                    ),
+                                    runtime_base_url=routed["runtime_api_base_url"],
+                                )
+                            )
+                            container_probe = codex_container_responses_probe(
+                                image,
+                                routed,
+                                model=str(routed["model_id"]),
+                                network_name=str(api_network["name"]),
+                            )
+                            container_recorded = True
+                            checks.append(
+                                _check(
+                                    "pi:container-responses",
+                                    bool(container_probe["passed"]),
+                                    **{
                                         key: value
-                                        for key, value in routed["bridge"].items()
-                                        if key != "pid"
-                                    }
-                                    if routed["bridge"]
-                                    else None
-                                ),
-                                runtime_base_url=routed["runtime_api_base_url"],
+                                        for key, value in container_probe.items()
+                                        if key != "passed"
+                                    },
+                                )
                             )
-                        )
-                        container_probe = codex_container_responses_probe(
-                            image,
-                            routed,
-                            model=str(routed["model_id"]),
-                        )
-                        container_recorded = True
-                        checks.append(
-                            _check(
-                                "pi:container-responses",
-                                bool(container_probe["passed"]),
-                                **{
-                                    key: value
-                                    for key, value in container_probe.items()
-                                    if key != "passed"
-                                },
+                            model_probe = _pi_container_probe(image, routed)
+                            model_recorded = True
+                            model_passed = _pi_model_probe_passed(
+                                model_probe, str(routed["model_id"])
                             )
-                        )
-                        model_probe = _pi_container_probe(image, routed)
-                        model_recorded = True
-                        model_passed = bool(
-                            model_probe.returncode == 0
-                            and str(routed["model_id"]) in model_probe.stdout
-                        )
-                        checks.append(
-                            _check(
-                                "pi:container-model",
-                                model_passed,
-                                provider=routed["provider"],
-                                model=routed["model_id"],
-                                output=model_probe.stdout.strip()[-2000:],
-                                error=model_probe.stderr.strip()[-2000:],
+                            checks.append(
+                                _check(
+                                    "pi:container-model",
+                                    model_passed,
+                                    provider=routed["provider"],
+                                    model=routed["model_id"],
+                                    network_mode="none",
+                                    output=model_probe.stdout.strip()[-2000:],
+                                    error=model_probe.stderr.strip()[-2000:],
+                                )
                             )
-                        )
-                        pi_model_ready = bool(
-                            host_probe["passed"]
-                            and container_probe["passed"]
-                            and model_passed
-                        )
+                            pi_model_ready = bool(
+                                host_probe["passed"]
+                                and container_probe["passed"]
+                                and model_passed
+                            )
             except Exception as error:
                 detail = f"{type(error).__name__}: {error}"
                 if not route_recorded:
@@ -1561,19 +2118,29 @@ def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
                     )
                 if not model_recorded:
                     checks.append(_check("pi:container-model", False, error=detail))
+            if api_network is not None:
+                checks.append(
+                    _check(
+                        "pi:doctor-network-cleanup",
+                        bool(api_network["removed"]),
+                        network=api_network["name"],
+                        error=api_network["remove_error"],
+                    )
+                )
         else:
+            model_passed = False
             if paths_present and runtime["credential_present"]:
                 probe = _pi_container_probe(image, runtime)
-                pi_model_ready = bool(
-                    probe.returncode == 0
-                    and str(runtime["model_id"]) in probe.stdout
+                model_passed = _pi_model_probe_passed(
+                    probe, str(runtime["model_id"])
                 )
                 checks.append(
                     _check(
                         "pi:container-model",
-                        pi_model_ready,
+                        model_passed,
                         provider=runtime["provider"],
                         model=runtime["model_id"],
+                        network_mode="none",
                         output=probe.stdout.strip()[-2000:],
                         error=probe.stderr.strip()[-2000:],
                     )
@@ -1588,6 +2155,116 @@ def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
                         error="Pi runtime or credential is missing",
                     )
                 )
+            if profile.get("container_network") == "internal-provider-proxy":
+                endpoint = runtime.get("provider_endpoint")
+                host_probe = (
+                    openai_chat_completions_probe(
+                        str(endpoint["base_url"]),
+                        api_key_env=str(runtime["credential_env"]),
+                        model=str(runtime["model_id"]),
+                    )
+                    if isinstance(endpoint, dict) and runtime["credential_present"]
+                    else {
+                        "passed": False,
+                        "http_status": None,
+                        "error": "built-in provider endpoint or credential is missing",
+                    }
+                )
+                checks.append(
+                    _check(
+                        "pi:host-chat-completions",
+                        bool(host_probe["passed"]),
+                        **{
+                            key: value
+                            for key, value in host_probe.items()
+                            if key != "passed"
+                        },
+                    )
+                )
+                route_recorded = False
+                container_recorded = False
+                api_network = None
+                try:
+                    if not paths_present or not model_passed:
+                        raise SweBenchContractError(
+                            "Pi built-in model is unavailable in the container runtime"
+                        )
+                    with temporary_directory(
+                        prefix="pi-built-in-api-doctor-",
+                        namespace="swe-bench-verified",
+                    ) as destination:
+                        with isolated_container_network(str(destination)) as api_network:
+                            with routed_pi_runtime(
+                                profile,
+                                destination,
+                                goal_plus=method == "goal-plus-pi",
+                                bridge_host=str(api_network["gateway"]),
+                            ) as routed:
+                                route_recorded = True
+                                proxy = dict(routed["provider_proxy"])
+                                checks.append(
+                                    _check(
+                                        "pi:container-api-route",
+                                        True,
+                                        network={
+                                            "id": api_network["id"],
+                                            "name": api_network["name"],
+                                            "internal": api_network["internal"],
+                                            "external_route": api_network[
+                                                "external_route"
+                                            ],
+                                        },
+                                        proxy=proxy,
+                                    )
+                                )
+                                container_probe = pi_container_chat_completions_probe(
+                                    image,
+                                    routed,
+                                    model=str(routed["model_id"]),
+                                    network_name=str(api_network["name"]),
+                                )
+                                container_recorded = True
+                                checks.append(
+                                    _check(
+                                        "pi:container-chat-completions",
+                                        bool(container_probe["passed"]),
+                                        **{
+                                            key: value
+                                            for key, value in container_probe.items()
+                                            if key != "passed"
+                                        },
+                                    )
+                                )
+                                pi_model_ready = bool(
+                                    model_passed
+                                    and host_probe["passed"]
+                                    and container_probe["passed"]
+                                )
+                except Exception as error:
+                    detail = f"{type(error).__name__}: {error}"
+                    if not route_recorded:
+                        checks.append(
+                            _check("pi:container-api-route", False, error=detail)
+                        )
+                    if not container_recorded:
+                        checks.append(
+                            _check(
+                                "pi:container-chat-completions",
+                                False,
+                                error=detail,
+                            )
+                        )
+                if api_network is not None:
+                    checks.append(
+                        _check(
+                            "pi:doctor-network-cleanup",
+                            bool(api_network["removed"]),
+                            network=api_network["name"],
+                            error=api_network["remove_error"],
+                        )
+                    )
+            else:
+                pi_model_ready = model_passed
         if method == "goal-plus-pi":
             expected_goal_plus_branch = managed_upstream_branch("goal_plus")
             goal_plus_branch = _git_value_at(
@@ -1612,8 +2289,12 @@ def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
             ) and (
                 runtime["goal_plus_root"] / ".pi" / "extensions" / "goal-plus.ts"
             ).is_file()
+            annotator = runtime.get("goal_plus_evidence_annotator")
+            annotator_kind = (
+                str(annotator.get("kind")) if isinstance(annotator, dict) else None
+            )
             annotator_assets_present = bool(
-                runtime.get("goal_plus_evidence_annotator") is None
+                annotator_kind != "codex"
                 or runtime.get("goal_plus_codex_archive_present")
             )
             checkout_valid = bool(
@@ -1641,14 +2322,10 @@ def doctor_payload(profile: dict[str, Any]) -> dict[str, Any]:
                         dependency_lock=str(runtime["goal_plus_dependency_lock"]),
                         visible_verifier=str(runtime["goal_plus_visible_verifier"]),
                         controller=str(runtime["goal_plus_controller"]),
-                        evidence_annotator=(
-                            "codex"
-                            if runtime.get("goal_plus_evidence_annotator")
-                            else "disabled"
-                        ),
+                        evidence_annotator=annotator_kind or "disabled",
                         codex_archive=(
                             str(runtime.get("goal_plus_codex_archive") or "")
-                            if runtime.get("goal_plus_evidence_annotator")
+                            if annotator_kind == "codex"
                             else None
                         ),
                     ),

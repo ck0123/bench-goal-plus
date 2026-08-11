@@ -119,7 +119,12 @@ class Catalog:
                     raise ContractError(
                         f"{runner_id}: contract for {method} must be an object"
                     )
-                unknown_fields = set(contract) - {"model_format", "bootstrap_targets"}
+                unknown_fields = set(contract) - {
+                    "model_format",
+                    "bootstrap_targets",
+                    "max_live_search_concurrency",
+                    "max_cell_concurrency",
+                }
                 if unknown_fields:
                     raise ContractError(
                         f"{runner_id}: contract for {method} has unknown fields: "
@@ -144,6 +149,19 @@ class Catalog:
                         f"{runner_id}: contract for {method} bootstrap_targets must "
                         "name managed upstreams"
                     )
+                for field in (
+                    "max_live_search_concurrency",
+                    "max_cell_concurrency",
+                ):
+                    value = contract.get(field)
+                    if value is not None and (
+                        not isinstance(value, int)
+                        or isinstance(value, bool)
+                        or value < 1
+                    ):
+                        raise ContractError(
+                            f"{runner_id}: contract for {method} has invalid {field}"
+                        )
                 method_contracts[method] = dict(contract)
             raw_capabilities = entry.get("capabilities")
             if not isinstance(raw_capabilities, dict):

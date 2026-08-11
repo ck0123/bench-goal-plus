@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,13 +34,18 @@ from .environment import (
     codex_container_responses_probe,
     goal_plus_install_script,
     goal_plus_runtime_environment,
+    has_pi_worker_override,
     openai_responses_probe,
+    pi_provider_proxy_environment,
     resolve_codex_runtime,
     resolve_goal_plus_codex_runtime,
-    resolve_goal_plus_runtime,
+    resolve_goal_plus_codex_pi_runtime,
+    resolve_goal_plus_pi_runtime,
     resolve_pi_runtime,
     routed_codex_runtime,
     routed_goal_plus_codex_runtime,
+    routed_goal_plus_codex_pi_runtime,
+    routed_goal_plus_pi_runtime,
     routed_pi_runtime,
 )
 from .goal_plus_evidence import collect_goal_plus_state, record_completion_check
@@ -52,6 +59,13 @@ HIDDEN_INSTANCE_FIELDS = {
     "FAIL_TO_PASS",
     "PASS_TO_PASS",
 }
+ISOLATED_CONTAINER_NETWORK_POLICIES = {
+    "internal-api-only",
+    "internal-provider-proxy",
+}
+GOAL_PLUS_METHODS = {"goal-plus-codex", "goal-plus-codex-pi", "goal-plus-pi"}
+CODEX_MAIN_METHODS = {"goal-plus-codex", "goal-plus-codex-pi"}
+PI_WORKER_METHODS = {"goal-plus-codex-pi", "goal-plus-pi"}
 
 
 def _configure_huggingface_cache() -> Path:
@@ -89,7 +103,10 @@ def _git_value(path: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _load_pinned_instance(profile: dict[str, Any]) -> dict[str, Any]:
+_MANIFEST_LOCK = threading.RLock()
+
+
+def _load_pinned_instances(profile: dict[str, Any]) -> list[dict[str, Any]]:
     _configure_huggingface_cache()
     from datasets import load_dataset
 
@@ -98,41 +115,51 @@ def _load_pinned_instance(profile: dict[str, Any]) -> dict[str, Any]:
         split=profile["dataset"]["split"],
         revision=profile["dataset"]["revision"],
     )
-    task_id = profile["task_ids"][0]
-    matches = [dict(row) for row in dataset if row.get("instance_id") == task_id]
-    if len(matches) != 1:
+    requested = set(profile["task_ids"])
+    matches = {
+        str(row["instance_id"]): dict(row)
+        for row in dataset
+        if row.get("instance_id") in requested
+    }
+    if set(matches) != requested:
+        missing = sorted(requested - set(matches))
         raise SweBenchContractError(
-            f"pinned dataset returned {len(matches)} rows for {task_id}"
+            "pinned dataset is missing task ids: " + ", ".join(missing)
         )
-    return matches[0]
+    return [matches[task_id] for task_id in profile["task_ids"]]
 
 
-def _validate_instance_image(instance: dict[str, Any], profile: dict[str, Any]) -> None:
-    from swebench.harness.test_spec.test_spec import make_test_spec
+def _load_pinned_instance(profile: dict[str, Any]) -> dict[str, Any]:
+    """Preserve the one-task helper used by existing integrations and tests."""
+    return _load_pinned_instances(profile)[0]
 
-    task = profile["tasks"][0]
+
+def _validate_instance_image(instance: dict[str, Any], task: dict[str, Any]) -> None:
     if instance.get("repo") != task["repo"]:
         raise SweBenchContractError("dataset repo does not match the pinned profile")
     if instance.get("base_commit") != task["base_commit"]:
         raise SweBenchContractError(
             "dataset base_commit does not match the pinned profile"
         )
-    spec = make_test_spec(instance, namespace="swebench")
-    if spec.instance_image_key != task["image"]:
+    instance_id = str(instance["instance_id"]).lower()
+    expected_image = (
+        f"swebench/sweb.eval.x86_64.{instance_id}:latest".replace("__", "_1776_")
+    )
+    if expected_image != task["image"]:
         raise SweBenchContractError(
             "official harness image key does not match the local inventory tag: "
-            f"{spec.instance_image_key!r} != {task['image']!r}"
+            f"{expected_image!r} != {task['image']!r}"
         )
 
 
-def _visible_task(instance: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+def _visible_task(instance: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
     visible = {
         "instance_id": instance["instance_id"],
         "repo": instance["repo"],
         "base_commit": instance["base_commit"],
         "problem_statement": instance["problem_statement"],
         "version": instance.get("version"),
-        "image": profile["tasks"][0]["image"],
+        "image": task["image"],
     }
     if set(visible) & HIDDEN_INSTANCE_FIELDS:
         raise AssertionError("visible task allowlist includes a hidden field")
@@ -143,61 +170,92 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
     destination = campaign_dir(campaign_id)
     preserved = preserve_conflict(destination)
     destination.mkdir(parents=True, exist_ok=False)
-    cell_dir = destination / "cells" / profile["methods"][0]
     evaluator_dir = destination / "evaluator"
-    cell_dir.mkdir(parents=True)
     evaluator_dir.mkdir(parents=True)
 
-    instance = _load_pinned_instance(profile)
-    _validate_instance_image(instance, profile)
-    visible = _visible_task(instance, profile)
-    write_json(cell_dir / "task.json", visible)
-    evaluator_instances = evaluator_dir / "instances.json"
-    evaluator_instances.write_text(
-        json.dumps([instance], indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    instances = (
+        [_load_pinned_instance(profile)]
+        if len(profile["task_ids"]) == 1
+        else _load_pinned_instances(profile)
     )
-    evaluator_instances.chmod(0o600)
 
     source_commit = _git_value(ROOT, "rev-parse", "HEAD")
     swebench_commit = _git_value(SWEBENCH_ROOT, "rev-parse", "HEAD")
     goal_plus_commit = (
         _git_value(GOAL_PLUS_ROOT, "rev-parse", "HEAD")
-        if profile["methods"][0] in {"goal-plus-codex", "goal-plus-pi"}
+        if profile["methods"][0] in GOAL_PLUS_METHODS
         else None
     )
     provider_contract = (
         dict(profile["agent_provider"])
         if profile.get("agent_provider") is not None
         else {"auth_mode": "chatgpt"}
-        if profile["methods"][0] == "goal-plus-codex"
+        if profile["methods"][0] in CODEX_MAIN_METHODS
         else {
             "auth_mode": "provider-api",
             "provider": profile["model"].partition("/")[0],
         }
     )
-    cell = {
-        "cell_id": f"{profile['methods'][0]}--{instance['instance_id']}",
-        "task_id": instance["instance_id"],
-        "repo": instance["repo"],
-        "base_commit": instance["base_commit"],
-        "image": profile["tasks"][0]["image"],
-        "method": profile["methods"][0],
-        "model": profile["model"],
-        "reasoning_effort": profile["reasoning_effort"],
-        "seed": profile.get("seed", 1),
-        "agent_provider": provider_contract,
-        "supplemental_evaluation_enabled": (
-            profile["goal_plus"].get("supplemental_evaluation_enabled", False)
-            if profile["methods"][0] in {"goal-plus-codex", "goal-plus-pi"}
-            else None
-        ),
-        "state": "prepared",
-        "task_file": str((cell_dir / "task.json").relative_to(destination)),
-        "patch_file": str((cell_dir / "model.patch").relative_to(destination)),
-        "agent": {"state": "pending"},
-        "evaluation": {"state": "pending", "calls": 0},
-    }
+    cells = []
+    visible_fields: set[str] = set()
+    for index, (task, instance) in enumerate(zip(profile["tasks"], instances, strict=True)):
+        _validate_instance_image(instance, task)
+        visible = _visible_task(instance, task)
+        visible_fields.update(visible)
+        cell_id = f"{profile['methods'][0]}--{instance['instance_id']}"
+        single_task = len(instances) == 1
+        cell_dir = (
+            destination / "cells" / profile["methods"][0]
+            if single_task
+            else destination / "cells" / f"{index:02d}-{instance['instance_id']}"
+        )
+        cell_evaluator_dir = (
+            evaluator_dir
+            if single_task
+            else evaluator_dir / f"{index:02d}-{instance['instance_id']}"
+        )
+        cell_dir.mkdir(parents=True)
+        cell_evaluator_dir.mkdir(parents=True, exist_ok=True)
+        task_file = cell_dir / "task.json"
+        evaluator_instances = cell_evaluator_dir / "instances.json"
+        write_json(task_file, visible)
+        evaluator_instances.write_text(
+            json.dumps([instance], indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        evaluator_instances.chmod(0o600)
+        cells.append(
+            {
+                "cell_id": cell_id,
+                "task_id": instance["instance_id"],
+                "repo": instance["repo"],
+                "base_commit": instance["base_commit"],
+                "image": task["image"],
+                "method": profile["methods"][0],
+                "model": profile["model"],
+                "reasoning_effort": profile["reasoning_effort"],
+                "worker_model": (profile.get("goal_plus") or {}).get("worker_model"),
+                "worker_reasoning_effort": (profile.get("goal_plus") or {}).get(
+                    "worker_reasoning_effort"
+                ),
+                "seed": profile.get("seed", 1),
+                "agent_provider": provider_contract,
+                "supplemental_evaluation_enabled": (
+                    profile["goal_plus"]["supplemental_evaluation_enabled"]
+                    if profile["methods"][0] in GOAL_PLUS_METHODS
+                    else None
+                ),
+                "state": "prepared",
+                "task_file": str(task_file.relative_to(destination)),
+                "patch_file": str((cell_dir / "model.patch").relative_to(destination)),
+                "evaluator_instances_file": str(
+                    evaluator_instances.relative_to(destination)
+                ),
+                "evaluator_dir": str(cell_evaluator_dir.relative_to(destination)),
+                "agent": {"state": "pending"},
+                "evaluation": {"state": "pending", "calls": 0},
+            }
+        )
     manifest = {
         "schema_version": 1,
         "campaign_id": campaign_id,
@@ -222,14 +280,12 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
             "requested": profile["retain_containers"],
             "scope": "agent",
             "evaluator_container_owned_by": "official-swebench-harness",
+            "network_policy": profile.get("container_network", "default"),
         },
         "dataset": {
             **profile["dataset"],
             "task_ids": profile["task_ids"],
-            "evaluator_instances_file": str(
-                evaluator_instances.relative_to(destination)
-            ),
-            "agent_visible_fields": sorted(visible),
+            "agent_visible_fields": sorted(visible_fields),
             "hidden_fields_excluded_from_agent": sorted(HIDDEN_INSTANCE_FIELDS),
         },
         "source": {
@@ -246,8 +302,12 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
         },
         "profile_snapshot": profile,
         "preserved_conflict": str(preserved) if preserved else None,
-        "cells": [cell],
+        "cells": cells,
     }
+    if len(cells) == 1:
+        manifest["dataset"]["evaluator_instances_file"] = cells[0][
+            "evaluator_instances_file"
+        ]
     write_json(destination / MANIFEST, manifest)
     print(json.dumps({"campaign": str(destination), "state": "prepared"}, indent=2))
     return destination
@@ -264,8 +324,9 @@ def _manifest(campaign: Path) -> dict[str, Any]:
 
 
 def _save_manifest(campaign: Path, manifest: dict[str, Any]) -> None:
-    manifest["updated_at"] = utc_now()
-    write_json(campaign / MANIFEST, manifest)
+    with _MANIFEST_LOCK:
+        manifest["updated_at"] = utc_now()
+        write_json(campaign / MANIFEST, manifest)
 
 
 def _docker_checked(command: list[str], *, timeout: int = 120) -> str:
@@ -277,8 +338,30 @@ def _docker_checked(command: list[str], *, timeout: int = 120) -> str:
     return result.stdout.rstrip("\n")
 
 
-def _container_name(campaign_id: str, method: str) -> str:
-    digest = hashlib.sha256(f"{campaign_id}:{method}".encode()).hexdigest()[:16]
+def _profile_for_cell(profile: dict[str, Any], cell: dict[str, Any]) -> dict[str, Any]:
+    task_id = cell.get("task_id")
+    task = next(
+        (item for item in profile["tasks"] if item["instance_id"] == task_id),
+        None,
+    )
+    if task is None and len(profile["tasks"]) == 1:
+        task = profile["tasks"][0]
+    if task is None:
+        raise SweBenchContractError(
+            f"profile snapshot has no task metadata for {task_id}"
+        )
+    resolved = dict(profile)
+    resolved["task_ids"] = [str(task["instance_id"])]
+    resolved["tasks"] = [dict(task)]
+    return resolved
+
+
+def _container_name(
+    campaign_id: str, method: str, cell_id: str | None = None
+) -> str:
+    digest = hashlib.sha256(
+        f"{campaign_id}:{method}:{cell_id or ''}".encode()
+    ).hexdigest()[:16]
     return f"bgp-swe-agent-{digest}"
 
 
@@ -481,6 +564,54 @@ def _verify_agent_network(
     return result
 
 
+def _create_internal_network(campaign_id: str) -> dict[str, Any]:
+    digest = hashlib.sha256(campaign_id.encode()).hexdigest()[:16]
+    name = f"bgp-swe-net-{digest}"
+    network_id = _docker_checked(
+        [
+            "docker",
+            "network",
+            "create",
+            "--driver",
+            "bridge",
+            "--internal",
+            "--label",
+            "bench-goal-plus.owner=swe-bench-native",
+            "--label",
+            f"bench-goal-plus.campaign={campaign_id}",
+            name,
+        ]
+    )
+    payload = json.loads(_docker_checked(["docker", "network", "inspect", name]))
+    gateway = ((payload[0].get("IPAM") or {}).get("Config") or [{}])[0].get(
+        "Gateway"
+    )
+    if not isinstance(gateway, str) or not gateway:
+        raise SweBenchContractError("internal Docker network has no IPv4 gateway")
+    return {
+        "id": network_id,
+        "name": name,
+        "driver": "bridge",
+        "internal": True,
+        "gateway": gateway,
+        "external_route": False,
+        "removed": False,
+    }
+
+
+def _dispose_internal_network(network: dict[str, Any]) -> dict[str, Any]:
+    result = _run(["docker", "network", "rm", str(network["name"])], timeout=120)
+    return {
+        **network,
+        "removed": result.returncode == 0,
+        "remove_error": (
+            result.stderr.strip() or result.stdout.strip() or None
+            if result.returncode != 0
+            else None
+        ),
+    }
+
+
 def _dispose_agent_container(container_id: str, *, retain: bool) -> dict[str, Any]:
     if retain:
         stop_error = None
@@ -578,10 +709,11 @@ def _create_agent_container(
     profile: dict[str, Any],
     runtime: dict[str, Any] | None = None,
     *,
+    cell_id: str | None = None,
     network_name: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     method = profile["methods"][0]
-    name = _container_name(campaign_id, method)
+    name = _container_name(campaign_id, method, cell_id)
     command = [
         "docker",
         "create",
@@ -600,9 +732,11 @@ def _create_agent_container(
     ]
     if network_name is not None:
         command.extend(["--network", network_name])
-    if method in {"plain-codex", "goal-plus-codex"}:
+    if method in {"plain-codex", *CODEX_MAIN_METHODS}:
         runtime = runtime or (
-            resolve_goal_plus_codex_runtime(profile)
+            resolve_goal_plus_codex_pi_runtime(profile)
+            if method == "goal-plus-codex-pi"
+            else resolve_goal_plus_codex_runtime(profile)
             if method == "goal-plus-codex"
             else resolve_codex_runtime(profile)
         )
@@ -630,7 +764,7 @@ def _create_agent_container(
                 f"type=bind,src={runtime['archive']},dst=/opt/runtime/codex.tgz,readonly",
             ]
         )
-        if method == "goal-plus-codex" and runtime["auth_mode"] == "chatgpt":
+        if method in CODEX_MAIN_METHODS and runtime["auth_mode"] == "chatgpt":
             command.extend(
                 [
                     "--mount",
@@ -639,15 +773,40 @@ def _create_agent_container(
                     "dst=/opt/codex-home/auth.json,readonly",
                 ]
             )
+        if method == "goal-plus-codex-pi":
+            if not runtime.get("worker_credential_present"):
+                raise SweBenchContractError(
+                    f"Pi worker credential for provider {runtime.get('worker_provider')} is missing"
+                )
+            if not all(runtime.get(key) for key in ("node_root", "package_root")):
+                raise SweBenchContractError("Pi worker Node.js or package runtime is missing")
+            command.extend(
+                [
+                    "--tmpfs",
+                    "/opt/pi-home:rw,nosuid,nodev,size=128m",
+                    "--mount",
+                    f"type=bind,src={runtime['node_root']},dst=/opt/node,readonly",
+                    "--mount",
+                    f"type=bind,src={runtime['package_root']},dst=/opt/pi,readonly",
+                ]
+            )
     else:
         runtime = runtime or (
-            resolve_goal_plus_runtime(profile)
+            resolve_goal_plus_pi_runtime(profile)
             if method == "goal-plus-pi"
             else resolve_pi_runtime(profile)
         )
         if not runtime["credential_present"]:
             raise SweBenchContractError(
                 f"Pi credential for provider {runtime['provider']} is missing"
+            )
+        if (
+            method == "goal-plus-pi"
+            and has_pi_worker_override(profile)
+            and not runtime.get("worker_credential_present")
+        ):
+            raise SweBenchContractError(
+                f"Pi worker credential for provider {runtime.get('worker_provider')} is missing"
             )
         if not all(runtime.get(name) for name in ("node_root", "package_root")):
             raise SweBenchContractError("Pi Node.js or package runtime is missing")
@@ -673,7 +832,7 @@ def _create_agent_container(
                     f"type=bind,src={models_file.parent},dst=/opt/pi-provider,readonly",
                 ]
             )
-    if method in {"goal-plus-codex", "goal-plus-pi"}:
+    if method in GOAL_PLUS_METHODS:
         required_assets = (
             "goal_plus_root",
             "goal_plus_dependency_lock",
@@ -681,9 +840,11 @@ def _create_agent_container(
             "goal_plus_controller",
             "goal_plus_pip_cache",
         )
-        if method == "goal-plus-pi" and runtime.get(
-            "goal_plus_evidence_annotator"
-        ) is not None:
+        if (
+            method == "goal-plus-pi"
+            and isinstance(runtime.get("goal_plus_evidence_annotator"), dict)
+            and runtime["goal_plus_evidence_annotator"].get("kind") == "codex"
+        ):
             required_assets = (*required_assets, "goal_plus_codex_archive")
         missing = [
             name
@@ -720,9 +881,11 @@ def _create_agent_container(
                 "dst=/opt/pip-cache",
             ]
         )
-        if method == "goal-plus-pi" and runtime.get(
-            "goal_plus_evidence_annotator"
-        ) is not None:
+        if (
+            method == "goal-plus-pi"
+            and isinstance(runtime.get("goal_plus_evidence_annotator"), dict)
+            and runtime["goal_plus_evidence_annotator"].get("kind") == "codex"
+        ):
             command.extend(
                 [
                     "--tmpfs",
@@ -871,7 +1034,7 @@ def _initialize_agent_container(
             ]
         )
     method = profile["methods"][0]
-    if method in {"plain-codex", "goal-plus-codex"}:
+    if method in {"plain-codex", *CODEX_MAIN_METHODS}:
         _docker_checked(
             [
                 "docker",
@@ -883,9 +1046,11 @@ def _initialize_agent_container(
             ],
             timeout=120,
         )
-    elif method == "goal-plus-pi" and runtime.get(
-        "goal_plus_evidence_annotator"
-    ) is not None:
+    elif (
+        method == "goal-plus-pi"
+        and isinstance(runtime.get("goal_plus_evidence_annotator"), dict)
+        and runtime["goal_plus_evidence_annotator"].get("kind") == "codex"
+    ):
         _docker_checked(
             [
                 "docker",
@@ -898,24 +1063,27 @@ def _initialize_agent_container(
             ],
             timeout=120,
         )
-    if method in {"goal-plus-codex", "goal-plus-pi"}:
+    if method in GOAL_PLUS_METHODS:
         environment = goal_plus_runtime_environment()
         install_command = ["docker", "exec"]
         for name, value in environment.items():
             install_command.extend(["-e", f"{name}={value}"])
         if os.environ.get("PIP_INDEX_URL"):
             install_command.extend(["-e", "PIP_INDEX_URL"])
-        install_script = goal_plus_install_script(
-            include_pi=method == "goal-plus-pi"
-        )
-        if runtime.get("goal_plus_evidence_annotator") is not None:
+        install_script = goal_plus_install_script(include_pi=method in PI_WORKER_METHODS)
+        annotator = runtime.get("goal_plus_evidence_annotator")
+        if isinstance(annotator, dict) and annotator.get("kind") == "codex":
             install_script += (
                 " && ln -sf "
                 "/opt/codex/package/vendor/x86_64-unknown-linux-musl/bin/codex "
                 "/opt/goal-plus-bin/codex"
             )
         version_probe = (
-            "pi --version" if method == "goal-plus-pi" else "codex --version"
+            "codex --version && pi --version"
+            if method == "goal-plus-codex-pi"
+            else "pi --version"
+            if method == "goal-plus-pi"
+            else "codex --version"
         )
         install_command.extend(
             [
@@ -930,7 +1098,7 @@ def _initialize_agent_container(
         _docker_checked(install_command, timeout=600)
         asset_copy = (
             "cp -a /opt/goal-plus/.codex /testbed/.codex && "
-            if method == "goal-plus-codex"
+            if method in CODEX_MAIN_METHODS
             else ""
         )
         _docker_checked(
@@ -968,8 +1136,7 @@ def _initialize_agent_container(
         "observed_tree": observed_tree,
         "synthetic_head": observed != base_commit,
         "image_setup": image_setup_verification,
-        "goal_plus_initialized": profile["methods"][0]
-        in {"goal-plus-codex", "goal-plus-pi"},
+        "goal_plus_initialized": profile["methods"][0] in GOAL_PLUS_METHODS,
     }
 
 
@@ -999,14 +1166,19 @@ def build_goal_plus_prompt(task: dict[str, Any], profile: dict[str, Any]) -> str
     annotator_timeout = (
         annotator["timeout_seconds"] if isinstance(annotator, dict) else 300
     )
-    codex_host = profile["methods"][0] == "goal-plus-codex"
-    worker_host = "codex" if codex_host else "pi-rpc"
-    if codex_host and profile["concurrency"] > 1:
+    annotator_host = (
+        "pi-rpc"
+        if isinstance(annotator, dict) and annotator.get("kind") == "pi"
+        else "codex"
+    )
+    codex_worker = profile["methods"][0] == "goal-plus-codex"
+    worker_host = "codex" if codex_worker else "pi-rpc"
+    if codex_worker and profile["concurrency"] > 1:
         worker_instruction = (
             "Keep each candidate on its existing bound Codex worker session; "
             "do not create replacement lanes."
         )
-    elif codex_host:
+    elif codex_worker:
         worker_instruction = (
             "Use the bound Codex worker session; do not create replacement lanes."
         )
@@ -1014,6 +1186,7 @@ def build_goal_plus_prompt(task: dict[str, Any], profile: dict[str, Any]) -> str
         worker_instruction = (
             "Continue the same bound Pi worker session; do not create replacement lanes."
         )
+    global_evidence_mode = str(goal_plus.get("global_evidence_mode", "manual"))
     minimum_budget_instruction = ""
     if "worker_min_runtime_seconds" in goal_plus:
         minimum_budget_instruction = (
@@ -1023,6 +1196,14 @@ def build_goal_plus_prompt(task: dict[str, Any], profile: dict[str, Any]) -> str
             f"{goal_plus['worker_min_verifier_runs']}. These are lower-bound search "
             "gates: keep the same worker active until both are satisfied. "
         )
+    worker_launch_instruction = ""
+    if has_pi_worker_override(profile):
+        worker_launch_instruction = (
+            "Set strategy.worker_launch.model="
+            f"{goal_plus['worker_model']} and "
+            "strategy.worker_launch.reasoning_effort="
+            f"{goal_plus['worker_reasoning_effort']}. "
+        )
     if profile["concurrency"] == 1:
         candidate_instruction = "Use one fixed initial candidate. "
     else:
@@ -1030,7 +1211,7 @@ def build_goal_plus_prompt(task: dict[str, Any], profile: dict[str, Any]) -> str
             f"Use exactly {profile['concurrency']} fixed initial candidates with "
             "distinct public-evidence-based hypotheses. Start them together in one "
             "batch and bind exactly one worker session to each candidate; do not "
-            "serialize or create replacement lanes. After both candidates have "
+            "serialize or create replacement lanes. After at least two candidates have "
             "settled Evidence, keep searching so at least one worker reads a completed "
             "peer supplemental View before its next verifier attempt. "
         )
@@ -1048,11 +1229,13 @@ def build_goal_plus_prompt(task: dict[str, Any], profile: dict[str, Any]) -> str
         "Set strategy.worker_budget.max_runtime_seconds="
         f"{goal_plus['worker_runtime_seconds']}. "
         f"{minimum_budget_instruction}"
+        f"{worker_launch_instruction}"
         "Set "
         "strategy.config.closeout_reserve_seconds="
         f"{goal_plus['closeout_reserve_seconds']} and strategy.config.seed="
-        f"{profile.get('seed', 1)}. {candidate_instruction}"
-        "Set strategy.evidence_annotator.host=codex and "
+        f"{profile.get('seed', 1)} and strategy.config.global_evidence_mode="
+        f"{global_evidence_mode}. {candidate_instruction}"
+        f"Set strategy.evidence_annotator.host={annotator_host} and "
         "strategy.evidence_annotator.timeout_seconds="
         f"{annotator_timeout}; "
         "leave its model and provider unset because the harness supplies the ViewAgent. "
@@ -1120,6 +1303,9 @@ def _goal_plus_supplemental_evaluation_environment(
     return {
         "GOAL_PLUS_SUPPLEMENTAL_EVALUATION_ENABLED": "1" if enabled else "0",
         "GOAL_PLUS_SUPPLEMENTAL_EVALUATION_REQUIRED": "1" if enabled else "0",
+        "GOAL_PLUS_GLOBAL_EVIDENCE_MODE": str(
+            profile["goal_plus"].get("global_evidence_mode", "manual")
+        ),
     }
 
 
@@ -1130,13 +1316,15 @@ def _goal_plus_evidence_annotator_environment(
     if annotator == "disabled":
         return {"GOAL_PLUS_EVIDENCE_ANNOTATOR_DISABLED": "1"}
     environment = {
-        "CODEX_HOME": "/opt/codex-home",
         "GOAL_PLUS_EVIDENCE_ANNOTATOR_DISABLED": "0",
         "GOAL_PLUS_EVIDENCE_ANNOTATOR_MODEL": str(annotator["model"]),
         "GOAL_PLUS_EVIDENCE_ANNOTATOR_REASONING_EFFORT": str(
             annotator["reasoning_effort"]
         ),
     }
+    if annotator["kind"] == "pi":
+        return environment
+    environment["CODEX_HOME"] = "/opt/codex-home"
     provider = profile.get("agent_provider")
     if provider is None:
         return environment
@@ -1161,14 +1349,20 @@ def _goal_plus_evidence_annotator_public(profile: dict[str, Any]) -> Any:
     if annotator == "disabled":
         return "disabled"
     provider = profile.get("agent_provider")
-    return {
-        "kind": "codex",
+    result = {
+        "kind": annotator["kind"],
         "model": annotator["model"],
         "reasoning_effort": annotator["reasoning_effort"],
         "timeout_seconds": annotator["timeout_seconds"],
-        "provider_id": provider["id"] if provider else "chatgpt",
-        "wire_api": provider["wire_api"] if provider else "native-codex",
     }
+    if annotator["kind"] == "codex":
+        result.update(
+            {
+                "provider_id": provider["id"] if provider else "chatgpt",
+                "wire_api": provider["wire_api"] if provider else "native-codex",
+            }
+        )
+    return result
 
 
 def _agent_command(
@@ -1199,7 +1393,8 @@ def _agent_command(
             ("no_proxy", no_proxy),
         ):
             common.extend(["-e", f"{name}={value}"])
-    if profile["methods"][0] == "goal-plus-codex":
+    if profile["methods"][0] in CODEX_MAIN_METHODS:
+        mixed_pi_workers = profile["methods"][0] == "goal-plus-codex-pi"
         custom_provider = profile.get("agent_provider") is not None
         goal_plus_environment = {
             **goal_plus_runtime_environment(),
@@ -1213,6 +1408,14 @@ def _agent_command(
             "GOAL_PLUS_OUTER_DEADLINE_AT": str(runtime["outer_deadline_at"]),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
+        if mixed_pi_workers:
+            goal_plus_environment.update(
+                {
+                    "PI_CODING_AGENT_DIR": "/opt/pi-home/.pi/agent",
+                    "GOAL_PLUS_PI_MODEL": str(profile["goal_plus"]["worker_model"]),
+                    **pi_provider_proxy_environment(runtime),
+                }
+            )
         command = [*common]
         for name, value in goal_plus_environment.items():
             command.extend(["-e", f"{name}={value}"])
@@ -1234,12 +1437,14 @@ def _agent_command(
                 provider_name=str(runtime["provider_name"]),
                 api_key_env=str(runtime["api_key_env"]),
             )
+        if mixed_pi_workers:
+            command.extend(["-e", str(runtime["worker_credential_env"])])
         command.extend(
             [
                 container_id,
                 "sh",
                 "-lc",
-                'export PATH=/opt/goal-plus-bin:$PATH; exec "$@"',
+                'export PATH=/opt/goal-plus-bin:/opt/node/bin:$PATH; exec "$@"',
                 "swe-bench-goal-plus-codex",
                 "/opt/codex/package/vendor/x86_64-unknown-linux-musl/bin/codex",
                 "exec",
@@ -1323,9 +1528,12 @@ def _agent_command(
             "GOAL_PLUS_ROOT": "/testbed/.gp",
             "GOAL_PLUS_SEARCH_ROOT": "/testbed/.gp",
             "GOAL_PLUS_SOURCE_PATH": "/opt/goal-plus",
-            "GOAL_PLUS_PI_MODEL": profile["model"],
+            "GOAL_PLUS_PI_MODEL": str(
+                profile["goal_plus"].get("worker_model", profile["model"])
+            ),
             "GOAL_PLUS_OUTER_DEADLINE_AT": str(runtime["outer_deadline_at"]),
             "PYTHONDONTWRITEBYTECODE": "1",
+            **pi_provider_proxy_environment(runtime),
         }
         command = [*common]
         for name, value in goal_plus_environment.items():
@@ -1339,10 +1547,17 @@ def _agent_command(
                     f"no_proxy={runtime['bridge_host']}",
                 ]
             )
+        credential_names = [credential_env]
+        worker_credential = runtime.get("worker_credential_env")
+        if (
+            isinstance(worker_credential, str)
+            and worker_credential not in credential_names
+        ):
+            credential_names.append(worker_credential)
+        for name in credential_names:
+            command.extend(["-e", name])
         command.extend(
             [
-                "-e",
-                credential_env,
                 container_id,
                 "sh",
                 "-lc",
@@ -1392,6 +1607,11 @@ def _agent_command(
         "HOME=/opt/pi-home",
         "-e",
         "PI_CODING_AGENT_DIR=/opt/pi-home/.pi/agent",
+        *[
+            item
+            for name, value in pi_provider_proxy_environment(runtime).items()
+            for item in ("-e", f"{name}={value}")
+        ],
         "-e",
         credential_env,
         *bridge_environment,
@@ -1468,7 +1688,8 @@ def _goal_plus_closeout(
     profile: dict[str, Any],
     runtime: dict[str, Any],
 ) -> dict[str, Any]:
-    is_pi = profile["methods"][0] == "goal-plus-pi"
+    is_pi_main = profile["methods"][0] == "goal-plus-pi"
+    uses_pi_workers = profile["methods"][0] in PI_WORKER_METHODS
     annotator = profile["goal_plus"]["evidence_annotator"]
     annotator_timeout = (
         int(annotator["timeout_seconds"]) if isinstance(annotator, dict) else 0
@@ -1477,23 +1698,39 @@ def _goal_plus_closeout(
         **goal_plus_runtime_environment(),
         **_goal_plus_supplemental_evaluation_environment(profile),
         **_goal_plus_evidence_annotator_environment(profile, runtime),
-        "HOME": "/opt/pi-home" if is_pi else "/opt/codex-home",
-        "PATH": "/opt/goal-plus-bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOME": "/opt/pi-home" if is_pi_main else "/opt/codex-home",
+        "PATH": "/opt/goal-plus-bin:/opt/node/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "GOAL_PLUS_ROOT": "/testbed/.gp",
         "GOAL_PLUS_SEARCH_ROOT": "/testbed/.gp",
         "GOAL_PLUS_SOURCE_PATH": "/opt/goal-plus",
         "GOAL_PLUS_OUTER_DEADLINE_AT": str(runtime["outer_deadline_at"]),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    if is_pi:
+    if uses_pi_workers:
         environment["PI_CODING_AGENT_DIR"] = "/opt/pi-home/.pi/agent"
-        environment["GOAL_PLUS_PI_MODEL"] = profile["model"]
+        environment["GOAL_PLUS_PI_MODEL"] = str(
+            profile["goal_plus"].get("worker_model", profile["model"])
+        )
+        environment.update(pi_provider_proxy_environment(runtime))
     command = ["docker", "exec"]
     for name, value in environment.items():
         command.extend(["-e", f"{name}={value}"])
-    if is_pi:
-        command.extend(["-e", str(runtime["credential_env"])])
-    elif profile.get("agent_provider") is not None:
+    if uses_pi_workers:
+        credential_names = []
+        if is_pi_main:
+            credential_names.append(runtime.get("credential_env"))
+        credential_names.append(
+            runtime.get("worker_credential_env", runtime.get("credential_env"))
+        )
+        for credential_env in dict.fromkeys(credential_names):
+            if isinstance(credential_env, str) and credential_env:
+                command.extend(["-e", credential_env])
+    if is_pi_main and runtime.get("bridge_host"):
+        no_proxy = f"127.0.0.1,localhost,::1,{runtime['bridge_host']}"
+        command.extend(
+            ["-e", f"NO_PROXY={no_proxy}", "-e", f"no_proxy={no_proxy}"]
+        )
+    if profile.get("agent_provider") is not None and not is_pi_main:
         command.extend(["-e", str(runtime["api_key_env"])])
         if runtime.get("bridge_host"):
             command.extend(
@@ -1609,6 +1846,9 @@ def _export_goal_plus_state(
         expected_evidence_annotator_enabled=isinstance(
             profile["goal_plus"]["evidence_annotator"], dict
         ),
+        expected_global_evidence_mode=profile["goal_plus"].get(
+            "global_evidence_mode", "manual"
+        ),
         expected_worker_host=(
             "codex" if profile["methods"][0] == "goal-plus-codex" else "pi-rpc"
         ),
@@ -1670,12 +1910,12 @@ def _container_responses_probe_with_retry(
 def _run_agent(
     campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]
 ) -> dict[str, Any]:
-    profile = manifest["profile_snapshot"]
+    profile = _profile_for_cell(manifest["profile_snapshot"], cell)
     method = profile["methods"][0]
     task = read_json(campaign / cell["task_file"])
     prompt = (
         build_goal_plus_prompt(task, profile)
-        if method in {"goal-plus-codex", "goal-plus-pi"}
+        if method in GOAL_PLUS_METHODS
         else build_agent_prompt(task)
     )
     cell_dir = (campaign / cell["task_file"]).parent
@@ -1691,7 +1931,31 @@ def _run_agent(
     returncode: int | None = None
     timed_out = False
     retain_container = bool(profile["retain_containers"])
-    container_name = _container_name(manifest["campaign_id"], profile["methods"][0])
+    container_name = _container_name(
+        manifest["campaign_id"],
+        profile["methods"][0],
+        str(cell.get("cell_id") or cell.get("task_id") or "single"),
+    )
+    campaign_network = manifest.get("container_network_runtime") or {}
+    network_name = (
+        campaign_network.get("name")
+        if campaign_network.get("internal") is True
+        else None
+    )
+    bridge_host = campaign_network.get("gateway") if network_name else None
+    network = (
+        {
+            "policy": profile.get("container_network"),
+            "enforced": True,
+            "docker_internal": True,
+            "name": network_name,
+            "id": campaign_network.get("id"),
+            "gateway": bridge_host,
+            "cleanup": {"managed_by": "campaign"},
+        }
+        if network_name
+        else None
+    )
     cleanup: dict[str, Any] = {
         "policy": "retain" if retain_container else "remove",
         "attempted": False,
@@ -1708,9 +1972,13 @@ def _run_agent(
     agent_error: str | None = None
     resources = ExitStack()
     try:
-        network = resources.enter_context(
-            _agent_network(manifest["campaign_id"], profile)
-        )
+        if network is None:
+            network = resources.enter_context(
+                _agent_network(manifest["campaign_id"], profile)
+            )
+            if network.get("enforced"):
+                network_name = str(network["name"])
+                bridge_host = str(network["gateway"])
         bridge_listen_host = (
             str(network["gateway"]) if network.get("enforced") else None
         )
@@ -1730,6 +1998,23 @@ def _run_agent(
             if not host_probe["passed"]:
                 raise SweBenchContractError(
                     "OpenAI-compatible Responses probe failed through the runtime route"
+                )
+        elif method == "goal-plus-codex-pi":
+            runtime = resources.enter_context(
+                routed_goal_plus_codex_pi_runtime(
+                    profile,
+                    cell_dir,
+                    bridge_listen_host=bridge_listen_host,
+                )
+            )
+            host_probe = openai_responses_probe(
+                str(runtime["runtime_api_base_url"]),
+                api_key_env=str(runtime["api_key_env"]),
+                model=str(profile["model"]),
+            )
+            if not host_probe["passed"]:
+                raise SweBenchContractError(
+                    "Goal Plus Codex MainAgent Responses probe failed through the runtime route"
                 )
         elif method == "goal-plus-codex":
             if profile.get("agent_provider") is not None:
@@ -1753,32 +2038,49 @@ def _run_agent(
                 runtime = resolve_goal_plus_codex_runtime(profile)
                 host_probe = None
         else:
-            if profile.get("agent_provider") is not None:
+            if (
+                profile.get("agent_provider") is not None
+                or profile.get("container_network") == "internal-provider-proxy"
+            ):
                 runtime = resources.enter_context(
-                    routed_pi_runtime(
+                    routed_goal_plus_pi_runtime(
                         profile,
-                        campaign,
-                        goal_plus=method == "goal-plus-pi",
+                        cell_dir,
                         bridge_listen_host=bridge_listen_host,
+                        bridge_host=bridge_host,
+                    )
+                    if method == "goal-plus-pi"
+                    else routed_pi_runtime(
+                        profile,
+                        cell_dir,
+                        bridge_listen_host=bridge_listen_host,
+                        bridge_host=bridge_host,
                     )
                 )
-                host_probe = openai_responses_probe(
-                    str(runtime["runtime_api_base_url"]),
-                    api_key_env=str(runtime["api_key_env"]),
-                    model=str(runtime["model_id"]),
-                )
-                if not host_probe["passed"]:
-                    raise SweBenchContractError(
-                        "Pi OpenAI-compatible Responses probe failed through the runtime route"
+                if runtime.get("custom_provider"):
+                    host_probe = openai_responses_probe(
+                        str(runtime["runtime_api_base_url"]),
+                        api_key_env=str(runtime["api_key_env"]),
+                        model=str(runtime["model_id"]),
                     )
+                    if not host_probe["passed"]:
+                        raise SweBenchContractError(
+                            "Pi OpenAI-compatible Responses probe failed through the runtime route"
+                        )
+                else:
+                    host_probe = None
             else:
                 runtime = (
-                    resolve_goal_plus_runtime(profile)
+                    resolve_goal_plus_pi_runtime(profile)
                     if method == "goal-plus-pi"
                     else resolve_pi_runtime(profile)
                 )
                 host_probe = None
-        if network.get("enforced") and runtime.get("bridge") is None:
+        if (
+            network.get("enforced")
+            and runtime.get("bridge") is None
+            and runtime.get("provider_proxy") is None
+        ):
             raise SweBenchContractError(
                 "public-egress-blocked requires a loopback provider endpoint "
                 "routed through the internal-network gateway"
@@ -1787,20 +2089,21 @@ def _run_agent(
             manifest["campaign_id"],
             profile,
             runtime,
-            network_name=(
-                str(network["name"]) if network.get("enforced") else None
-            ),
+            cell_id=str(cell.get("cell_id") or cell.get("task_id") or "single"),
+            network_name=network_name,
         )
-        cell["agent"] = {
-            "state": "running",
-            "container": {
-                "id": container_id,
-                "name": container_name,
-                "retention_requested": retain_container,
-                "credentials_persisted": False,
-            },
-        }
-        _save_manifest(campaign, manifest)
+        with _MANIFEST_LOCK:
+            cell["agent"] = {
+                "state": "running",
+                "container": {
+                    "id": container_id,
+                    "name": container_name,
+                    "retention_requested": retain_container,
+                    "credentials_persisted": False,
+                    "network": network_name or "default",
+                },
+            }
+            _save_manifest(campaign, manifest)
         if method == "plain-codex":
             runtime_public = {
                 "kind": "codex-openai-compatible-responses",
@@ -1823,10 +2126,12 @@ def _run_agent(
                 ),
                 "host_responses_probe": host_probe,
             }
-        elif method == "goal-plus-codex":
+        elif method in CODEX_MAIN_METHODS:
             runtime_public = {
                 "kind": (
-                    "goal-plus-codex-openai-compatible-responses"
+                    "goal-plus-codex-pi-openai-compatible-responses"
+                    if method == "goal-plus-codex-pi"
+                    else "goal-plus-codex-openai-compatible-responses"
                     if profile.get("agent_provider") is not None
                     else "goal-plus-codex-chatgpt"
                 ),
@@ -1839,6 +2144,9 @@ def _run_agent(
                 "controller": str(runtime["goal_plus_controller"]),
                 "pip_cache": str(runtime["goal_plus_pip_cache"]),
                 "evidence_annotator": _goal_plus_evidence_annotator_public(profile),
+                "global_evidence_mode": profile["goal_plus"].get(
+                    "global_evidence_mode", "manual"
+                ),
                 "credentials_persisted": False,
             }
             if profile.get("agent_provider") is not None:
@@ -1862,6 +2170,19 @@ def _run_agent(
                         "host_responses_probe": host_probe,
                     }
                 )
+            if method == "goal-plus-codex-pi":
+                runtime_public["worker"] = {
+                    "host": "pi-rpc",
+                    "model": profile["goal_plus"]["worker_model"],
+                    "reasoning_effort": profile["goal_plus"][
+                        "worker_reasoning_effort"
+                    ],
+                    "node_root": str(runtime["node_root"]),
+                    "package_root": str(runtime["package_root"]),
+                    "provider": runtime["worker_provider"],
+                    "credential_env": runtime["worker_credential_env"],
+                    "provider_proxy": runtime.get("provider_proxy"),
+                }
         else:
             runtime_public = {
                 "kind": (
@@ -1897,6 +2218,14 @@ def _run_agent(
                         "host_responses_probe": host_probe,
                     }
                 )
+            elif runtime.get("provider_proxy"):
+                runtime_public.update(
+                    {
+                        "wire_api": runtime["provider_endpoint"]["wire_api"],
+                        "api_base_url": runtime["provider_endpoint"]["base_url"],
+                        "provider_proxy": runtime["provider_proxy"],
+                    }
+                )
             if method == "goal-plus-pi":
                 runtime_public.update(
                     {
@@ -1915,19 +2244,54 @@ def _run_agent(
                         "evidence_annotator": _goal_plus_evidence_annotator_public(
                             profile
                         ),
+                        "global_evidence_mode": profile["goal_plus"].get(
+                            "global_evidence_mode", "manual"
+                        ),
                         "codex_archive": (
                             str(runtime["goal_plus_codex_archive"])
-                            if runtime.get("goal_plus_evidence_annotator") is not None
+                            if isinstance(
+                                runtime.get("goal_plus_evidence_annotator"), dict
+                            )
+                            and runtime["goal_plus_evidence_annotator"].get("kind")
+                            == "codex"
                             else None
                         ),
                     }
                 )
+                if has_pi_worker_override(profile):
+                    runtime_public["worker"] = {
+                        "host": "pi-rpc",
+                        "model": profile["goal_plus"]["worker_model"],
+                        "reasoning_effort": profile["goal_plus"][
+                            "worker_reasoning_effort"
+                        ],
+                        "provider": runtime["worker_provider"],
+                        "credential_env": runtime["worker_credential_env"],
+                        "provider_proxy": runtime.get("provider_proxy"),
+                    }
         runtime_public["agent_network"] = network
-        with _temporary_setup_egress(container_id, network):
+        runtime_public["container_network"] = (
+            {
+                "name": network_name,
+                "internal": True,
+                "external_route": False,
+                "api_bridge_host": bridge_host,
+                "provider_proxy": runtime.get("provider_proxy"),
+            }
+            if network_name
+            else {"name": "default", "internal": False}
+        )
+        if profile.get("agent_network_policy") == "public-egress-blocked":
+            with _temporary_setup_egress(container_id, network):
+                image_checkout = _initialize_agent_container(
+                    container_id, profile, runtime
+                )
+        else:
             image_checkout = _initialize_agent_container(
                 container_id, profile, runtime
             )
-        network["verification"] = _verify_agent_network(container_id, network)
+        if network.get("enforced"):
+            network["verification"] = _verify_agent_network(container_id, network)
         if method == "plain-codex":
             container_probe = _container_responses_probe_with_retry(
                 container_id,
@@ -1940,7 +2304,7 @@ def _run_agent(
                     "OpenAI-compatible Responses probe failed in the Agent container"
                 )
         elif (
-            method == "goal-plus-codex"
+            method in CODEX_MAIN_METHODS
             and profile.get("agent_provider") is not None
         ):
             container_probe = _container_responses_probe_with_retry(
@@ -1953,7 +2317,7 @@ def _run_agent(
                 raise SweBenchContractError(
                     "Goal Plus Codex Responses probe failed in the Agent container"
                 )
-        elif method != "goal-plus-codex" and runtime.get("custom_provider"):
+        elif method not in CODEX_MAIN_METHODS and runtime.get("custom_provider"):
             container_probe = _container_responses_probe_with_retry(
                 container_id,
                 runtime,
@@ -1965,13 +2329,16 @@ def _run_agent(
                     "Pi OpenAI-compatible Responses probe failed in the Agent container"
                 )
         setup_runtime_seconds = time.monotonic() - started
-        if method in {"goal-plus-codex", "goal-plus-pi"}:
+        if method in GOAL_PLUS_METHODS:
             runtime["outer_deadline_at"] = (
                 datetime.now(timezone.utc)
                 + timedelta(seconds=profile["wall_time_seconds"])
             ).isoformat()
             runtime["main_session_id"] = "swe-bench-main-" + hashlib.sha256(
-                manifest["campaign_id"].encode("utf-8")
+                (
+                    f"{manifest['campaign_id']}:"
+                    f"{cell.get('cell_id') or cell.get('task_id') or 'single'}"
+                ).encode("utf-8")
             ).hexdigest()[:12]
             runtime["goal_prompt"] = prompt
             runtime_public["outer_deadline_at"] = runtime["outer_deadline_at"]
@@ -1998,7 +2365,7 @@ def _run_agent(
             stderr = _text(error.stderr)
             timed_out = True
             trajectory_runtime_seconds = time.monotonic() - trajectory_started
-            if method == "goal-plus-codex":
+            if method in CODEX_MAIN_METHODS:
                 _docker_checked(
                     [
                         "docker",
@@ -2029,7 +2396,7 @@ def _run_agent(
                 _docker_checked(["docker", "start", container_id], timeout=30)
 
         finalization_started = time.monotonic()
-        if method in {"goal-plus-codex", "goal-plus-pi"}:
+        if method in GOAL_PLUS_METHODS:
             goal_plus_closeout = _goal_plus_closeout(container_id, profile, runtime)
             goal_plus_state = _export_goal_plus_state(
                 container_id,
@@ -2096,19 +2463,21 @@ def _run_agent(
                 container_id,
                 retain=retain_container,
             )
-            cell["agent"] = {
-                **(cell.get("agent") or {}),
-                "state": "failed" if agent_error else "finalizing",
-                "container": {
-                    "id": container_id,
-                    "name": container_name,
-                    "retention_requested": retain_container,
-                    "cleanup": cleanup,
-                    "credentials_persisted": False,
-                },
-            }
-            if agent_error:
-                cell["agent"]["error"] = agent_error
+            with _MANIFEST_LOCK:
+                cell["agent"] = {
+                    **(cell.get("agent") or {}),
+                    "state": "failed" if agent_error else "finalizing",
+                    "container": {
+                        "id": container_id,
+                        "name": container_name,
+                        "retention_requested": retain_container,
+                        "cleanup": cleanup,
+                        "credentials_persisted": False,
+                    },
+                }
+                if agent_error:
+                    cell["agent"]["error"] = agent_error
+                _save_manifest(campaign, manifest)
         resources.close()
         if container_id:
             if runtime_public:
@@ -2133,7 +2502,7 @@ def _run_agent(
         patch_exists
         and (
             goal_plus_complete
-            if method in {"goal-plus-codex", "goal-plus-pi"}
+            if method in GOAL_PLUS_METHODS
             else returncode == 0
         )
     )
@@ -2160,6 +2529,7 @@ def _run_agent(
             "retention_requested": retain_container,
             "cleanup": cleanup,
             "credentials_persisted": False,
+            "network": network_name or "default",
         },
         "stdout_file": str((cell_dir / "agent-events.jsonl").relative_to(campaign)),
         "stderr_file": str((cell_dir / "agent-stderr.txt").relative_to(campaign)),
@@ -2173,8 +2543,8 @@ def _official_evaluation(
         raise SweBenchContractError(
             "official evaluator has already been attempted; create a new campaign"
         )
-    profile = manifest["profile_snapshot"]
-    evaluator_dir = campaign / "evaluator"
+    profile = _profile_for_cell(manifest["profile_snapshot"], cell)
+    evaluator_dir = campaign / cell.get("evaluator_dir", "evaluator")
     patch = (campaign / cell["patch_file"]).read_text(encoding="utf-8")
     model_label = (
         f"bench-goal-plus-{cell['method']}-{cell['model']}".replace("/", "-")
@@ -2191,12 +2561,22 @@ def _official_evaluation(
         json.dumps(predictions, indent=2) + "\n", encoding="utf-8"
     )
     run_id = manifest["campaign_id"]
+    if len(manifest.get("cells") or []) > 1:
+        run_id += "-" + hashlib.sha256(cell["task_id"].encode()).hexdigest()[:10]
     command = [
         str(ROOT / ".bench-env" / "venv" / "bin" / "python"),
         "-m",
         "swebench.harness.run_evaluation",
         "--dataset_name",
-        str(evaluator_dir / "instances.json"),
+        str(
+            campaign
+            / cell.get(
+                "evaluator_instances_file",
+                manifest.get("dataset", {}).get(
+                    "evaluator_instances_file", "evaluator/instances.json"
+                ),
+            )
+        ),
         "--split",
         profile["dataset"]["split"],
         "--instance_ids",
@@ -2226,13 +2606,46 @@ def _official_evaluation(
         "started_at": utc_now(),
         "command": command,
         "dataset_revision": profile["dataset"]["revision"],
+        "container_network": {
+            "requested_mode": (
+                "none"
+                if profile.get("container_network")
+                in ISOLATED_CONTAINER_NETWORK_POLICIES
+                else "default"
+            ),
+            "mechanism": (
+                "docker-sdk-sitecustomize"
+                if profile.get("container_network")
+                in ISOLATED_CONTAINER_NETWORK_POLICIES
+                else "official-harness-default"
+            ),
+        },
     }
-    cell["evaluation"] = evaluation
-    _save_manifest(campaign, manifest)
+    with _MANIFEST_LOCK:
+        cell["evaluation"] = dict(evaluation)
+        _save_manifest(campaign, manifest)
     started = time.monotonic()
     timed_out = False
     try:
         child_environment = configure_temp_environment(dict(os.environ))
+        pythonpath_entries = [str(SWEBENCH_ROOT)]
+        if profile.get("container_network") in ISOLATED_CONTAINER_NETWORK_POLICIES:
+            sitecustomize = evaluator_dir / "sitecustomize.py"
+            sitecustomize.write_text(
+                "from docker.models.containers import ContainerCollection\n"
+                "_original_create = ContainerCollection.create\n"
+                "def _offline_create(self, *args, **kwargs):\n"
+                "    if 'network' not in kwargs and 'network_mode' not in kwargs:\n"
+                "        kwargs['network_mode'] = 'none'\n"
+                "    return _original_create(self, *args, **kwargs)\n"
+                "ContainerCollection.create = _offline_create\n",
+                encoding="utf-8",
+            )
+            pythonpath_entries.insert(0, str(evaluator_dir))
+        existing_pythonpath = child_environment.get("PYTHONPATH")
+        if existing_pythonpath:
+            pythonpath_entries.append(existing_pythonpath)
+        child_environment["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
         result = _run(
             command,
             cwd=evaluator_dir,
@@ -2284,6 +2697,7 @@ def _official_evaluation(
             "runtime_seconds": duration,
             "returncode": returncode,
             "timed_out": timed_out,
+            "container_network": evaluation["container_network"],
             "report_file": (
                 str(report_path.relative_to(campaign)) if report_path.is_file() else None
             ),
@@ -2300,21 +2714,25 @@ def _official_evaluation(
     return evaluation
 
 
-def execute_campaign(campaign: Path) -> int:
-    manifest = _manifest(campaign)
-    if manifest["state"] != "prepared":
-        raise SweBenchContractError(
-            f"campaign must be prepared, got {manifest['state']!r}"
+def _execute_cell(
+    campaign: Path,
+    manifest: dict[str, Any],
+    cell: dict[str, Any],
+    scheduler: dict[str, Any],
+) -> int:
+    with _MANIFEST_LOCK:
+        scheduler["active"] += 1
+        scheduler["max_observed"] = max(
+            scheduler["max_observed"], scheduler["active"]
         )
-    cell = manifest["cells"][0]
-    manifest["state"] = "running"
-    manifest["started_at"] = utc_now()
-    cell["state"] = "running"
-    _save_manifest(campaign, manifest)
-    exit_code = 0
-    try:
-        cell["agent"] = _run_agent(campaign, manifest, cell)
+        cell["state"] = "running"
+        cell["started_at"] = utc_now()
         _save_manifest(campaign, manifest)
+    try:
+        agent = _run_agent(campaign, manifest, cell)
+        with _MANIFEST_LOCK:
+            cell["agent"] = agent
+            _save_manifest(campaign, manifest)
         cleanup = (cell["agent"].get("container") or {}).get("cleanup") or {}
         if not _container_disposition_isolated(cleanup):
             raise SweBenchContractError(
@@ -2322,39 +2740,103 @@ def execute_campaign(campaign: Path) -> int:
                 "official evaluation is blocked"
             )
         if cell["agent"]["patch_exists"]:
-            cell["evaluation"] = _official_evaluation(campaign, manifest, cell)
-        goal_plus_completion = (
-            ((cell["agent"].get("goal_plus") or {}).get("completion") or {})
-            if cell.get("method") in {"goal-plus-codex", "goal-plus-pi"}
-            else {"passed": True, "reason": None}
-        )
-        score_complete = cell["evaluation"].get("state") == "completed"
-        topology_complete = goal_plus_completion.get("passed") is True
-        if score_complete and topology_complete:
-            cell["state"] = "completed"
-            manifest["state"] = "completed"
-        else:
-            cell["state"] = "partial"
-            reasons = []
-            if not cell["agent"]["patch_exists"]:
-                reasons.append("Agent did not produce a patch")
-            elif not score_complete:
-                reasons.append("official evaluator did not produce a valid report")
-            if not topology_complete:
-                reasons.append(
-                    str(
-                        goal_plus_completion.get("reason")
-                        or "Goal Plus completion evidence is incomplete"
+            evaluation = _official_evaluation(campaign, manifest, cell)
+            with _MANIFEST_LOCK:
+                cell["evaluation"] = evaluation
+        with _MANIFEST_LOCK:
+            goal_plus_completion = (
+                ((cell["agent"].get("goal_plus") or {}).get("completion") or {})
+                if cell.get("method") in GOAL_PLUS_METHODS
+                else {"passed": True, "reason": None}
+            )
+            score_complete = cell["evaluation"].get("state") == "completed"
+            topology_complete = goal_plus_completion.get("passed") is True
+            if score_complete and topology_complete:
+                cell["state"] = "completed"
+                exit_code = 0
+            else:
+                cell["state"] = "partial"
+                reasons = []
+                if not cell["agent"]["patch_exists"]:
+                    reasons.append("Agent did not produce a patch")
+                elif not score_complete:
+                    reasons.append("official evaluator did not produce a valid report")
+                if not topology_complete:
+                    reasons.append(
+                        str(
+                            goal_plus_completion.get("reason")
+                            or "Goal Plus completion evidence is incomplete"
+                        )
                     )
-                )
-            cell["incomplete_reason"] = "; ".join(reasons)
-            manifest["state"] = "partial"
-            exit_code = 1
+                cell["incomplete_reason"] = "; ".join(reasons)
+                exit_code = 1
     except Exception as error:
-        cell["state"] = "failed"
-        cell["error"] = f"{type(error).__name__}: {error}"
+        with _MANIFEST_LOCK:
+            cell["state"] = "failed"
+            cell["error"] = f"{type(error).__name__}: {error}"
+        exit_code = 1
+    finally:
+        with _MANIFEST_LOCK:
+            cell["completed_at"] = utc_now()
+            scheduler["active"] -= 1
+            scheduler["completed"] += 1
+            _save_manifest(campaign, manifest)
+    return exit_code
+
+
+def execute_campaign(campaign: Path) -> int:
+    manifest = _manifest(campaign)
+    if manifest["state"] != "prepared":
+        raise SweBenchContractError(
+            f"campaign must be prepared, got {manifest['state']!r}"
+        )
+    manifest["state"] = "running"
+    manifest["started_at"] = utc_now()
+    scheduler = {
+        "requested": int(manifest["budget"].get("cell_concurrency", 1)),
+        "active": 0,
+        "max_observed": 0,
+        "completed": 0,
+    }
+    manifest["scheduler"] = scheduler
+    network: dict[str, Any] | None = None
+    if (manifest.get("profile_snapshot") or {}).get(
+        "container_network"
+    ) in ISOLATED_CONTAINER_NETWORK_POLICIES:
+        network = _create_internal_network(manifest["campaign_id"])
+        manifest["container_network_runtime"] = network
+    _save_manifest(campaign, manifest)
+
+    exit_code = 0
+    try:
+        with ThreadPoolExecutor(max_workers=scheduler["requested"]) as executor:
+            futures = {
+                executor.submit(
+                    _execute_cell, campaign, manifest, cell, scheduler
+                ): cell["cell_id"]
+                for cell in manifest["cells"]
+            }
+            for future in as_completed(futures):
+                exit_code = max(exit_code, future.result())
+    finally:
+        if network is not None:
+            manifest["container_network_runtime"] = _dispose_internal_network(network)
+
+    states = {str(cell.get("state")) for cell in manifest["cells"]}
+    network_removed = (
+        network is None
+        or manifest["container_network_runtime"].get("removed") is True
+    )
+    if states == {"completed"} and network_removed:
+        manifest["state"] = "completed"
+    elif "failed" in states:
         manifest["state"] = "failed"
         exit_code = 1
+    else:
+        manifest["state"] = "partial"
+        exit_code = 1
+        if not network_removed:
+            manifest["incomplete_reason"] = "campaign internal network was not removed"
     manifest["completed_at"] = utc_now()
     _save_manifest(campaign, manifest)
     print(json.dumps(status_payload(campaign), indent=2, ensure_ascii=False))

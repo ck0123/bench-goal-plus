@@ -292,6 +292,20 @@ class BenchmarkAgent:
                         f"method {method} requires --model PROVIDER/MODEL; "
                         "a bare model ID cannot select a Pi provider"
                     )
+            max_k = contract.get("max_live_search_concurrency")
+            if (
+                isinstance(max_k, int)
+                and live_search_concurrency is not None
+                and live_search_concurrency > max_k
+            ):
+                raise ContractError(f"method {method} requires K<={max_k}")
+            max_c = contract.get("max_cell_concurrency")
+            if (
+                isinstance(max_c, int)
+                and cell_concurrency is not None
+                and cell_concurrency > max_c
+            ):
+                raise ContractError(f"method {method} has not proven C>{max_c}; use C={max_c}")
 
         selected_id = campaign_id
         if not selected_id and preset and preset.campaign_id_template:

@@ -19,6 +19,7 @@ SUPPORTED_METHODS = {
     "plain-codex",
     "plain-pi",
     "goal-plus-codex",
+    "goal-plus-codex-pi",
     "goal-plus-pi",
 }
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
@@ -135,71 +136,84 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
 
     task_ids = profile.get("task_ids")
     tasks = profile.get("tasks")
-    if not isinstance(task_ids, list) or len(task_ids) != 1:
+    if (
+        not isinstance(task_ids, list)
+        or not task_ids
+        or any(not isinstance(task_id, str) or not task_id for task_id in task_ids)
+        or len(set(task_ids)) != len(task_ids)
+    ):
         raise SweBenchContractError(
-            f"{profile_id}: initial acceptance requires exactly one task"
+            f"{profile_id}: task_ids must be a non-empty unique string list"
         )
-    if not isinstance(tasks, list) or len(tasks) != 1 or not isinstance(tasks[0], dict):
-        raise SweBenchContractError(f"{profile_id}: tasks must contain one object")
-    task = tasks[0]
-    if task.get("instance_id") != task_ids[0]:
+    if (
+        not isinstance(tasks, list)
+        or len(tasks) != len(task_ids)
+        or any(not isinstance(task, dict) for task in tasks)
+    ):
+        raise SweBenchContractError(
+            f"{profile_id}: tasks must contain one object per task_id"
+        )
+    if [task.get("instance_id") for task in tasks] != task_ids:
         raise SweBenchContractError(f"{profile_id}: task id mapping is inconsistent")
-    for field in ("repo", "image", "base_commit"):
-        if not isinstance(task.get(field), str) or not task[field]:
-            raise SweBenchContractError(f"{profile_id}: task.{field} is required")
-    if FULL_SHA.fullmatch(task["base_commit"]) is None:
-        raise SweBenchContractError(
-            f"{profile_id}: task.base_commit must be a full commit SHA"
-        )
-    image_setup = task.get("image_setup")
-    if image_setup is not None:
-        image_setup_fields = {
-            "head",
-            "tree",
-            "patch_sha256",
-            "files",
-            "provenance",
-        }
-        if not isinstance(image_setup, dict) or set(image_setup) != image_setup_fields:
-            raise SweBenchContractError(
-                f"{profile_id}: task.image_setup contract is invalid"
-            )
-        for field in ("head", "tree"):
-            if FULL_SHA.fullmatch(str(image_setup[field])) is None:
+    for task in tasks:
+        for field in ("repo", "image", "base_commit"):
+            if not isinstance(task.get(field), str) or not task[field]:
                 raise SweBenchContractError(
-                    f"{profile_id}: task.image_setup.{field} must be a full SHA"
+                    f"{profile_id}: task {task.get('instance_id')!r}.{field} is required"
                 )
-        if SHA256.fullmatch(str(image_setup["patch_sha256"])) is None:
+        if FULL_SHA.fullmatch(task["base_commit"]) is None:
             raise SweBenchContractError(
-                f"{profile_id}: task.image_setup.patch_sha256 must be SHA-256"
+                f"{profile_id}: task.base_commit must be a full commit SHA"
             )
-        files = image_setup["files"]
-        if (
-            not isinstance(files, list)
-            or not files
-            or any(
-                not isinstance(path, str)
-                or not path
-                or path.startswith("/")
-                or ".." in Path(path).parts
-                for path in files
-            )
-            or len(set(files)) != len(files)
-        ):
+        image_setup = task.get("image_setup")
+        if image_setup is not None:
+            image_setup_fields = {
+                "head",
+                "tree",
+                "patch_sha256",
+                "files",
+                "provenance",
+            }
+            if not isinstance(image_setup, dict) or set(image_setup) != image_setup_fields:
+                raise SweBenchContractError(
+                    f"{profile_id}: task.image_setup contract is invalid"
+                )
+            for field in ("head", "tree"):
+                if FULL_SHA.fullmatch(str(image_setup[field])) is None:
+                    raise SweBenchContractError(
+                        f"{profile_id}: task.image_setup.{field} must be a full SHA"
+                    )
+            if SHA256.fullmatch(str(image_setup["patch_sha256"])) is None:
+                raise SweBenchContractError(
+                    f"{profile_id}: task.image_setup.patch_sha256 must be SHA-256"
+                )
+            files = image_setup["files"]
+            if (
+                not isinstance(files, list)
+                or not files
+                or any(
+                    not isinstance(path, str)
+                    or not path
+                    or path.startswith("/")
+                    or ".." in Path(path).parts
+                    for path in files
+                )
+                or len(set(files)) != len(files)
+            ):
+                raise SweBenchContractError(
+                    f"{profile_id}: task.image_setup.files must be unique relative paths"
+                )
+            if (
+                not isinstance(image_setup["provenance"], str)
+                or not image_setup["provenance"].strip()
+            ):
+                raise SweBenchContractError(
+                    f"{profile_id}: task.image_setup.provenance is required"
+                )
+        if not task["image"].endswith(":latest"):
             raise SweBenchContractError(
-                f"{profile_id}: task.image_setup.files must be unique relative paths"
+                f"{profile_id}: task.image must be an exact tagged reference"
             )
-        if (
-            not isinstance(image_setup["provenance"], str)
-            or not image_setup["provenance"].strip()
-        ):
-            raise SweBenchContractError(
-                f"{profile_id}: task.image_setup.provenance is required"
-            )
-    if not task["image"].endswith(":latest"):
-        raise SweBenchContractError(
-            f"{profile_id}: task.image must be an exact tagged reference"
-        )
 
     methods = profile.get("methods")
     if (
@@ -217,10 +231,62 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
     if not isinstance(profile.get("wall_time_seconds"), int) or profile["wall_time_seconds"] < 1:
         raise SweBenchContractError(f"{profile_id}: wall_time_seconds must be positive")
     concurrency = profile.get("concurrency")
-    if concurrency not in {1, 2} or profile.get("cell_concurrency") != 1:
+    cell_concurrency = profile.get("cell_concurrency")
+    if (
+        not isinstance(concurrency, int)
+        or isinstance(concurrency, bool)
+        or not 1 <= concurrency <= 4
+    ):
+        raise SweBenchContractError(f"{profile_id}: concurrency K must be 1..4")
+    if (
+        not isinstance(cell_concurrency, int)
+        or isinstance(cell_concurrency, bool)
+        or not 1 <= cell_concurrency <= 2
+    ):
+        raise SweBenchContractError(f"{profile_id}: cell_concurrency C must be 1..2")
+    scalable_goal_plus_methods = {"goal-plus-pi", "goal-plus-codex-pi"}
+    if concurrency > 1 and methods[0] not in scalable_goal_plus_methods and not (
+        methods[0] == "goal-plus-codex" and concurrency == 2
+    ):
         raise SweBenchContractError(
-            f"{profile_id}: accepted concurrency is K=1..2 and C=1"
+            f"{profile_id}: K>1 is currently proven only for Goal Plus with Pi workers"
         )
+    if cell_concurrency > 1 and methods[0] not in scalable_goal_plus_methods:
+        raise SweBenchContractError(
+            f"{profile_id}: C>1 is currently proven only for Goal Plus with Pi workers"
+        )
+    if cell_concurrency > len(task_ids):
+        raise SweBenchContractError(
+            f"{profile_id}: C cannot exceed the number of task cells"
+        )
+    network_policy = profile.get("container_network", "default")
+    if network_policy not in {
+        "default",
+        "internal-api-only",
+        "internal-provider-proxy",
+    }:
+        raise SweBenchContractError(
+            f"{profile_id}: unsupported container_network policy"
+        )
+    if network_policy == "internal-api-only" and (
+        methods[0] != "goal-plus-pi" or profile.get("agent_provider") is None
+    ):
+        raise SweBenchContractError(
+            f"{profile_id}: internal-api-only is proven only for custom-provider Goal Plus + Pi"
+        )
+    if network_policy == "internal-provider-proxy":
+        worker_model = (profile.get("goal_plus") or {}).get(
+            "worker_model", profile.get("model", "")
+        )
+        provider = str(worker_model).partition("/")[0]
+        if (
+            methods[0] not in scalable_goal_plus_methods
+            or provider != "deepseek"
+        ):
+            raise SweBenchContractError(
+                f"{profile_id}: internal-provider-proxy is proven only for "
+                "built-in DeepSeek Pi workers"
+            )
     evaluator_timeout = profile.get("evaluator_timeout_seconds")
     if not isinstance(evaluator_timeout, int) or evaluator_timeout < 1:
         raise SweBenchContractError(
@@ -248,16 +314,17 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
         _validate_openai_provider(
             profile_id, profile.get("agent_provider"), label="Plain Codex"
         )
-    elif methods[0] == "goal-plus-codex" and profile.get(
+    elif methods[0] in {"goal-plus-codex", "goal-plus-codex-pi"} and profile.get(
         "agent_provider"
     ) is not None:
         _validate_openai_provider(
             profile_id,
             profile["agent_provider"],
-            label="Goal Plus + Codex",
+            label="Goal Plus Codex MainAgent",
         )
     elif (
-        methods[0] not in {"plain-pi", "goal-plus-pi", "goal-plus-codex"}
+        methods[0]
+        not in {"plain-pi", "goal-plus-pi", "goal-plus-codex", "goal-plus-codex-pi"}
         and profile.get("agent_provider") is not None
     ):
         raise SweBenchContractError(
@@ -279,7 +346,7 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
                 raise SweBenchContractError(
                     f"{profile_id}: agent_provider.id must match the Pi model provider"
                 )
-    if methods[0] in {"goal-plus-codex", "goal-plus-pi"}:
+    if methods[0] in {"goal-plus-codex", "goal-plus-codex-pi", "goal-plus-pi"}:
         goal_plus = profile.get("goal_plus")
         required_fields = {
             "worker_runtime_seconds",
@@ -288,9 +355,12 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
             "evidence_annotator",
         }
         optional_fields = {
+            "global_evidence_mode",
             "worker_min_runtime_seconds",
             "worker_min_verifier_runs",
             "supplemental_evaluation_enabled",
+            "worker_model",
+            "worker_reasoning_effort",
         }
         if (
             not isinstance(goal_plus, dict)
@@ -323,12 +393,13 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
             raise SweBenchContractError(
                 f"{profile_id}: Goal Plus worker runtime and closeout reserve must fit T"
             )
-        minimum_fields_present = optional_fields.intersection(goal_plus)
-        if minimum_fields_present and minimum_fields_present != optional_fields:
+        minimum_fields = {"worker_min_runtime_seconds", "worker_min_verifier_runs"}
+        minimum_fields_present = minimum_fields.intersection(goal_plus)
+        if minimum_fields_present and minimum_fields_present != minimum_fields:
             raise SweBenchContractError(
                 f"{profile_id}: Goal Plus worker minimum fields must be configured together"
             )
-        if minimum_fields_present:
+        if minimum_fields_present == minimum_fields:
             minimum_runtime = goal_plus["worker_min_runtime_seconds"]
             minimum_verifier_runs = goal_plus["worker_min_verifier_runs"]
             if (
@@ -348,6 +419,41 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
             ):
                 raise SweBenchContractError(
                     f"{profile_id}: goal_plus.worker_min_verifier_runs must be positive"
+                )
+        worker_fields = {"worker_model", "worker_reasoning_effort"}
+        worker_fields_present = worker_fields.intersection(goal_plus)
+        if worker_fields_present and worker_fields_present != worker_fields:
+            raise SweBenchContractError(
+                f"{profile_id}: Goal Plus worker model fields must be configured together"
+            )
+        if (
+            methods[0] == "goal-plus-codex-pi"
+            and worker_fields_present != worker_fields
+        ):
+            raise SweBenchContractError(
+                f"{profile_id}: mixed Codex/Pi requires worker model fields"
+            )
+        if worker_fields_present == worker_fields:
+            if methods[0] not in {"goal-plus-codex-pi", "goal-plus-pi"}:
+                raise SweBenchContractError(
+                    f"{profile_id}: worker model fields require a Pi-worker Goal Plus method"
+                )
+            worker_model = goal_plus.get("worker_model")
+            worker_provider, separator, worker_model_id = str(worker_model).partition(
+                "/"
+            )
+            if not separator or not worker_provider or not worker_model_id:
+                raise SweBenchContractError(
+                    f"{profile_id}: goal_plus.worker_model must be PROVIDER/MODEL"
+                )
+            if goal_plus.get("worker_reasoning_effort") not in REASONING_EFFORTS:
+                raise SweBenchContractError(
+                    f"{profile_id}: unsupported goal_plus.worker_reasoning_effort"
+                )
+        if methods[0] == "goal-plus-codex-pi":
+            if profile.get("agent_provider") is None:
+                raise SweBenchContractError(
+                    f"{profile_id}: mixed Codex MainAgent requires agent_provider"
                 )
         if (
             not isinstance(verifier_timeout, int)
@@ -369,9 +475,9 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
                 raise SweBenchContractError(
                     f"{profile_id}: Goal Plus Evidence annotator contract is invalid"
                 )
-            if annotator["kind"] != "codex":
+            if annotator["kind"] not in {"codex", "pi"}:
                 raise SweBenchContractError(
-                    f"{profile_id}: Goal Plus Evidence annotator kind must be codex"
+                    f"{profile_id}: Goal Plus Evidence annotator kind must be codex or pi"
                 )
             if (
                 not isinstance(annotator["model"], str)
@@ -396,7 +502,31 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
                 raise SweBenchContractError(
                     f"{profile_id}: Goal Plus Evidence annotator timeout must be 1..600"
                 )
-            if methods[0] == "goal-plus-pi" and provider_contract is None:
+            if annotator["kind"] == "pi":
+                annotator_provider, separator, annotator_model = annotator[
+                    "model"
+                ].partition("/")
+                if not separator or not annotator_provider or not annotator_model:
+                    raise SweBenchContractError(
+                        f"{profile_id}: Pi Evidence annotator model must be PROVIDER/MODEL"
+                    )
+                if methods[0] not in {"goal-plus-pi", "goal-plus-codex-pi"}:
+                    raise SweBenchContractError(
+                        f"{profile_id}: Pi Evidence annotator requires a Pi-capable Goal Plus method"
+                    )
+                if (
+                    methods[0] == "goal-plus-pi"
+                    and provider_contract is not None
+                    and provider_contract["id"] != annotator_provider
+                ):
+                    raise SweBenchContractError(
+                        f"{profile_id}: Pi Evidence annotator provider must match agent_provider.id"
+                    )
+            if (
+                annotator["kind"] == "codex"
+                and methods[0] == "goal-plus-pi"
+                and provider_contract is None
+            ):
                 raise SweBenchContractError(
                     f"{profile_id}: Codex Evidence annotator requires agent_provider"
                 )
@@ -411,12 +541,18 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
             raise SweBenchContractError(
                 f"{profile_id}: supplemental evaluation requires the Evidence annotator"
             )
+        global_evidence_mode = goal_plus.get("global_evidence_mode", "manual")
+        if global_evidence_mode not in {"manual", "auto", "independent"}:
+            raise SweBenchContractError(
+                f"{profile_id}: goal_plus.global_evidence_mode must be one of "
+                "auto, independent, manual"
+            )
         if concurrency == 2 and not (
             methods == ["goal-plus-codex"]
             and task_ids == ["astropy__astropy-13033"]
             and supplemental_evaluation_enabled is True
             and isinstance(annotator, dict)
-            and minimum_fields_present == optional_fields
+            and minimum_fields_present == minimum_fields
         ):
             raise SweBenchContractError(
                 f"{profile_id}: K=2 is restricted to the Astropy Goal Plus + Codex "

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from bench_runtime_paths import configure_temp_environment
 
-from .config import SUPPORTED_METHODS, campaign_dir, load_profile, resolve_profile
+from .config import ROOT, SUPPORTED_METHODS, campaign_dir, load_profile, resolve_profile, utc_now, write_json
 from .environment import doctor
 
 
@@ -89,11 +92,56 @@ def main(argv: list[str] | None = None) -> int:
     destination = campaign_dir(args.campaign)
     if args.command == "run":
         if args.detach:
-            parser = build_parser()
-            parser.error("swe-bench-native does not support detached execution")
+            controller_path = destination / "controller.json"
+            stdout_path = destination / "controller.stdout.txt"
+            stderr_path = destination / "controller.stderr.txt"
+            command = [
+                sys.executable,
+                str(Path(__file__).with_name("experiment.py")),
+                "run",
+                "--campaign",
+                args.campaign,
+            ]
+            with stdout_path.open("a", encoding="utf-8") as stdout, stderr_path.open(
+                "a", encoding="utf-8"
+            ) as stderr:
+                process = subprocess.Popen(
+                    command,
+                    cwd=ROOT,
+                    env=dict(os.environ),
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout,
+                    stderr=stderr,
+                    start_new_session=True,
+                )
+            write_json(
+                controller_path,
+                {
+                    "pid": process.pid,
+                    "state": "running",
+                    "started_at": utc_now(),
+                    "stdout_file": stdout_path.name,
+                    "stderr_file": stderr_path.name,
+                },
+            )
+            print(json.dumps({"campaign": str(destination), "pid": process.pid}, indent=2))
+            return 0
         from .runtime import execute_campaign
 
-        return execute_campaign(destination)
+        returncode = execute_campaign(destination)
+        controller_path = destination / "controller.json"
+        if controller_path.is_file():
+            controller = json.loads(controller_path.read_text(encoding="utf-8"))
+            if controller.get("pid") == os.getpid():
+                controller.update(
+                    {
+                        "state": "completed" if returncode == 0 else "failed",
+                        "completed_at": utc_now(),
+                        "returncode": returncode,
+                    }
+                )
+                write_json(controller_path, controller)
+        return returncode
     if args.command == "status":
         from .runtime import status_payload
 

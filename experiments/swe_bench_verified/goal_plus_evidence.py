@@ -92,6 +92,7 @@ def _worker_overlap(leases: list[dict[str, Any]], expected_k: int) -> dict[str, 
             {
                 "candidate_id": candidate_id,
                 "agent_session_id": lease.get("agent_session_id"),
+                "source": lease.get("source", "codex_autoresearch_lease"),
                 **interval,
             }
         )
@@ -181,6 +182,62 @@ def _observed_autoresearch_lease(
             "basis": basis,
             "run_state": run_state,
             "observed_elapsed_seconds": round(observed_elapsed, 3),
+            "observed_verifier_runs": observed_verifiers,
+        },
+    }
+
+
+def _observed_pi_session_lease(
+    session: dict[str, Any],
+    *,
+    run_state: Any,
+    minimum_runtime_seconds: int | None,
+    minimum_verifier_runs: int | None,
+) -> dict[str, Any] | None:
+    handle = session.get("host_handle") or {}
+    metadata = handle.get("metadata") if isinstance(handle, dict) else {}
+    metrics = metadata.get("pi_metrics") if isinstance(metadata, dict) else {}
+    if not isinstance(metrics, dict):
+        return None
+
+    started_at = _timestamp(metrics.get("started_at"))
+    ended_at = _timestamp(metrics.get("ended_at"))
+    if started_at is None or ended_at is None:
+        return None
+    try:
+        elapsed_seconds = max(0.0, (ended_at - started_at).total_seconds())
+    except TypeError:
+        return None
+
+    required_runtime = int(minimum_runtime_seconds or 0)
+    required_verifiers = int(minimum_verifier_runs or 0)
+    observed_verifiers = int(
+        (session.get("counters") or {}).get("verifier_runs") or 0
+    )
+    minimum_passed = bool(
+        run_state == "promoted"
+        and elapsed_seconds >= required_runtime
+        and observed_verifiers >= required_verifiers
+    )
+    return {
+        "source": "pi_session_metrics",
+        "agent_session_id": session.get("agent_session_id"),
+        "candidate_id": session.get("candidate_id"),
+        "min_runtime_seconds": required_runtime,
+        "min_verifier_runs": required_verifiers,
+        "verifier_runs": observed_verifiers,
+        "observed_interval": {
+            "started_at": metrics.get("started_at"),
+            "ended_at": metrics.get("ended_at"),
+            "end_basis": "pi_metrics.ended_at",
+        },
+        "minimum_observation": {
+            "passed": minimum_passed,
+            "basis": (
+                "pi_session_timestamps" if minimum_passed else "insufficient"
+            ),
+            "run_state": run_state,
+            "observed_elapsed_seconds": round(elapsed_seconds, 3),
             "observed_verifier_runs": observed_verifiers,
         },
     }
@@ -578,6 +635,7 @@ def collect_goal_plus_state(
     expected_supplemental_evaluation_enabled: bool = False,
     expected_evidence_annotator_enabled: bool = False,
     expected_worker_host: str = "pi-rpc",
+    expected_global_evidence_mode: str = "manual",
 ) -> dict[str, Any]:
     goal_records = []
     for path in sorted((root / "goal-plus").glob("gp_*/goal.json")):
@@ -693,6 +751,17 @@ def collect_goal_plus_state(
                             lease, session, run_state=payload.get("state")
                         )
                     )
+                elif session.get("host") == "pi-rpc":
+                    pi_observation = _observed_pi_session_lease(
+                        session,
+                        run_state=payload.get("state"),
+                        minimum_runtime_seconds=(
+                            expected_worker_min_runtime_seconds
+                        ),
+                        minimum_verifier_runs=expected_worker_min_verifier_runs,
+                    )
+                    if pi_observation is not None:
+                        autoresearch_leases.append(pi_observation)
         global_evidence_reads = _global_evidence_read_receipts(
             bound_sessions,
             candidate_records,
@@ -1024,6 +1093,23 @@ def collect_goal_plus_state(
                 selected_run
                 and selected_run.get("worker_host") == expected_worker_host
                 and selected_run.get("orchestration_mode") == "parallel_loops"
+            ),
+        ),
+        "global_evidence_mode": _check(
+            expected_global_evidence_mode,
+            (
+                selected_run.get("strategy_config", {}).get(
+                    "global_evidence_mode", "manual"
+                )
+                if selected_run
+                else None
+            ),
+            bool(
+                selected_run
+                and selected_run.get("strategy_config", {}).get(
+                    "global_evidence_mode", "manual"
+                )
+                == expected_global_evidence_mode
             ),
         ),
         "worker_runtime": _check(

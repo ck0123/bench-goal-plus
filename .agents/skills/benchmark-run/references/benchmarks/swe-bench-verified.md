@@ -6,14 +6,16 @@
 - Runner: `swe-bench-native`
 - Initial task: `sympy__sympy-16886`
 - Raw metric: official `resolved` boolean, direction `maximize`
-- Methods: `plain-codex`, `plain-pi`, `goal-plus-codex`, and `goal-plus-pi`
+- Methods: `plain-codex`, `plain-pi`, `goal-plus-codex`, `goal-plus-codex-pi`, and `goal-plus-pi`
 - Topology: Plain methods use one isolated outer trajectory. Goal Plus uses one outer main session
   with bound internal workers on the selected Codex or Pi host. Standard acceptance restricts
-  every method to `K=1,C=1,R=1`; validate dynamic peer comparison separately at `K>1`
+  most smoke methods to `K=1,C=1,R=1`; the profile-frozen Pi-worker path supports
+  `K<=4,C<=2,R=1`
 - Final source JSON: `campaign-summary.json`
 
 The official harness owns final scoring in a separate container. The runner has no host-only score,
-provision, detach, stop, resume, or cross-cell concurrency.
+provision, stop, or resume. It supports detached execution, retained debug containers, and
+profile-frozen cross-cell concurrency up to `C=2`.
 
 ## Presets
 
@@ -23,6 +25,7 @@ provision, detach, stop, resume, or cross-cell concurrency.
 | `swe-bench-verified-sympy-16886-pi-smoke` | `zai/glm-5.2`, medium | `1800/1/1/1` | inherited `ZAI_API_KEY` |
 | `swe-bench-verified-sympy-16886-goal-plus-pi-smoke` | `zai/glm-5.2`, medium | `1800/1/1/1` | inherited `ZAI_API_KEY` |
 | `swe-bench-verified-sympy-16886-goal-plus-pi-luna-high-smoke` | `bench-openai/gpt-5.6-luna`, high | `1800/1/1/1` | profile-frozen `OPENAI_BASE_URL` + `OPENAI_API_KEY`, Responses |
+| `swe-bench-verified-indices-39-goal-plus-pi-sol-deepseek-k4-c2` | Pi Main/View `bench-openai/gpt-5.6-sol`, Pi workers `deepseek/deepseek-v4-flash`, medium | `1800/4/2/1` | `OPENAI_BASE_URL` + `OPENAI_API_KEY`; inherited `DEEPSEEK_API_KEY` |
 | `swe-bench-verified-sympy-16886-goal-plus-codex-smoke` | `gpt-5.6-sol`, low | `300/1/1/1` | native Codex lifecycle smoke |
 
 The Pi credential value is never serialized. Docker receives only the selected environment variable
@@ -33,6 +36,12 @@ The Luna profile materializes a campaign-local Pi `models.json` containing only 
 `$OPENAI_API_KEY` environment reference. A Linux loopback endpoint uses the same repository-owned
 socket bridge as Plain Codex; doctor must pass host Responses, task-container Responses, and Pi's
 exact `bench-openai/gpt-5.6-luna` model listing before launch.
+
+The 39-task pure Pi profile uses the same isolated Pi Responses route for the outer MainAgent and
+independent Pi ViewAgent, while four bound Pi worker sessions use DeepSeek through the allowlisted
+built-in-provider proxy. Launch and closeout receive both credential environment names without
+serializing either value. Supplemental evaluation is required, Global Evidence is `auto`, and the
+profile does not require a `share_dir` option.
 
 Supplemental ViewAgent evaluation is an optional run condition. The baseline publishes only the
 candidate evidence description. When enabled, the same independent ViewAgent also publishes fresh
@@ -149,8 +158,8 @@ ends, so retention preserves the filesystem and process state boundary, not a li
 ## Lifecycle
 
 Run the profiled `check`, then `setup --skip-provision`, then `plan`. Before `launch`, show the
-resolved confirmation block required by the benchmark-run Skill. Because execution is foreground
-and non-resumable, run the method campaigns sequentially. At terminal state, use unified
+resolved confirmation block required by the benchmark-run Skill. Detached campaigns are
+non-resumable and have no registered stop path. At terminal state, use unified
 `status` and `finish`; do not invoke the native controller as a second public CLI.
 
 `finish` creates campaign-local final evidence and reports; it does not edit the source registry.

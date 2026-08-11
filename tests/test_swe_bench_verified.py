@@ -3,15 +3,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
+import socketserver
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from bench_goal_plus.application import BenchmarkAgent
+from bench_goal_plus.allowlisted_connect_proxy import start_allowlisted_connect_proxy
 from bench_goal_plus.catalog import Catalog
 from bench_goal_plus.errors import ContractError
 from bench_goal_plus.loopback_bridge import bridged_url, loopback_target
@@ -101,6 +106,366 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
             }
         )
         return profile
+    def test_verified_indices_39_profile_freezes_k4_c2_and_internal_network(self) -> None:
+        profile = self.profile(
+            "verified-indices-39-goal-plus-codex-pi-sol-deepseek-k4-c2"
+        )
+        self.assertEqual(len(profile["task_ids"]), 39)
+        self.assertEqual(profile["concurrency"], 4)
+        self.assertEqual(profile["cell_concurrency"], 2)
+        self.assertEqual(profile["container_network"], "internal-provider-proxy")
+        self.assertEqual(profile["methods"], ["goal-plus-codex-pi"])
+        self.assertEqual(profile["model"], "gpt-5.6-sol")
+        self.assertEqual(
+            profile["goal_plus"]["worker_model"], "deepseek/deepseek-v4-flash"
+        )
+        self.assertEqual(
+            profile["goal_plus"]["evidence_annotator"]["model"], "gpt-5.6-sol"
+        )
+        self.assertEqual(profile["goal_plus"]["global_evidence_mode"], "auto")
+        self.assertTrue(profile["goal_plus"]["supplemental_evaluation_enabled"])
+        prompt = runtime.build_goal_plus_prompt(
+            {"problem_statement": "issue"}, profile
+        )
+        self.assertIn("strategy.worker_host=pi-rpc", prompt)
+        self.assertIn(
+            "strategy.worker_launch.model=deepseek/deepseek-v4-flash", prompt
+        )
+        self.assertIn("strategy.worker_launch.reasoning_effort=medium", prompt)
+        self.assertIn("strategy.config.global_evidence_mode=auto", prompt)
+        self.assertIn("budget.max_parallel=4", prompt)
+        self.assertNotIn(
+            "budget.max_candidates=",
+            prompt,
+        )
+
+        spec = BenchmarkAgent(catalog=Catalog()).resolve_spec(
+            preset_id="swe-bench-verified-indices-39-goal-plus-codex-pi-sol-deepseek-k4-c2"
+        )
+        self.assertEqual(spec.concurrency(), {"T": 1800, "K": 4, "C": 2, "R": 1})
+
+    def test_verified_indices_39_pure_pi_profile_freezes_all_agent_roles(self) -> None:
+        profile = self.profile(
+            "verified-indices-39-goal-plus-pi-sol-deepseek-k4-c2"
+        )
+        mixed = self.profile(
+            "verified-indices-39-goal-plus-codex-pi-sol-deepseek-k4-c2"
+        )
+        self.assertEqual(profile["task_ids"], mixed["task_ids"])
+        self.assertEqual(len(profile["task_ids"]), 39)
+        self.assertEqual(profile["methods"], ["goal-plus-pi"])
+        self.assertEqual(profile["model"], "bench-openai/gpt-5.6-sol")
+        self.assertEqual(profile["reasoning_effort"], "medium")
+        self.assertEqual(profile["concurrency"], 4)
+        self.assertEqual(profile["cell_concurrency"], 2)
+        self.assertEqual(profile["wall_time_seconds"], 1800)
+        self.assertEqual(
+            profile["goal_plus"]["worker_model"], "deepseek/deepseek-v4-flash"
+        )
+        self.assertEqual(profile["goal_plus"]["worker_reasoning_effort"], "medium")
+        self.assertEqual(
+            profile["goal_plus"]["evidence_annotator"],
+            {
+                "kind": "pi",
+                "model": "bench-openai/gpt-5.6-sol",
+                "reasoning_effort": "medium",
+                "timeout_seconds": 300,
+            },
+        )
+        self.assertEqual(profile["goal_plus"]["global_evidence_mode"], "auto")
+        self.assertTrue(profile["goal_plus"]["supplemental_evaluation_enabled"])
+        self.assertNotIn("share_dir", profile)
+        self.assertNotIn("share_dir", profile["goal_plus"])
+
+        prompt = runtime.build_goal_plus_prompt(
+            {"problem_statement": "issue"}, profile
+        )
+        self.assertIn("strategy.worker_host=pi-rpc", prompt)
+        self.assertIn(
+            "strategy.worker_launch.model=deepseek/deepseek-v4-flash", prompt
+        )
+        self.assertIn("strategy.evidence_annotator.host=pi-rpc", prompt)
+        self.assertIn("strategy.config.global_evidence_mode=auto", prompt)
+        self.assertIn("budget.max_parallel=4", prompt)
+
+        spec = BenchmarkAgent(catalog=Catalog()).resolve_spec(
+            preset_id="swe-bench-verified-indices-39-goal-plus-pi-sol-deepseek-k4-c2"
+        )
+        self.assertEqual(spec.methods, ("goal-plus-pi",))
+        self.assertEqual(spec.concurrency(), {"T": 1800, "K": 4, "C": 2, "R": 1})
+
+    def test_pure_pi_role_separation_requires_complete_worker_contract(self) -> None:
+        profile = self.profile(
+            "verified-indices-39-goal-plus-pi-sol-deepseek-k4-c2"
+        )
+        incomplete = json.loads(json.dumps(profile))
+        incomplete["goal_plus"].pop("worker_reasoning_effort")
+        with self.assertRaisesRegex(SweBenchContractError, "configured together"):
+            validate_profile(str(incomplete["id"]), incomplete)
+
+        invalid_model = json.loads(json.dumps(profile))
+        invalid_model["goal_plus"]["worker_model"] = "deepseek-v4-flash"
+        invalid_model["container_network"] = "default"
+        with self.assertRaisesRegex(SweBenchContractError, "PROVIDER/MODEL"):
+            validate_profile(str(invalid_model["id"]), invalid_model)
+
+    def test_pure_pi_role_separation_routes_main_worker_and_closeout(self) -> None:
+        profile = self.profile(
+            "verified-indices-39-goal-plus-pi-sol-deepseek-k4-c2"
+        )
+        values = {
+            "OPENAI_BASE_URL": "http://127.0.0.1:8080/v1",
+            "OPENAI_API_KEY": "main-secret",
+            "DEEPSEEK_API_KEY": "worker-secret",
+        }
+        with mock.patch.dict(os.environ, values, clear=False):
+            resolved = environment.resolve_goal_plus_pi_runtime(profile)
+        self.assertEqual(resolved["provider"], "bench-openai")
+        self.assertEqual(resolved["model_id"], "gpt-5.6-sol")
+        self.assertEqual(resolved["credential_env"], "OPENAI_API_KEY")
+        self.assertEqual(resolved["worker_provider"], "deepseek")
+        self.assertEqual(resolved["worker_model_id"], "deepseek-v4-flash")
+        self.assertEqual(resolved["worker_credential_env"], "DEEPSEEK_API_KEY")
+
+        runtime_info = {
+            **resolved,
+            "runtime_api_base_url": "http://192.0.2.10:8080/v1",
+            "bridge_host": "192.0.2.10",
+            "provider_proxy_url": "http://192.0.2.10:3128",
+            "outer_deadline_at": "2026-08-11T12:00:00+00:00",
+            "main_session_id": "pure-pi-main",
+            "goal_prompt": runtime.build_goal_plus_prompt(
+                {"problem_statement": "issue"}, profile
+            ),
+        }
+        command = runtime._agent_command("container-id", profile, runtime_info)
+        joined = " ".join(command)
+        self.assertIn("GOAL_PLUS_PI_MODEL=deepseek/deepseek-v4-flash", command)
+        self.assertIn(
+            "GOAL_PLUS_EVIDENCE_ANNOTATOR_MODEL=bench-openai/gpt-5.6-sol",
+            command,
+        )
+        self.assertIn("GOAL_PLUS_SUPPLEMENTAL_EVALUATION_REQUIRED=1", command)
+        self.assertIn("OPENAI_API_KEY", command)
+        self.assertIn("DEEPSEEK_API_KEY", command)
+        self.assertIn("--provider bench-openai", joined)
+        self.assertIn("--model bench-openai/gpt-5.6-sol", joined)
+        self.assertNotIn("/opt/codex/", joined)
+
+        completed = subprocess.CompletedProcess(
+            ["docker", "exec"], 0, '{"completed": true}\n', ""
+        )
+        with mock.patch.object(runtime, "_run", return_value=completed) as capture:
+            closeout = runtime._goal_plus_closeout(
+                "container-id", profile, runtime_info
+            )
+        closeout_command = capture.call_args.args[0]
+        self.assertTrue(closeout["completed"])
+        self.assertIn("OPENAI_API_KEY", closeout_command)
+        self.assertIn("DEEPSEEK_API_KEY", closeout_command)
+        self.assertIn(
+            "NO_PROXY=127.0.0.1,localhost,::1,192.0.2.10", closeout_command
+        )
+        self.assertFalse(any("main-secret" in item for item in closeout_command))
+        self.assertFalse(any("worker-secret" in item for item in closeout_command))
+
+    def test_pure_pi_role_separation_doctor_checks_both_roles(self) -> None:
+        profile = self.profile(
+            "verified-indices-39-goal-plus-pi-sol-deepseek-k4-c2"
+        )
+        component = {
+            "ok": True,
+            "checks": [{"name": "runtime", "passed": True}],
+            "inventory": {"ok": True},
+            "packages": {},
+            "swebench_commit": "a" * 40,
+        }
+        doctor = environment.doctor_payload
+        with mock.patch.object(
+            environment, "doctor_payload", side_effect=[component, component]
+        ) as recursive:
+            payload = doctor(profile)
+
+        main_profile = recursive.call_args_list[0].args[0]
+        worker_profile = recursive.call_args_list[1].args[0]
+        self.assertNotIn("worker_model", main_profile["goal_plus"])
+        self.assertEqual(main_profile["model"], "bench-openai/gpt-5.6-sol")
+        self.assertEqual(main_profile["container_network"], "internal-api-only")
+        self.assertEqual(worker_profile["model"], "deepseek/deepseek-v4-flash")
+        self.assertEqual(
+            worker_profile["goal_plus"]["evidence_annotator"], "disabled"
+        )
+        self.assertEqual(payload["method"], "goal-plus-pi")
+        self.assertEqual(payload["worker_model"], "deepseek/deepseek-v4-flash")
+        self.assertEqual(payload["view_model"], "bench-openai/gpt-5.6-sol")
+        self.assertEqual(
+            [check["name"] for check in payload["checks"]],
+            ["main:runtime", "worker:runtime"],
+        )
+
+    def test_allowlisted_connect_proxy_relays_only_exact_target(self) -> None:
+        class EchoHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                data = self.request.recv(1024)
+                self.request.sendall(data)
+
+        upstream = socketserver.ThreadingTCPServer(("127.0.0.1", 0), EchoHandler)
+        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        upstream_thread.start()
+        upstream_port = int(upstream.server_address[1])
+        metadata, close_proxy = start_allowlisted_connect_proxy(
+            listen_host="127.0.0.1",
+            allowed_targets=[("127.0.0.1", upstream_port)],
+            name="test-provider",
+        )
+        try:
+            with socket.create_connection(
+                ("127.0.0.1", int(metadata["listen_port"])), timeout=5
+            ) as client:
+                client.sendall(
+                    f"CONNECT 127.0.0.1:{upstream_port} HTTP/1.1\r\n\r\n".encode(
+                        "ascii"
+                    )
+                )
+                self.assertIn(b"200 Connection Established", client.recv(4096))
+                client.sendall(b"proxy-ok")
+                self.assertEqual(client.recv(1024), b"proxy-ok")
+            with socket.create_connection(
+                ("127.0.0.1", int(metadata["listen_port"])), timeout=5
+            ) as denied:
+                denied.sendall(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
+                self.assertIn(b"403 Forbidden", denied.recv(4096))
+        finally:
+            close_proxy()
+            upstream.shutdown()
+            upstream.server_close()
+            upstream_thread.join(timeout=5)
+        self.assertTrue(metadata["closed"])
+
+    def test_mixed_sol_main_deepseek_workers_and_sol_view_are_explicit(self) -> None:
+        profile = self.profile(
+            "verified-indices-39-goal-plus-codex-pi-sol-deepseek-k4-c2"
+        )
+        with self.temporary_directory() as temporary:
+            assets = Path(temporary)
+            runtime_info = {
+                "archive": assets / "codex.tgz",
+                "archive_present": True,
+                "credential_present": True,
+                "auth_mode": "openai-compatible",
+                "api_base_url": "http://127.0.0.1:8080/v1",
+                "runtime_api_base_url": "http://192.0.2.10:8080/v1",
+                "api_key_env": "OPENAI_API_KEY",
+                "provider_id": "bench_proxy",
+                "provider_name": "Benchmark OpenAI-compatible proxy",
+                "bridge_host": "192.0.2.10",
+                "node_root": assets / "node",
+                "package_root": assets / "pi",
+                "worker_provider": "deepseek",
+                "worker_credential_env": "DEEPSEEK_API_KEY",
+                "worker_credential_present": True,
+                "provider_proxy_url": "http://192.0.2.10:3128",
+                "goal_plus_root": assets / "goal-plus",
+                "goal_plus_dependency_lock": assets / "requirements.lock",
+                "goal_plus_visible_verifier": assets / "visible.py",
+                "goal_plus_controller": assets / "controller.py",
+                "goal_plus_pip_cache": assets / "pip-cache",
+                "goal_plus_evidence_annotator": profile["goal_plus"][
+                    "evidence_annotator"
+                ],
+                "outer_deadline_at": "2026-08-11T12:00:00+00:00",
+            }
+            for directory in (
+                runtime_info["node_root"],
+                runtime_info["package_root"],
+                runtime_info["goal_plus_root"],
+                runtime_info["goal_plus_pip_cache"],
+            ):
+                directory.mkdir()
+            for path in (
+                runtime_info["archive"],
+                runtime_info["goal_plus_dependency_lock"],
+                runtime_info["goal_plus_visible_verifier"],
+                runtime_info["goal_plus_controller"],
+            ):
+                path.write_text("fixture\n", encoding="utf-8")
+
+            docker_commands: list[list[str]] = []
+
+            def docker_checked(command: list[str], *, timeout: int = 120) -> str:
+                del timeout
+                docker_commands.append(command)
+                return "container-id" if command[:2] == ["docker", "create"] else ""
+
+            with mock.patch.object(runtime, "_docker_checked", side_effect=docker_checked):
+                runtime._create_agent_container(
+                    "mixed-topology", profile, runtime_info, network_name="internal-net"
+                )
+
+            create = " ".join(docker_commands[0])
+            self.assertIn("dst=/opt/runtime/codex.tgz,readonly", create)
+            self.assertIn("dst=/opt/node,readonly", create)
+            self.assertIn("dst=/opt/pi,readonly", create)
+            self.assertIn("--network internal-net", create)
+
+            command = runtime._agent_command("container-id", profile, runtime_info)
+            joined = " ".join(command)
+            self.assertIn("/opt/codex/package/vendor", joined)
+            self.assertIn("-m gpt-5.6-sol", joined)
+            self.assertIn("GOAL_PLUS_PI_MODEL=deepseek/deepseek-v4-flash", command)
+            self.assertIn("DEEPSEEK_API_KEY", command)
+            self.assertIn("OPENAI_API_KEY", command)
+            self.assertIn("GOAL_PLUS_EVIDENCE_ANNOTATOR_MODEL=gpt-5.6-sol", command)
+            self.assertIn("GOAL_PLUS_GLOBAL_EVIDENCE_MODE=auto", command)
+
+    def test_execute_campaign_observes_two_active_task_cells(self) -> None:
+        with self.temporary_directory() as temporary:
+            campaign = Path(temporary) / "campaign"
+            campaign.mkdir()
+            manifest = {
+                "schema_version": 1,
+                "campaign_id": "two-cell-test",
+                "benchmark_id": "swe-bench-verified",
+                "state": "prepared",
+                "methods": ["goal-plus-pi"],
+                "model": "provider/model",
+                "budget": {"wall_time_seconds": 30, "cell_concurrency": 2},
+                "profile_snapshot": {},
+                "cells": [
+                    {
+                        "cell_id": f"cell-{index}",
+                        "task_id": f"task-{index}",
+                        "state": "prepared",
+                        "evaluation": {"state": "pending", "calls": 0},
+                    }
+                    for index in range(2)
+                ],
+            }
+            write_json(campaign / "campaign.json", manifest)
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+
+            def run_agent(*_args, **_kwargs):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.05)
+                with lock:
+                    active -= 1
+                return {
+                    "state": "partial",
+                    "patch_exists": False,
+                    "container": {"cleanup": {"removed": True}},
+                }
+
+            with mock.patch.object(runtime, "_run_agent", side_effect=run_agent):
+                self.assertEqual(runtime.execute_campaign(campaign), 1)
+
+            observed = read_json(campaign / "campaign.json")
+            self.assertEqual(max_active, 2)
+            self.assertEqual(observed["scheduler"]["max_observed"], 2)
 
     def test_visible_verifier_propagates_test_failure_with_diagnostics(self) -> None:
         completed = subprocess.run(
@@ -170,6 +535,13 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
             environment.goal_plus_runtime_environment()["HOME"],
             "/opt/agent-tmp",
         )
+        self.assertEqual(
+            environment.goal_plus_runtime_environment()["PIP_FIND_LINKS"],
+            "/opt/pip-cache/downloads",
+        )
+        self.assertEqual(
+            environment.goal_plus_runtime_environment()["PIP_NO_INDEX"], "1"
+        )
 
         codex_script = environment.goal_plus_install_script(include_pi=False)
         self.assertIn("goal_plus.server", codex_script)
@@ -224,6 +596,7 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         worker_min_verifier_runs: int | None = None,
         candidate_count: int = 1,
         peer_comparison: bool = False,
+        global_evidence_mode: str = "manual",
     ) -> None:
         run_id = "run_test"
         candidate_ids = [f"c{index + 1:03d}" for index in range(candidate_count)]
@@ -266,7 +639,10 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
                         else {}
                     ),
                 },
-                "config": {"closeout_reserve_seconds": 300},
+                "config": {
+                    "closeout_reserve_seconds": 300,
+                    "global_evidence_mode": global_evidence_mode,
+                },
                 **(
                     {
                         "evidence_annotator": {
@@ -470,6 +846,9 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
                         "external_id": f"agent_{index}",
                         "metadata": {
                             "pi_metrics": {
+                                "started_at": "2026-08-06T12:00:00Z",
+                                "ended_at": "2026-08-06T12:10:00Z",
+                                "duration_seconds": 600.0,
                                 "usage_total": {"input_tokens": 10 + index}
                             }
                         },
@@ -494,7 +873,10 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
                     ),
                 },
             )
-            if worker_min_runtime_seconds is not None:
+            if (
+                worker_min_runtime_seconds is not None
+                and worker_host != "pi-rpc"
+            ):
                 write_json(
                     root
                     / "host-logs"
@@ -676,6 +1058,44 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
             self.assertIn(
                 "peer_view_influence", missing_state["completion"]["reason"]
             )
+
+    def test_goal_plus_pi_uses_session_metrics_for_live_worker_overlap(self) -> None:
+        with self.temporary_directory() as temporary:
+            root = Path(temporary)
+            self.write_goal_plus_state(
+                root,
+                max_parallel=2,
+                session_count=2,
+                verifier_runs=2,
+                supplemental_evaluation=True,
+                evidence_annotations=True,
+                worker_host="pi-rpc",
+                worker_min_runtime_seconds=600,
+                worker_min_verifier_runs=2,
+                candidate_count=2,
+                peer_comparison=True,
+            )
+            state = goal_plus_evidence.collect_goal_plus_state(
+                root,
+                expected_k=2,
+                expected_worker_runtime_seconds=1500,
+                expected_closeout_reserve_seconds=300,
+                expected_visible_verifier_timeout_seconds=300,
+                expected_worker_min_runtime_seconds=600,
+                expected_worker_min_verifier_runs=2,
+                expected_supplemental_evaluation_enabled=True,
+                expected_evidence_annotator_enabled=True,
+                expected_worker_host="pi-rpc",
+            )
+
+        self.assertTrue(state["completion"]["passed"])
+        overlap = state["completion"]["checks"]["live_worker_overlap"]
+        self.assertTrue(overlap["passed"])
+        self.assertEqual(overlap["actual"]["overlap_seconds"], 600.0)
+        self.assertEqual(
+            {item["source"] for item in overlap["actual"]["intervals"]},
+            {"pi_session_metrics"},
+        )
 
     def test_goal_plus_codex_completion_enforces_worker_minimums(self) -> None:
         with self.temporary_directory() as temporary:
@@ -880,7 +1300,7 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         )
         self.assertTrue(codex.runner.capabilities.official_evaluator)
         self.assertTrue(codex.runner.capabilities.retain_containers)
-        self.assertFalse(codex.runner.capabilities.detach)
+        self.assertTrue(codex.runner.capabilities.detach)
         self.assertEqual(codex.runner.evidence_filename, "campaign-summary.json")
 
     def test_profiles_pin_the_official_base_commit(self) -> None:
@@ -1004,6 +1424,7 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
             {
                 "GOAL_PLUS_SUPPLEMENTAL_EVALUATION_ENABLED": "0",
                 "GOAL_PLUS_SUPPLEMENTAL_EVALUATION_REQUIRED": "0",
+                "GOAL_PLUS_GLOBAL_EVIDENCE_MODE": "manual",
             },
         )
 
@@ -1013,11 +1434,18 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
             {
                 "GOAL_PLUS_SUPPLEMENTAL_EVALUATION_ENABLED": "1",
                 "GOAL_PLUS_SUPPLEMENTAL_EVALUATION_REQUIRED": "1",
+                "GOAL_PLUS_GLOBAL_EVIDENCE_MODE": "manual",
             },
         )
         invalid = json.loads(json.dumps(enabled))
         invalid["goal_plus"]["supplemental_evaluation_enabled"] = "yes"
         with self.assertRaisesRegex(SweBenchContractError, "must be boolean"):
+            validate_profile(str(invalid["id"]), invalid)
+
+        invalid = json.loads(json.dumps(enabled))
+        invalid["goal_plus"]["supplemental_evaluation_enabled"] = False
+        invalid["goal_plus"]["global_evidence_mode"] = "sometimes"
+        with self.assertRaisesRegex(SweBenchContractError, "global_evidence_mode"):
             validate_profile(str(invalid["id"]), invalid)
 
     def test_k2_profile_contract_supports_peer_comparison(self) -> None:
@@ -1066,7 +1494,37 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
     def test_goal_plus_checkout_branch_comes_from_managed_upstream(self) -> None:
         self.assertEqual(
             managed_upstream_branch("goal_plus"),
-            "main",
+            "codex/pi-supplemental-view-adapter",
+        )
+
+    def test_goal_plus_container_probe_loads_pi_extension_contract(self) -> None:
+        with self.temporary_directory() as temporary:
+            root = Path(temporary)
+            runtime_info = {
+                "provider": "deepseek",
+                "credential_env": "DEEPSEEK_API_KEY",
+                "node_root": root / "node",
+                "package_root": root / "pi",
+                "goal_plus_root": root / "goal-plus",
+                "goal_plus_dependency_lock": root / "requirements.lock",
+                "goal_plus_visible_verifier": root / "visible.py",
+                "goal_plus_controller": root / "controller.py",
+                "goal_plus_pip_cache": root / "pip-cache",
+                "goal_plus_evidence_annotator": None,
+            }
+            completed = subprocess.CompletedProcess([], 0, "0.80.6\n", "")
+            with mock.patch.object(
+                environment, "run_capture", return_value=completed
+            ) as run_capture:
+                environment._goal_plus_container_probe("image:latest", runtime_info)
+
+        command = run_capture.call_args.args[0]
+        shell_script = command[-1]
+        self.assertIn("pi --mode rpc --approve", shell_script)
+        self.assertIn("--session-id doctor", shell_script)
+        self.assertIn(
+            "-e /opt/goal-plus/.pi/extensions/goal-plus.ts </dev/null",
+            shell_script,
         )
 
     def test_luna_pi_runtime_writes_environment_reference_not_secret(self) -> None:
@@ -1426,6 +1884,26 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
             self.assertEqual(len(loaded), 1)
             self.assertEqual(loaded[0]["instance_id"], instance["instance_id"])
 
+    def test_validate_instance_image_uses_official_remote_image_key(self) -> None:
+        instance = {
+            "instance_id": "django__django-12325",
+            "repo": "django/django",
+            "base_commit": "a" * 40,
+        }
+        task = {
+            "repo": "django/django",
+            "base_commit": "a" * 40,
+            "image": "swebench/sweb.eval.x86_64.django_1776_django-12325:latest",
+        }
+
+        runtime._validate_instance_image(instance, task)
+
+        task["image"] = "swebench/sweb.eval.x86_64.django_1776_django-99999:latest"
+        with self.assertRaisesRegex(
+            SweBenchContractError, "official harness image key"
+        ):
+            runtime._validate_instance_image(instance, task)
+
     def test_prompt_rejects_hidden_fields(self) -> None:
         with self.assertRaisesRegex(SweBenchContractError, "hidden fields"):
             runtime.build_agent_prompt(
@@ -1488,6 +1966,10 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         probe = capture.call_args.args[0]
         self.assertIn("ZAI_API_KEY", probe)
         self.assertFalse(any(secret in argument for argument in probe))
+        self.assertIn(
+            ["--network", "none"],
+            [probe[index : index + 2] for index in range(len(probe) - 1)],
+        )
 
     def test_custom_pi_container_probe_mounts_generated_provider_config(self) -> None:
         secret = "not-for-command-lines"
@@ -1523,6 +2005,23 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         self.assertIn("PI_CODING_AGENT_DIR=/opt/pi-home/.pi/agent", command)
         self.assertIn("NO_PROXY=192.0.2.10", command)
         self.assertNotIn(secret, joined)
+
+    def test_pi_model_probe_accepts_successful_stderr_table(self) -> None:
+        stderr_table = (
+            "provider  model\n"
+            "deepseek  deepseek-v4-flash\n"
+        )
+        probe = subprocess.CompletedProcess([], 0, "", stderr_table)
+        self.assertTrue(
+            environment._pi_model_probe_passed(probe, "deepseek-v4-flash")
+        )
+        self.assertFalse(
+            environment._pi_model_probe_passed(probe, "deepseek-v4")
+        )
+        failed = subprocess.CompletedProcess([], 1, "deepseek-v4-flash", "")
+        self.assertFalse(
+            environment._pi_model_probe_passed(failed, "deepseek-v4-flash")
+        )
 
     def test_goal_plus_container_mounts_and_outer_pi_command_are_explicit(self) -> None:
         profile = self.profile("sympy-16886-goal-plus-pi-smoke")
@@ -1721,6 +2220,85 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         self.assertFalse(any(secret in argument for argument in closeout_command))
         self.assertEqual(capture.call_args.kwargs["timeout"], 1020)
 
+    def test_pure_pi_sol_view_uses_pi_without_codex_runtime(self) -> None:
+        profile = self.profile(
+            "sympy-16886-goal-plus-pi-sol-medium-view-smoke"
+        )
+        prompt = runtime.build_goal_plus_prompt(
+            {"problem_statement": "Public issue text"}, profile
+        )
+        self.assertEqual(profile["goal_plus"]["evidence_annotator"]["kind"], "pi")
+        self.assertIn("strategy.evidence_annotator.host=pi-rpc", prompt)
+
+        annotator_environment = runtime._goal_plus_evidence_annotator_environment(
+            profile, {"runtime_api_base_url": "http://192.0.2.10:45678/v1"}
+        )
+        self.assertEqual(
+            annotator_environment["GOAL_PLUS_EVIDENCE_ANNOTATOR_MODEL"],
+            "bench-openai/gpt-5.6-sol",
+        )
+        self.assertNotIn("CODEX_HOME", annotator_environment)
+        self.assertNotIn(
+            "GOAL_PLUS_EVIDENCE_ANNOTATOR_BASE_URL", annotator_environment
+        )
+        self.assertEqual(
+            runtime._goal_plus_evidence_annotator_public(profile),
+            {
+                "kind": "pi",
+                "model": "bench-openai/gpt-5.6-sol",
+                "reasoning_effort": "medium",
+                "timeout_seconds": 300,
+            },
+        )
+
+        with self.temporary_directory() as temporary:
+            assets = Path(temporary)
+            path_assets = {
+                "goal_plus_root": assets / "goal-plus",
+                "goal_plus_dependency_lock": assets / "requirements.lock",
+                "goal_plus_visible_verifier": assets / "visible.py",
+                "goal_plus_controller": assets / "controller.py",
+                "goal_plus_pip_cache": assets / "pip-cache",
+            }
+            path_assets["goal_plus_root"].mkdir()
+            path_assets["goal_plus_pip_cache"].mkdir()
+            for name, path in path_assets.items():
+                if name not in {"goal_plus_root", "goal_plus_pip_cache"}:
+                    path.write_text("fixture\n", encoding="utf-8")
+            runtime_info = {
+                **path_assets,
+                "credential_env": "OPENAI_API_KEY",
+                "credential_present": True,
+                "provider": "bench-openai",
+                "provider_name": "Benchmark OpenAI-compatible proxy",
+                "model_id": "gpt-5.6-sol",
+                "node_root": Path("/host/node"),
+                "package_root": Path("/host/pi"),
+                "goal_plus_evidence_annotator": profile["goal_plus"][
+                    "evidence_annotator"
+                ],
+            }
+            docker_commands: list[list[str]] = []
+
+            def docker_checked(command: list[str], *, timeout: int = 120) -> str:
+                del timeout
+                docker_commands.append(command)
+                return "container-id" if command[:2] == ["docker", "create"] else ""
+
+            with mock.patch.object(
+                runtime, "_docker_checked", side_effect=docker_checked
+            ):
+                runtime._create_agent_container(
+                    "goal-plus-pure-pi-view", profile, runtime_info
+                )
+
+        create = docker_commands[0]
+        joined = " ".join(create)
+        self.assertNotIn(environment.CODEX_RUNTIME_TMPFS, create)
+        self.assertNotIn(environment.CODEX_HOME_TMPFS, create)
+        self.assertNotIn("codex.tgz", joined)
+        self.assertIn("dst=/opt/pi,readonly", joined)
+
     def test_goal_plus_durable_evidence_enforces_k_and_verifier_contract(self) -> None:
         with self.temporary_directory() as temporary:
             root = Path(temporary) / "passing"
@@ -1742,6 +2320,22 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
             self.assertTrue(visible["promotion"]["passed"])
             self.assertEqual(
                 visible["promotion"]["verifiers"][0]["role"], "promotion_gate"
+            )
+
+            auto = Path(temporary) / "auto-evidence"
+            self.write_goal_plus_state(auto, global_evidence_mode="auto")
+            auto_state = goal_plus_evidence.collect_goal_plus_state(
+                auto,
+                expected_k=1,
+                expected_worker_runtime_seconds=1500,
+                expected_closeout_reserve_seconds=300,
+                expected_visible_verifier_timeout_seconds=300,
+                expected_global_evidence_mode="auto",
+            )
+            self.assertTrue(
+                auto_state["completion"]["checks"]["global_evidence_mode"][
+                    "passed"
+                ]
             )
 
             mismatched = Path(temporary) / "mismatched"
@@ -2155,6 +2749,11 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
             )
         probe = capture.call_args.args[0]
 
+        self.assertEqual(
+            capture.call_args.kwargs["timeout"],
+            environment.DOCKER_COLD_PROBE_TIMEOUT_SECONDS,
+        )
+
         docker_commands: list[list[str]] = []
 
         def docker_checked(command: list[str], *, timeout: int = 120) -> str:
@@ -2172,6 +2771,10 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         create = docker_commands[0]
 
         self.assertIn(environment.CODEX_RUNTIME_TMPFS, probe)
+        self.assertIn(
+            ["--network", "none"],
+            [probe[index : index + 2] for index in range(len(probe) - 1)],
+        )
         self.assertIn(environment.CODEX_RUNTIME_TMPFS, create)
         self.assertIn(":rw,exec,nosuid,nodev,", environment.CODEX_RUNTIME_TMPFS)
         self.assertEqual(environment.CODEX_RUNTIME_TMPFS.rsplit("=", 1)[1], "512m")
@@ -2191,6 +2794,30 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         self.assertIn("OPENAI_API_KEY", agent_command)
         self.assertNotIn(secret, joined)
         self.assertNotIn("chatgpt.com", joined)
+
+    def test_swe_docker_probes_allow_cold_image_startup(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        runtime_info = {
+            "credential_env": "DEEPSEEK_API_KEY",
+            "provider": "deepseek",
+            "node_root": Path("/opt/node-host"),
+            "package_root": Path("/opt/pi-host"),
+        }
+        with mock.patch.object(
+            environment, "run_capture", return_value=completed
+        ) as capture:
+            environment._image_checkout_probe("image:latest", "a" * 40)
+            environment._image_setup_probe("image:latest", "a" * 40)
+            environment._pi_container_probe("image:latest", runtime_info)
+
+        self.assertEqual(capture.call_count, 4)
+        self.assertTrue(
+            all(
+                call.kwargs["timeout"]
+                == environment.DOCKER_COLD_PROBE_TIMEOUT_SECONDS
+                for call in capture.call_args_list
+            )
+        )
 
     def test_container_responses_probe_inherits_key_by_name(self) -> None:
         secret = "not-for-command-lines"
@@ -2219,12 +2846,16 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
             ) as capture,
         ):
             result = environment.codex_container_responses_probe(
-                "image:latest", runtime_info, model="gpt-5.6-sol"
+                "image:latest",
+                runtime_info,
+                model="gpt-5.6-sol",
+                network_name="isolated-api-network",
             )
 
         command = capture.call_args.args[0]
         self.assertTrue(result["passed"])
         self.assertEqual(command[:4], ["docker", "run", "--pull", "never"])
+        self.assertIn("isolated-api-network", command)
         self.assertIn("OPENAI_API_KEY", command)
         self.assertIn("SWEBENCH_RESPONSES_PROBE_MAX_OUTPUT_TOKENS", command)
         self.assertEqual(
@@ -2434,7 +3065,7 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runtime, "resolve_goal_plus_runtime", return_value=runtime_info
+                    runtime, "resolve_goal_plus_pi_runtime", return_value=runtime_info
                 ),
                 mock.patch.object(
                     runtime,
@@ -2791,7 +3422,9 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
                 },
             )
             completed = subprocess.CompletedProcess([], 0, "official output", "")
-            with mock.patch.object(runtime, "_run", return_value=completed):
+            with mock.patch.object(
+                runtime, "_run", return_value=completed
+            ) as run_command:
                 result = runtime._official_evaluation(campaign, manifest, cell)
 
             self.assertEqual(result["state"], "completed")
@@ -2810,6 +3443,11 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
             self.assertEqual(
                 result["command"][result["command"].index("--force_rebuild") + 1],
                 "false",
+            )
+            evaluator_environment = run_command.call_args.kwargs["environment"]
+            self.assertIn(
+                str(runtime.SWEBENCH_ROOT),
+                evaluator_environment["PYTHONPATH"].split(os.pathsep),
             )
             persisted = json.loads((campaign / "campaign.json").read_text())
             self.assertEqual(persisted["cells"][0]["evaluation"]["calls"], 1)

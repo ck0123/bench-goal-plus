@@ -52,7 +52,8 @@ def _revalidate_goal_plus_cell(
     cell: dict[str, Any],
 ) -> bool:
     if (
-        cell.get("method") not in {"goal-plus-codex", "goal-plus-pi"}
+        cell.get("method")
+        not in {"goal-plus-codex", "goal-plus-codex-pi", "goal-plus-pi"}
         or cell.get("state") not in {"completed", "partial"}
     ):
         return False
@@ -92,6 +93,9 @@ def _revalidate_goal_plus_cell(
             ),
             expected_evidence_annotator_enabled=isinstance(
                 goal_plus_profile["evidence_annotator"], dict
+            ),
+            expected_global_evidence_mode=goal_plus_profile.get(
+                "global_evidence_mode", "manual"
             ),
         )
     except (KeyError, TypeError, ValueError):
@@ -233,7 +237,8 @@ def _record(campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]) -> d
             "official_evaluator": True,
             "official_evaluator_once": evaluation.get("calls") == 1,
             "goal_plus": {
-                "required": cell["method"] in {"goal-plus-codex", "goal-plus-pi"},
+                "required": cell["method"]
+                in {"goal-plus-codex", "goal-plus-codex-pi", "goal-plus-pi"},
                 "supplemental_evaluation_enabled": cell.get("supplemental_evaluation_enabled"),
                 "completion": goal_plus_completion or None,
                 "actual_subagent_count": goal_plus.get("actual_subagent_count"),
@@ -275,6 +280,10 @@ def _record(campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]) -> d
             "goal_plus_closeout": agent.get("goal_plus_closeout"),
             "agent_container": agent.get("container"),
             "agent_network": (agent.get("runtime") or {}).get("agent_network"),
+            "agent_container_network": (agent.get("runtime") or {}).get(
+                "container_network"
+            ),
+            "evaluator_container_network": evaluation.get("container_network"),
         },
         "patch": {
             "exists": agent.get("patch_exists"),
@@ -300,8 +309,6 @@ def _record(campaign: Path, manifest: dict[str, Any], cell: dict[str, Any]) -> d
 
 
 def _markdown(summary: dict[str, Any]) -> str:
-    record = summary["records"][0]
-    raw = record["score"]["raw_metrics"]
     lines = [
         f"# SWE-bench Verified report: {summary['campaign_id']}",
         "",
@@ -309,19 +316,26 @@ def _markdown(summary: dict[str, Any]) -> str:
         "",
         "| Task | Method | Model | Resolved | Patch applied | Subagents | Evaluator calls |",
         "|---|---|---|---:|---:|---:|---:|",
-        (
+    ]
+    for record in summary["records"]:
+        raw = record["score"]["raw_metrics"]
+        lines.append(
             f"| {record['task_id']} | {record['method']} | {record['model']} | "
             f"{raw['resolved'] if raw['resolved'] is not None else ''} | "
             f"{raw['patch_applied'] if raw['patch_applied'] is not None else ''} | "
             f"{record['protocol']['goal_plus']['actual_subagent_count'] if record['protocol']['goal_plus']['required'] else ''} | "
             f"{record['execution']['evaluator_calls']['total_claimed']} |"
-        ),
-        "",
-        f"Dataset revision: `{record['protocol']['dataset_revision']}`.",
-        "",
-        f"Official SWE-bench harness commit: `{record['protocol']['swebench_commit']}`.",
-        "",
-    ]
+        )
+    first = summary["records"][0]
+    lines.extend(
+        [
+            "",
+            f"Dataset revision: `{first['protocol']['dataset_revision']}`.",
+            "",
+            f"Official SWE-bench harness commit: `{first['protocol']['swebench_commit']}`.",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
