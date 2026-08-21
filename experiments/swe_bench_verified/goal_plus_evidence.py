@@ -240,9 +240,15 @@ def _evidence_annotations(run_dir: Path, expected_iterations: int) -> dict[str, 
         task_usage = (
             task.get("usage") if isinstance(task.get("usage"), dict) else {}
         )
-        for name, value in task_usage.items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                usage[name] = usage.get(name, 0) + value
+        comparison_usage = (
+            task.get("comparison_usage")
+            if isinstance(task.get("comparison_usage"), dict)
+            else {}
+        )
+        for observed_usage in (task_usage, comparison_usage):
+            for name, value in observed_usage.items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    usage[name] = usage.get(name, 0) + value
         view = task.get("view") if isinstance(task.get("view"), dict) else None
         profile = task.get("profile") if isinstance(task.get("profile"), dict) else {}
         entries.append(
@@ -260,6 +266,12 @@ def _evidence_annotations(run_dir: Path, expected_iterations: int) -> dict[str, 
                 "comparison_basis": (
                     task.get("comparison_basis")
                     if isinstance(task.get("comparison_basis"), list)
+                    else None
+                ),
+                "comparison_state": task.get("comparison_state"),
+                "comparison": (
+                    task.get("comparison")
+                    if isinstance(task.get("comparison"), dict)
                     else None
                 ),
                 "view": view,
@@ -311,6 +323,7 @@ def _global_evidence_read_receipts(
             )
 
     normalized_reads: list[dict[str, Any]] = []
+    normalized_comparisons: list[dict[str, Any]] = []
     sessions_with_reads = 0
     schema_valid = True
     for session in sessions:
@@ -398,6 +411,130 @@ def _global_evidence_read_receipts(
                 }
             )
 
+        comparisons = session.get("global_evidence_comparisons", [])
+        if not isinstance(comparisons, list):
+            schema_valid = False
+            comparisons = []
+        for comparison in comparisons:
+            if not isinstance(comparison, dict):
+                schema_valid = False
+                continue
+            references = comparison.get("observation_refs")
+            reference_count = len(references) if isinstance(references, list) else -1
+            normalized_references = []
+            valid = (
+                isinstance(comparison.get("compared_at"), str)
+                and _timestamp(comparison.get("compared_at")) is not None
+                and comparison.get("selection_mode") in {"explicit", "topic"}
+                and isinstance(references, list)
+                and 2 <= len(references) <= 8
+                and comparison.get("selected_count") == len(references)
+                and isinstance(comparison.get("remaining"), int)
+                and not isinstance(comparison.get("remaining"), bool)
+                and comparison["remaining"] >= 0
+            )
+            candidate_counts: dict[str, int] = {}
+            identities = set()
+            if isinstance(references, list):
+                for reference in references:
+                    candidate_id = (
+                        reference.get("candidate_id")
+                        if isinstance(reference, dict)
+                        else None
+                    )
+                    identity = (
+                        candidate_id,
+                        reference.get("iteration")
+                        if isinstance(reference, dict)
+                        else None,
+                        reference.get("commit")
+                        if isinstance(reference, dict)
+                        else None,
+                        reference.get("observation_ordinal")
+                        if isinstance(reference, dict)
+                        else None,
+                    )
+                    reference_valid = bool(
+                        isinstance(reference, dict)
+                        and isinstance(candidate_id, str)
+                        and candidate_id
+                        and isinstance(reference.get("iteration"), int)
+                        and not isinstance(reference.get("iteration"), bool)
+                        and reference["iteration"] >= 1
+                        and isinstance(reference.get("commit"), str)
+                        and reference["commit"]
+                        and isinstance(reference.get("observation_ordinal"), int)
+                        and not isinstance(
+                            reference.get("observation_ordinal"), bool
+                        )
+                        and reference["observation_ordinal"] >= 1
+                    )
+                    valid = valid and reference_valid
+                    if reference_valid:
+                        normalized_references.append(reference)
+                        identities.add(identity)
+                        candidate_counts[candidate_id] = (
+                            candidate_counts.get(candidate_id, 0) + 1
+                        )
+            valid = bool(
+                valid
+                and len(identities) == len(normalized_references)
+                and len(normalized_references) == reference_count
+                and all(count <= 2 for count in candidate_counts.values())
+            )
+            if comparison.get("selection_mode") == "explicit":
+                valid = bool(
+                    valid
+                    and comparison.get("topic_id") is None
+                    and comparison.get("candidate_cursor") is None
+                    and comparison.get("next_candidate_cursor") is None
+                    and comparison.get("remaining") == 0
+                )
+            else:
+                valid = bool(
+                    valid
+                    and isinstance(comparison.get("topic_id"), str)
+                    and comparison["topic_id"]
+                    and isinstance(comparison.get("candidate_cursor"), int)
+                    and not isinstance(comparison.get("candidate_cursor"), bool)
+                    and comparison["candidate_cursor"] >= 0
+                    and (
+                        comparison.get("next_candidate_cursor") is None
+                        or (
+                            isinstance(
+                                comparison.get("next_candidate_cursor"), int
+                            )
+                            and not isinstance(
+                                comparison.get("next_candidate_cursor"), bool
+                            )
+                            and comparison["next_candidate_cursor"] >= 0
+                        )
+                    )
+                    and (
+                        (comparison.get("next_candidate_cursor") is None)
+                        == (comparison.get("remaining") == 0)
+                    )
+                    and (
+                        comparison.get("next_candidate_cursor") is None
+                        or comparison["next_candidate_cursor"]
+                        > comparison["candidate_cursor"]
+                    )
+                )
+            schema_valid = schema_valid and valid
+            normalized_comparisons.append(
+                {
+                    "agent_session_id": session_id,
+                    "candidate_id": session_candidate_id,
+                    "compared_at": comparison.get("compared_at"),
+                    "selection_mode": comparison.get("selection_mode"),
+                    "topic_id": comparison.get("topic_id"),
+                    "observation_refs": normalized_references,
+                    "selected_count": comparison.get("selected_count"),
+                    "remaining": comparison.get("remaining"),
+                    "valid": valid,
+                }
+            )
+
     influence_windows = []
     peer_influence_windows = []
     for read in normalized_reads:
@@ -450,6 +587,11 @@ def _global_evidence_read_receipts(
         "influence_windows": influence_windows,
         "peer_reads_before_subsequent_verifier": len(peer_influence_windows),
         "peer_influence_windows": peer_influence_windows,
+        "comparison_count": len(normalized_comparisons),
+        "valid_comparison_count": sum(
+            item["valid"] for item in normalized_comparisons
+        ),
+        "comparisons": normalized_comparisons,
         "schema_valid": schema_valid,
     }
 
@@ -839,7 +981,73 @@ def collect_goal_plus_state(
                 and all(isinstance(item, str) and item.strip() for item in value)
             )
 
+        def observation_evidence_valid(value: Any) -> bool:
+            allowed_sources = {
+                "actual_diff",
+                "candidate_diff",
+                "verifier_result",
+                "task_context",
+                "evidence_scope",
+            }
+            return bool(
+                isinstance(value, list)
+                and 1 <= len(value) <= 4
+                and all(
+                    isinstance(item, dict)
+                    and set(item) == {"source", "locator", "excerpt"}
+                    and item.get("source") in allowed_sources
+                    and isinstance(item.get("locator"), str)
+                    and item["locator"].strip()
+                    and isinstance(item.get("excerpt"), str)
+                    and item["excerpt"].strip()
+                    for item in value
+                )
+            )
+
         view = entry.get("view") if isinstance(entry.get("view"), dict) else {}
+        evaluation = view.get("supplemental_evaluation")
+        if view.get("schema_version") == 2:
+            if (
+                view.get("acceptance_view") is not None
+                or entry.get("comparison_basis") is not None
+                or "comparison_basis" in view
+                or (
+                    entry.get("candidate_id"),
+                    entry.get("iteration"),
+                    view.get("attempt_commit"),
+                )
+                not in settled_refs
+            ):
+                return False
+            if not expected_supplemental_evaluation_enabled:
+                return bool(
+                    entry.get("supplemental_evaluation_enabled") is False
+                    and evaluation is None
+                )
+            observations = (
+                evaluation.get("observations")
+                if isinstance(evaluation, dict)
+                else None
+            )
+            return bool(
+                entry.get("supplemental_evaluation_enabled") is True
+                and isinstance(evaluation, dict)
+                and set(evaluation) == {"observations"}
+                and isinstance(observations, list)
+                and 1 <= len(observations) <= 8
+                and all(
+                    isinstance(item, dict)
+                    and set(item) == {"state", "label", "text", "evidence"}
+                    and item.get("state") in {"supported", "unresolved"}
+                    and isinstance(item.get("label"), str)
+                    and item["label"].strip()
+                    and isinstance(item.get("text"), str)
+                    and item["text"].strip()
+                    and observation_evidence_valid(item.get("evidence"))
+                    for item in observations
+                )
+            )
+
         basis = entry.get("comparison_basis")
         if not isinstance(basis, list) or len(basis) > 8:
             return False
@@ -856,7 +1064,6 @@ def collect_goal_plus_state(
             or view.get("comparison_basis") != basis
         ):
             return False
-        evaluation = view.get("supplemental_evaluation")
         if not expected_supplemental_evaluation_enabled:
             return (
                 entry.get("supplemental_evaluation_enabled") is False
@@ -947,7 +1154,162 @@ def collect_goal_plus_state(
     dynamic_peer_required = bool(
         expected_k > 1 and expected_supplemental_evaluation_enabled
     )
+    read_receipts = (
+        selected_run.get("global_evidence_read_receipts", {})
+        if selected_run
+        else {}
+    )
+    completed_observation_refs = {
+        (
+            entry.get("candidate_id"),
+            entry.get("iteration"),
+            entry.get("view", {}).get("attempt_commit")
+            or entry.get("attempt_commit"),
+            ordinal,
+        )
+        for entry in annotation_entries
+        if entry.get("state") == "completed"
+        and supplemental_entry_valid(entry)
+        and isinstance(entry.get("view"), dict)
+        and entry["view"].get("schema_version") == 2
+        and isinstance(entry["view"].get("supplemental_evaluation"), dict)
+        for ordinal, _ in enumerate(
+            entry["view"]["supplemental_evaluation"].get("observations") or [],
+            start=1,
+        )
+    }
+
+    def task_comparison_valid(entry: dict[str, Any]) -> bool:
+        comparison = entry.get("comparison")
+        if (
+            entry.get("comparison_state") != "completed"
+            or not isinstance(comparison, dict)
+            or set(comparison)
+            != {
+                "schema_version",
+                "gist",
+                "selections",
+                "agreements",
+                "differences",
+                "unique_observations",
+                "unresolved",
+                "catalog_view_count",
+                "catalog_observation_count",
+                "catalog_truncated",
+                "created_at",
+            }
+            or comparison.get("schema_version") != 1
+            or not isinstance(comparison.get("gist"), str)
+            or not comparison["gist"].strip()
+            or "\n" in comparison["gist"]
+            or not isinstance(comparison.get("selections"), list)
+            or not 2 <= len(comparison["selections"]) <= 8
+            or not isinstance(comparison.get("catalog_view_count"), int)
+            or comparison["catalog_view_count"] < 2
+            or not isinstance(comparison.get("catalog_observation_count"), int)
+            or comparison["catalog_observation_count"] < 2
+            or not isinstance(comparison.get("catalog_truncated"), bool)
+            or not isinstance(comparison.get("created_at"), str)
+            or not comparison["created_at"]
+        ):
+            return False
+        selected_refs = []
+        for selection in comparison["selections"]:
+            if (
+                not isinstance(selection, dict)
+                or set(selection) != {"reference", "reason"}
+                or not isinstance(selection.get("reason"), str)
+                or not selection["reason"].strip()
+                or not isinstance(selection.get("reference"), dict)
+            ):
+                return False
+            reference = selection["reference"]
+            identity = (
+                reference.get("candidate_id"),
+                reference.get("iteration"),
+                reference.get("commit"),
+                reference.get("observation_ordinal"),
+            )
+            if set(reference) != {
+                "candidate_id",
+                "iteration",
+                "commit",
+                "observation_ordinal",
+            } or identity not in completed_observation_refs:
+                return False
+            selected_refs.append(identity)
+        if len(selected_refs) != len(set(selected_refs)):
+            return False
+        candidate_counts: dict[Any, int] = {}
+        for candidate_id, *_ in selected_refs:
+            candidate_counts[candidate_id] = candidate_counts.get(candidate_id, 0) + 1
+        target = (
+            entry.get("candidate_id"),
+            entry.get("iteration"),
+            entry.get("view", {}).get("attempt_commit"),
+        )
+        if (
+            len(candidate_counts) < 2
+            or any(count > 2 for count in candidate_counts.values())
+            or not any(identity[:3] == target for identity in selected_refs)
+        ):
+            return False
+        selected_set = set(selected_refs)
+        for field in (
+            "agreements",
+            "differences",
+            "unique_observations",
+            "unresolved",
+        ):
+            claims = comparison.get(field)
+            if not isinstance(claims, list) or len(claims) > 8:
+                return False
+            for claim in claims:
+                if (
+                    not isinstance(claim, dict)
+                    or set(claim) != {"text", "observation_refs"}
+                    or not isinstance(claim.get("text"), str)
+                    or not claim["text"].strip()
+                    or not isinstance(claim.get("observation_refs"), list)
+                    or not 1 <= len(claim["observation_refs"]) <= 8
+                ):
+                    return False
+                claim_refs = {
+                    (
+                        reference.get("candidate_id"),
+                        reference.get("iteration"),
+                        reference.get("commit"),
+                        reference.get("observation_ordinal"),
+                    )
+                    for reference in claim["observation_refs"]
+                    if isinstance(reference, dict)
+                }
+                if (
+                    len(claim_refs) != len(claim["observation_refs"])
+                    or not claim_refs <= selected_set
+                ):
+                    return False
+        return True
+
+    v2_comparison_required_entries = [
+        entry
+        for entry in annotation_entries
+        if entry.get("state") == "completed"
+        and supplemental_entry_valid(entry)
+        and isinstance(entry.get("view"), dict)
+        and entry["view"].get("schema_version") == 2
+        and entry.get("comparison_state") is not None
+    ]
     peer_comparison_entries = []
+    for entry in v2_comparison_required_entries:
+        if task_comparison_valid(entry):
+            peer_comparison_entries.append(
+                {
+                    "candidate_id": entry.get("candidate_id"),
+                    "iteration": entry.get("iteration"),
+                    "comparison": entry.get("comparison"),
+                }
+            )
     for entry in annotation_entries:
         if entry.get("state") != "completed" or not supplemental_entry_valid(entry):
             continue
@@ -966,11 +1328,32 @@ def collect_goal_plus_state(
                     "comparison_basis": entry.get("comparison_basis"),
                 }
             )
-    read_receipts = (
-        selected_run.get("global_evidence_read_receipts", {})
-        if selected_run
-        else {}
-    )
+    for comparison in read_receipts.get("comparisons", []):
+        references = comparison.get("observation_refs") or []
+        reference_ids = {
+            (
+                item.get("candidate_id"),
+                item.get("iteration"),
+                item.get("commit"),
+                item.get("observation_ordinal"),
+            )
+            for item in references
+            if isinstance(item, dict)
+        }
+        expected_peer_ids = candidate_ids - {comparison.get("candidate_id")}
+        actual_peer_ids = {
+            item[0]
+            for item in reference_ids
+            if item[0] != comparison.get("candidate_id")
+        }
+        if (
+            comparison.get("valid")
+            and reference_ids
+            and reference_ids <= completed_observation_refs
+            and expected_peer_ids
+            and actual_peer_ids == expected_peer_ids
+        ):
+            peer_comparison_entries.append(comparison)
     completed_supplemental_view_refs = {
         settled_ref
         for entry in annotation_entries
@@ -1224,12 +1607,20 @@ def collect_goal_plus_state(
         ),
         "dynamic_peer_comparison": _check(
             (
-                "at least one complete comparison against every peer incumbent"
+                "one automatic bounded comparison per completed v2 View"
                 if dynamic_peer_required
                 else "not required"
             ),
             peer_comparison_entries,
-            bool(not dynamic_peer_required or peer_comparison_entries),
+            bool(
+                not dynamic_peer_required
+                or (
+                    len(peer_comparison_entries)
+                    == len(v2_comparison_required_entries)
+                    if v2_comparison_required_entries
+                    else peer_comparison_entries
+                )
+            ),
         ),
         "peer_view_influence": _check(
             (

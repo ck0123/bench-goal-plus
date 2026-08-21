@@ -677,6 +677,157 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
                 "peer_view_influence", missing_state["completion"]["reason"]
             )
 
+    def test_goal_plus_v2_observations_use_automatic_task_comparisons(
+        self,
+    ) -> None:
+        with self.temporary_directory() as temporary:
+            root = Path(temporary) / "v2-comparison"
+            self.write_goal_plus_state(
+                root,
+                max_parallel=2,
+                session_count=2,
+                verifier_runs=2,
+                supplemental_evaluation=True,
+                evidence_annotations=True,
+                worker_host="codex",
+                worker_min_runtime_seconds=600,
+                worker_min_verifier_runs=2,
+                candidate_count=2,
+                peer_comparison=True,
+            )
+            commits = {}
+            for candidate_path in root.glob(
+                "runs/run_test/candidates/*/candidate.json"
+            ):
+                candidate = read_json(candidate_path)
+                for iteration in candidate["iterations"]:
+                    commits[(candidate["candidate_id"], iteration["iteration"])] = (
+                        iteration["git_head"]
+                    )
+            for annotation_path in root.glob(
+                "runs/run_test/candidates/*/evidence-annotations/*.json"
+            ):
+                annotation = read_json(annotation_path)
+                annotation.pop("comparison_basis", None)
+                view = annotation["view"]
+                view.pop("comparison_basis", None)
+                view.pop("acceptance_view", None)
+                view["schema_version"] = 2
+                view["attempt_commit"] = commits[
+                    (annotation["candidate_id"], annotation["iteration"])
+                ]
+                view["supplemental_evaluation"] = {
+                    "observations": [
+                        {
+                            "state": "supported",
+                            "label": "Behavioral implementation",
+                            "text": "The cumulative diff changes the target behavior.",
+                            "evidence": [
+                                {
+                                    "source": "verifier_result",
+                                    "locator": "visible verifier",
+                                    "excerpt": "The visible verifier passed.",
+                                }
+                            ],
+                        }
+                    ]
+                }
+                peer_id = (
+                    "c002" if annotation["candidate_id"] == "c001" else "c001"
+                )
+                references = [
+                    {
+                        "candidate_id": annotation["candidate_id"],
+                        "iteration": annotation["iteration"],
+                        "commit": commits[
+                            (annotation["candidate_id"], annotation["iteration"])
+                        ],
+                        "observation_ordinal": 1,
+                    },
+                    {
+                        "candidate_id": peer_id,
+                        "iteration": 1,
+                        "commit": commits[(peer_id, 1)],
+                        "observation_ordinal": 1,
+                    },
+                ]
+                annotation["comparison_state"] = "completed"
+                annotation["comparison_usage"] = {
+                    "input_tokens": 20,
+                    "output_tokens": 5,
+                }
+                annotation["comparison"] = {
+                    "schema_version": 1,
+                    "gist": "The visible implementation observations differ.",
+                    "selections": [
+                        {
+                            "reference": reference,
+                            "reason": "Compare the current View with one peer View.",
+                        }
+                        for reference in references
+                    ],
+                    "agreements": [],
+                    "differences": [
+                        {
+                            "text": "The implementations use distinct visible branches.",
+                            "observation_refs": references,
+                        }
+                    ],
+                    "unique_observations": [],
+                    "unresolved": [],
+                    "catalog_view_count": 2,
+                    "catalog_observation_count": 2,
+                    "catalog_truncated": False,
+                    "created_at": "2026-08-06T12:00:45Z",
+                }
+                write_json(annotation_path, annotation)
+
+            state = goal_plus_evidence.collect_goal_plus_state(
+                root,
+                expected_k=2,
+                expected_worker_runtime_seconds=1500,
+                expected_closeout_reserve_seconds=300,
+                expected_visible_verifier_timeout_seconds=300,
+                expected_worker_min_runtime_seconds=600,
+                expected_worker_min_verifier_runs=2,
+                expected_supplemental_evaluation_enabled=True,
+                expected_evidence_annotator_enabled=True,
+                expected_worker_host="codex",
+            )
+
+            self.assertTrue(state["completion"]["passed"])
+            comparisons = state["completion"]["checks"][
+                "dynamic_peer_comparison"
+            ]
+            self.assertTrue(comparisons["passed"])
+            self.assertEqual(len(comparisons["actual"]), 3)
+            self.assertEqual(state["evidence_annotator_usage"]["input_tokens"], 180)
+
+            annotation_path = next(
+                root.glob("runs/run_test/candidates/*/evidence-annotations/*.json")
+            )
+            incomplete = read_json(annotation_path)
+            incomplete["comparison_state"] = "terminal_error"
+            incomplete["comparison"] = None
+            write_json(annotation_path, incomplete)
+            incomplete_state = goal_plus_evidence.collect_goal_plus_state(
+                root,
+                expected_k=2,
+                expected_worker_runtime_seconds=1500,
+                expected_closeout_reserve_seconds=300,
+                expected_visible_verifier_timeout_seconds=300,
+                expected_worker_min_runtime_seconds=600,
+                expected_worker_min_verifier_runs=2,
+                expected_supplemental_evaluation_enabled=True,
+                expected_evidence_annotator_enabled=True,
+                expected_worker_host="codex",
+            )
+            self.assertFalse(
+                incomplete_state["completion"]["checks"][
+                    "dynamic_peer_comparison"
+                ]["passed"]
+            )
+
     def test_goal_plus_codex_completion_enforces_worker_minimums(self) -> None:
         with self.temporary_directory() as temporary:
             root = Path(temporary)
