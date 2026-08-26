@@ -421,6 +421,30 @@ class OpenEvolveComparisonTest(unittest.TestCase):
         self.assertEqual(result["goal_plus"]["bound_worker_session_count"], 2)
         self.assertEqual(result["goal_plus"]["bound_worker_handle_count"], 1)
 
+    def test_pi_event_parser_marks_zero_cost_usage_as_unpriced(self) -> None:
+        event = {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "model": "unpriced-model",
+                "provider": "bench-openai",
+                "usage": {
+                    "input": 100,
+                    "output": 20,
+                    "cacheRead": 50,
+                    "cacheWrite": 0,
+                    "cost": {"total": 0},
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "events.jsonl"
+            path.write_text(json.dumps(event) + "\n")
+            result = experiment.parse_pi_events(path)
+
+        self.assertEqual(result["usage"]["input"], 100)
+        self.assertIsNone(result["usage"]["cost_total"])
+
     def test_goal_plus_completion_requires_worker_verifier_evidence_for_every_candidate(
         self,
     ) -> None:
@@ -870,11 +894,20 @@ class OpenEvolveComparisonTest(unittest.TestCase):
     def test_pi_model_config_uses_environment_reference_not_secret(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir)
-            experiment.write_pi_models_config(
-                target,
-                api_base="http://proxy.example/v1",
-                model="gpt-5.6-luna",
-            )
+            expected_cost = {
+                "input": 0.2,
+                "output": 1.2,
+                "cacheRead": 0.02,
+                "cacheWrite": 0.25,
+            }
+            with mock.patch.object(
+                experiment, "resolve_pi_model_cost", return_value=expected_cost
+            ):
+                experiment.write_pi_models_config(
+                    target,
+                    api_base="http://proxy.example/v1",
+                    model="gpt-5.6-luna",
+                )
             raw = (target / "models.json").read_text()
             payload = json.loads(raw)
             provider = payload["providers"][experiment.PI_PROVIDER_ID]
@@ -883,20 +916,30 @@ class OpenEvolveComparisonTest(unittest.TestCase):
             self.assertEqual(
                 provider["models"][0]["thinkingLevelMap"], {"high": "high"}
             )
+            self.assertEqual(provider["models"][0]["cost"], expected_cost)
             self.assertNotRegex(raw, r"\bsk-[A-Za-z0-9_-]{16,}\b")
 
     def test_pi_model_config_supports_anthropic_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir)
-            experiment.write_pi_models_config(
-                target,
-                api_base="https://anthropic-proxy.example",
-                model="glm-5.3",
-                reasoning_effort="medium",
-                provider_id="zai-anthropic",
-                api="anthropic-messages",
-                api_key_env="ZAI_API_KEY",
-            )
+            expected_cost = {
+                "input": 1,
+                "output": 5,
+                "cacheRead": 0.1,
+                "cacheWrite": 1.25,
+            }
+            with mock.patch.object(
+                experiment, "resolve_pi_model_cost", return_value=expected_cost
+            ):
+                experiment.write_pi_models_config(
+                    target,
+                    api_base="https://anthropic-proxy.example",
+                    model="glm-5.3",
+                    reasoning_effort="medium",
+                    provider_id="zai-anthropic",
+                    api="anthropic-messages",
+                    api_key_env="ZAI_API_KEY",
+                )
             models_path = target / "models.json"
             raw = models_path.read_text()
             provider = json.loads(raw)["providers"]["zai-anthropic"]
@@ -904,8 +947,26 @@ class OpenEvolveComparisonTest(unittest.TestCase):
             self.assertEqual(provider["api"], "anthropic-messages")
             self.assertEqual(provider["apiKey"], "$ZAI_API_KEY")
             self.assertEqual(provider["models"][0]["id"], "glm-5.3")
+            self.assertEqual(provider["models"][0]["cost"], expected_cost)
             self.assertNotIn("thinkingLevelMap", provider["models"][0])
             self.assertEqual(models_path.stat().st_mode & 0o777, 0o600)
+
+    def test_pi_model_config_allows_unknown_pricing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir)
+            with mock.patch.object(
+                experiment, "resolve_pi_model_cost", return_value=None
+            ):
+                experiment.write_pi_models_config(
+                    target,
+                    api_base="http://proxy.example/v1",
+                    model="unpriced-model",
+                )
+            model = json.loads((target / "models.json").read_text())["providers"][
+                experiment.PI_PROVIDER_ID
+            ]["models"][0]
+
+        self.assertNotIn("cost", model)
 
     def test_codex_provider_args_select_responses(self) -> None:
         args = experiment.codex_provider_args("http://proxy.example/v1")

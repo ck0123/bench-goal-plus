@@ -20,6 +20,7 @@ from bench_goal_plus.loopback_bridge import (
     loopback_target,
     start_socket_bridge,
 )
+from bench_goal_plus.pi_pricing import resolve_pi_model_cost
 from bench_runtime_paths import (
     configure_temp_environment,
     ensure_temp_root,
@@ -382,7 +383,12 @@ def resolve_pi_runtime(profile: dict[str, Any]) -> dict[str, Any]:
 
 
 def write_pi_models_config(
-    path: Path, runtime: dict[str, Any], *, reasoning_effort: str
+    path: Path,
+    runtime: dict[str, Any],
+    *,
+    reasoning_effort: str,
+    pricing_catalog_path: Path | None = None,
+    pi_bin: str | Path = "pi",
 ) -> None:
     credential_env = str(runtime["credential_env"])
     provider_compat = PI_RESPONSES_PROVIDER_COMPAT.get(
@@ -390,34 +396,34 @@ def write_pi_models_config(
     )
     context_window = int(provider_compat.get("context_window", 272_000))
     max_tokens = int(provider_compat.get("max_tokens", 32_000))
+    model_cost = resolve_pi_model_cost(
+        provider_id=str(runtime["provider"]),
+        model_id=str(runtime["model_id"]),
+        api="openai-responses",
+        catalog_path=pricing_catalog_path,
+        pi_bin=pi_bin,
+    )
+    model_payload: dict[str, Any] = {
+        "id": str(runtime["model_id"]),
+        "name": f"{runtime['model_id']} benchmark proxy",
+        "reasoning": True,
+        "thinkingLevelMap": {reasoning_effort: reasoning_effort},
+        "input": ["text"],
+        "contextWindow": context_window,
+        "maxTokens": max_tokens,
+        "compat": {
+            "supportsDeveloperRole": True,
+            "supportsReasoningEffort": True,
+        },
+    }
+    if model_cost is not None:
+        model_payload["cost"] = model_cost
     provider_payload: dict[str, Any] = {
         "baseUrl": str(runtime["runtime_api_base_url"]),
         "api": "openai-responses",
         "apiKey": f"${credential_env}",
         "authHeader": True,
-        "models": [
-            {
-                "id": str(runtime["model_id"]),
-                "name": f"{runtime['model_id']} benchmark proxy",
-                "reasoning": True,
-                "thinkingLevelMap": {
-                    reasoning_effort: reasoning_effort,
-                },
-                "input": ["text"],
-                "contextWindow": context_window,
-                "maxTokens": max_tokens,
-                "cost": {
-                    "input": 0,
-                    "output": 0,
-                    "cacheRead": 0,
-                    "cacheWrite": 0,
-                },
-                "compat": {
-                    "supportsDeveloperRole": True,
-                    "supportsReasoningEffort": True,
-                },
-            }
-        ],
+        "models": [model_payload],
     }
     if "provider" in provider_compat:
         provider_payload["compat"] = dict(provider_compat["provider"])
@@ -481,6 +487,7 @@ def routed_pi_runtime(
             models_file,
             runtime,
             reasoning_effort=str(profile["reasoning_effort"]),
+            pi_bin=runtime["pi_cli"] or "pi",
         )
         runtime["models_file"] = models_file
         yield runtime

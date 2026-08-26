@@ -226,6 +226,7 @@ def _pi_agent_checks(profile: dict[str, Any]) -> list[dict[str, Any]]:
             api_base=str(os.environ["OPENAI_BASE_URL"]),
             model=str(profile["model"]),
             reasoning_effort=str(profile["reasoning_effort"]),
+            pi_bin=path,
         )
         probe_environment = configure_temp_environment(os.environ.copy())
         probe_environment["PI_CODING_AGENT_DIR"] = str(pi_home)

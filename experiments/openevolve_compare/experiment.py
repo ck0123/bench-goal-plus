@@ -26,6 +26,7 @@ from bench_artifacts import utc_now, write_json  # noqa: E402
 from bench_goal_plus.codex_provider import (  # noqa: E402
     codex_responses_provider_args,
 )
+from bench_goal_plus.pi_pricing import resolve_pi_model_cost  # noqa: E402
 from bench_goal_plus.upstreams import upstream_source_path  # noqa: E402
 from bench_runtime_paths import configure_temp_environment  # noqa: E402
 from adapters.openevolve_examples.adapter import (  # noqa: E402
@@ -491,6 +492,8 @@ def write_pi_models_config(
     provider_id: str = PI_PROVIDER_ID,
     api: str = "openai-responses",
     api_key_env: str = PI_API_KEY_ENV,
+    pricing_catalog_path: Path | None = None,
+    pi_bin: str | Path = "pi",
 ) -> None:
     if not provider_id or "/" in provider_id:
         raise ValueError("Pi provider id must be non-empty and cannot contain '/'")
@@ -499,20 +502,23 @@ def write_pi_models_config(
     if not api_key_env or not api_key_env.replace("_", "A").isalnum():
         raise ValueError("Pi API key environment variable name is invalid")
     target.mkdir(parents=True, exist_ok=True)
-    model_config = {
+    model_cost = resolve_pi_model_cost(
+        provider_id=provider_id,
+        model_id=model,
+        api=api,
+        catalog_path=pricing_catalog_path,
+        pi_bin=pi_bin,
+    )
+    model_config: dict[str, Any] = {
         "id": model,
         "name": f"{model} benchmark proxy",
         "reasoning": True,
         "input": ["text"],
         "contextWindow": 200000 if api == "anthropic-messages" else 272000,
         "maxTokens": 131072 if api == "anthropic-messages" else 32000,
-        "cost": {
-            "input": 0,
-            "output": 0,
-            "cacheRead": 0,
-            "cacheWrite": 0,
-        },
     }
+    if model_cost is not None:
+        model_config["cost"] = model_cost
     if api != "anthropic-messages":
         model_config["thinkingLevelMap"] = {reasoning_effort: reasoning_effort}
         model_config["compat"] = {
@@ -1099,7 +1105,14 @@ def parse_pi_events(path: Path) -> dict[str, Any]:
             models.add(message["model"])
         if isinstance(message.get("provider"), str):
             providers.add(message["provider"])
-    usage["cost_total"] = round(float(usage["cost_total"]), 12)
+    cost_total = round(float(usage["cost_total"]), 12)
+    processed_tokens = sum(
+        int(usage[field])
+        for field in ("input", "output", "cache_read", "cache_write")
+    )
+    usage["cost_total"] = (
+        None if cost_total == 0 and processed_tokens > 0 else cost_total
+    )
     return {
         "event_count": event_count,
         "terminal_events": terminal_events,
@@ -2476,6 +2489,7 @@ def execute(args: argparse.Namespace) -> int:
                 api_base=args.api_base,
                 model=args.model,
                 reasoning_effort=reasoning_effort,
+                pi_bin=args.pi_bin,
             )
             environment["PI_CODING_AGENT_DIR"] = str(pi_home)
             environment["GOAL_PLUS_PI_MODEL"] = qualified_model

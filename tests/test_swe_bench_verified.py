@@ -1119,12 +1119,22 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         )
         self.assertNotIn(secret, annotator_environment.values())
         with self.temporary_directory() as temporary:
-            models_file = Path(temporary) / "provider-runtime/models.json"
-            environment.write_pi_models_config(
-                models_file,
-                runtime_info,
-                reasoning_effort=profile["reasoning_effort"],
-            )
+            temporary_path = Path(temporary)
+            models_file = temporary_path / "provider-runtime/models.json"
+            expected_cost = {
+                "input": 0.2,
+                "output": 1.2,
+                "cacheRead": 0.02,
+                "cacheWrite": 0.25,
+            }
+            with mock.patch.object(
+                environment, "resolve_pi_model_cost", return_value=expected_cost
+            ):
+                environment.write_pi_models_config(
+                    models_file,
+                    runtime_info,
+                    reasoning_effort=profile["reasoning_effort"],
+                )
             raw = models_file.read_text(encoding="utf-8")
             payload = json.loads(raw)
 
@@ -1135,6 +1145,7 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         self.assertEqual(
             provider["models"][0]["thinkingLevelMap"], {"high": "high"}
         )
+        self.assertEqual(provider["models"][0]["cost"], expected_cost)
         self.assertNotIn(secret, raw)
 
     def test_deepseek_pi_registry_uses_provider_compatibility(self) -> None:
@@ -1149,12 +1160,22 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
 
         runtime_info["runtime_api_base_url"] = values["DEEPSEEK_BASE_URL"]
         with self.temporary_directory() as temporary:
-            models_file = Path(temporary) / "provider-runtime/models.json"
-            environment.write_pi_models_config(
-                models_file,
-                runtime_info,
-                reasoning_effort=profile["reasoning_effort"],
-            )
+            temporary_path = Path(temporary)
+            models_file = temporary_path / "provider-runtime/models.json"
+            expected_cost = {
+                "input": 0.3,
+                "output": 1.2,
+                "cacheRead": 0.03,
+                "cacheWrite": 0.3,
+            }
+            with mock.patch.object(
+                environment, "resolve_pi_model_cost", return_value=expected_cost
+            ):
+                environment.write_pi_models_config(
+                    models_file,
+                    runtime_info,
+                    reasoning_effort=profile["reasoning_effort"],
+                )
             raw = models_file.read_text(encoding="utf-8")
             provider = json.loads(raw)["providers"]["deepseek-responses"]
 
@@ -1170,8 +1191,38 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         )
         self.assertEqual(provider["models"][0]["contextWindow"], 1_000_000)
         self.assertEqual(provider["models"][0]["maxTokens"], 384_000)
+        self.assertEqual(provider["models"][0]["cost"], expected_cost)
         self.assertNotIn("compat", provider["models"][0])
         self.assertNotIn(secret, raw)
+
+    def test_pi_registry_allows_unknown_pricing(self) -> None:
+        profile = self.profile("sympy-16886-goal-plus-pi-luna-high-smoke")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OPENAI_BASE_URL": "http://192.0.2.10:45678/v1",
+                "OPENAI_API_KEY": "not-for-provider-config",
+            },
+            clear=False,
+        ):
+            runtime_info = environment.resolve_pi_runtime(profile)
+        runtime_info["runtime_api_base_url"] = "http://192.0.2.10:45678/v1"
+
+        with self.temporary_directory() as temporary:
+            models_file = Path(temporary) / "models.json"
+            with mock.patch.object(
+                environment, "resolve_pi_model_cost", return_value=None
+            ):
+                environment.write_pi_models_config(
+                    models_file,
+                    runtime_info,
+                    reasoning_effort=profile["reasoning_effort"],
+                )
+            model = json.loads(models_file.read_text())["providers"]["bench-openai"][
+                "models"
+            ][0]
+
+        self.assertNotIn("cost", model)
 
     def test_loopback_bridge_preserves_the_responses_base_path(self) -> None:
         self.assertEqual(
