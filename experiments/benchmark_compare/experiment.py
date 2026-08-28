@@ -847,6 +847,7 @@ def execute_plain(
                 provider_id=pi_provider_id,
                 api=pi_api,
                 api_key_env=pi_api_key_env,
+                pi_bin=args.pi_bin,
             )
             lane_environment["PI_CODING_AGENT_DIR"] = str(pi_home)
             command = [
@@ -1042,6 +1043,7 @@ def execute_goal_plus(
             provider_id=pi_provider_id,
             api=pi_api,
             api_key_env=pi_api_key_env,
+            pi_bin=args.pi_bin,
         )
         environment["PI_CODING_AGENT_DIR"] = str(pi_home)
         environment["GOAL_PLUS_PI_MODEL"] = qualified_model

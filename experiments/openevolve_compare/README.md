@@ -181,7 +181,7 @@ export OPENAI_API_KEY='<secret>'
   --api-base https://api.example.com/v1
 ```
 
-When `--api-base` is provided, Codex uses an explicit run-local custom provider over the Responses wire API. When it is omitted, Codex uses native login/auth while the benchmark still injects all Goal Plus MCP and headless-tool configuration explicitly. Pi receives a run-local `models.json` whose credential field is only `$OPENAI_API_KEY`.
+When `--api-base` is provided, Codex uses an explicit run-local custom provider over the Responses wire API. When it is omitted, Codex uses native login/auth while the benchmark still injects all Goal Plus MCP and headless-tool configuration explicitly. Pi receives a run-local `models.json` whose credential field is only `$OPENAI_API_KEY`; model prices and tiers are copied from the active or installed Pi catalog. Missing pricing does not block execution and is reported as unavailable rather than zero cost.
 
 The outer controller sends `SIGTERM` at `T`, allows a fixed grace period, and marks a hard kill incomplete. A normal deadline signal is accepted only after deterministic closeout succeeds. `experiment.json`, `final-eval.json`, event logs, Goal Plus state, selected artifact, evaluator call counts, and available usage telemetry remain in the ignored run directory.
 

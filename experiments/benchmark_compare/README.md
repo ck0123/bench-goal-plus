@@ -67,7 +67,9 @@ The same command shape works for every table row:
 
 `goal-plus-pi` 使用同一个 materializer、task prompt 和 evaluator，但把 worker
 host 固定为 `pi-rpc`。运行时必须显式传 `--api-base`；run-local
-`pi-home/models.json` 只引用宿主环境中的 `$OPENAI_API_KEY`，不持久化密钥。
+`pi-home/models.json` 只引用宿主环境中的 `$OPENAI_API_KEY`，不持久化密钥。模型
+单价和 tier 从当前配置或 Pi 安装自带的 catalog 复制并固化到本次 run；catalog 缺少价格时仍正常运行，
+费用在统计中标记为未知。
 
 These historical commands keep their previous behavior. For a claimable B3 or
 B4 ablation cell, pass `--condition B3 --coordination-variant way2` or

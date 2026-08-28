@@ -230,7 +230,7 @@ export OPENAI_API_KEY='<secret>'
   --api-base https://api.example.com/v1
 ```
 
-Plain Codex 使用 `K` 个 ephemeral lane。每个 lane 接收同一份 common task prompt；Goal Plus + Codex 接收该 prompt 的严格超集：只在开头增加 `$goal-plus mode=autonomous`，并在末尾附加完整的 Goal Plus 并发、host/model、metric/verifier、edit surface 和预算配置。Goal Plus + Codex 保留原生 session provenance；Goal Plus + Pi 使用 `/goal-plus mode=autonomous`，并写入 ignored 的 run-local `pi-home/models.json`，其中只引用 `$OPENAI_API_KEY`。Codex 的自定义 provider、Responses wire API、Goal Plus MCP 注册及 headless tool approval 全由命令行显式注入，不依赖另一台机器上的个人 `config.toml`。
+Plain Codex 使用 `K` 个 ephemeral lane。每个 lane 接收同一份 common task prompt；Goal Plus + Codex 接收该 prompt 的严格超集：只在开头增加 `$goal-plus mode=autonomous`，并在末尾附加完整的 Goal Plus 并发、host/model、metric/verifier、edit surface 和预算配置。Goal Plus + Codex 保留原生 session provenance；Goal Plus + Pi 使用 `/goal-plus mode=autonomous`，并写入 ignored 的 run-local `pi-home/models.json`，其中只引用 `$OPENAI_API_KEY`，同时从当前配置或 Pi 安装自带的 catalog 固化本次使用的模型单价和 tier。catalog 缺少价格时仍正常运行，费用在统计中标记为未知。Codex 的自定义 provider、Responses wire API、Goal Plus MCP 注册及 headless-tool approval 全由命令行显式注入，不依赖另一台机器上的个人 `config.toml`。
 
 Goal Plus 配置还明确 process-verifier 的所有权：每个 candidate worker 提交自己的最终 process result；parent 等全部 workers 返回后直接 selection，由 promotion verifier 做最终 gate。不要让 parent 在 worker closeout 同时重复 process verification，否则会制造无意义的 evaluator call，并可能与 runtime-owned `results.tsv` 提交竞争。
 

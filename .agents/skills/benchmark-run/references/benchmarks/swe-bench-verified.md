@@ -30,7 +30,8 @@ name. The complete dataset row is host-side evaluator input; the Agent receives 
 issue allowlist.
 
 The Luna profile materializes a campaign-local Pi `models.json` containing only the endpoint and
-`$OPENAI_API_KEY` environment reference. A Linux loopback endpoint uses the same repository-owned
+`$OPENAI_API_KEY` environment reference, plus the price and tier snapshot resolved from the active
+or installed Pi catalog. Missing pricing does not block the run and remains unavailable in usage reporting. A Linux loopback endpoint uses the same repository-owned
 socket bridge as Plain Codex; doctor must pass host Responses, task-container Responses, and Pi's
 exact `bench-openai/gpt-5.6-luna` model listing before launch.
 
