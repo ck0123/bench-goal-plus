@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import atexit
 import json
 import os
@@ -16,6 +17,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from bench_runtime_paths import configure_temp_environment
+from bench_goal_plus.search_scheduler import (
+    render_search_scheduler_instructions,
+    search_scheduler_from_json,
+)
 
 from . import io
 from .context import current_paths
@@ -296,6 +301,16 @@ def cell_environment(
                 or cell["reasoning_effort"]
             ),
         }
+        search_scheduler = search_scheduler_from_json(
+            (cell.get("goal_plus_config") or {}).get("search_scheduler")
+        )
+        if search_scheduler is not None:
+            instructions = render_search_scheduler_instructions(search_scheduler)
+            extra_env[
+                "SFORGE_GOAL_PLUS_SEARCH_SCHEDULER_INSTRUCTIONS_B64"
+            ] = base64.urlsafe_b64encode(instructions.encode("utf-8")).decode(
+                "ascii"
+            )
         if cell["method"] in {"goal-plus-pi", "goal-plus-pi-provider"}:
             extra_env.update(
                 {

@@ -2847,7 +2847,10 @@ class EdgeBenchExperimentTest(unittest.TestCase):
         self.assertEqual(source["source_kind"], "external")
         self.assertEqual(source["branch"], "experiment/test-goal-plus-ref")
         self.assertEqual(source["commit"], source["expected_ref_commit"])
-        self.assertEqual(EDGE.upstream_entry("goal_plus")["tracking_branch"], "master")
+        self.assertEqual(
+            EDGE.upstream_entry("goal_plus")["tracking_branch"],
+            "master",
+        )
 
         missing_ref = EDGE_ENV.resolve_goal_plus_source(
             {"SFORGE_GOAL_PLUS_SOURCE_DIR": str(self.test_paths.goal_plus_root)}

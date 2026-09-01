@@ -291,7 +291,7 @@ Skill、plugin 和 MCP create/update 工具都没有启动或恢复权限。Pi �
 精确 `/goal-plus ...` extension command；通过 `pi -c` 新进程恢复 native session 时，
 只能提交无附加文本的 `/goal-plus resume`。当前真实路径是：
 
-- 默认情况下 controller 使用 registry 声明的 Muyuan `master` checkout。临时实验分支
+- 默认情况下 controller 使用 registry 声明的官方 Muyuan `master` checkout。临时实验分支
   不修改 registry，而是显式设置 `SFORGE_GOAL_PLUS_SOURCE_DIR` 为外部 checkout 中的
   `plugins/goal-plus`，并设置 `SFORGE_GOAL_PLUS_EXPECTED_REF`。doctor 在 Docker 前要求
   checkout clean、HEAD 与该 ref 的本地 commit 一致、运行资产完整；prepare 冻结 commit，

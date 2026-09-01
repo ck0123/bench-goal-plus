@@ -26,6 +26,7 @@ from bench_artifacts import (  # noqa: E402
     write_json_atomic as write_json,
 )
 from bench_runtime_paths import configure_temp_environment  # noqa: E402
+from bench_goal_plus.search_scheduler import search_scheduler_from_namespace  # noqa: E402
 from experiments.benchmark_compare.conditions import CONDITIONS  # noqa: E402
 from experiments.benchmark_compare import experiment as standalone  # noqa: E402
 from experiments.openevolve_compare.reporting import collect_run, numeric  # noqa: E402
@@ -94,6 +95,7 @@ def prepare_cell_config(
         hard_kill_grace_seconds=args.hard_kill_grace_seconds,
         worker_runtime_seconds=args.worker_runtime_seconds,
         worker_min_runtime_seconds=args.worker_min_runtime_seconds,
+        search_scheduler=search_scheduler_from_namespace(args),
         seed=seed,
         reasoning_effort=args.reasoning_effort,
         run_dir=run_dir,
@@ -117,6 +119,15 @@ def prepare_campaign(args: argparse.Namespace) -> int:
         raise ValueError("methods must be unique")
     if args.methods and args.conditions:
         raise ValueError("choose either --methods or --conditions, not both")
+    search_scheduler = search_scheduler_from_namespace(args)
+    if search_scheduler is not None and (
+        args.conditions
+        or not args.methods
+        or any(not method.startswith("goal-plus-") for method in args.methods)
+    ):
+        raise ValueError(
+            "Search Scheduler requires explicit Goal Plus methods and no B0-B4 conditions"
+        )
     if len(set(args.seeds)) != len(args.seeds):
         raise ValueError("seeds must be unique")
     selected_conditions = tuple(
@@ -153,6 +164,11 @@ def prepare_campaign(args: argparse.Namespace) -> int:
         "seeds": args.seeds,
         "model": args.model,
         "reasoning_effort": args.reasoning_effort,
+        **(
+            {"search_scheduler": search_scheduler.as_dict()}
+            if search_scheduler is not None
+            else {}
+        ),
         "budget": {
             "wall_time_seconds": args.wall_time_seconds,
             "live_search_concurrency": args.concurrency,

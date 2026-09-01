@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from bench_goal_plus.search_scheduler import search_scheduler_from_json
+
 from .config import SweBenchContractError, read_json, utc_now, write_json
 from .goal_plus_evidence import collect_goal_plus_state, record_completion_check
 from .runtime import (
@@ -92,6 +94,9 @@ def _revalidate_goal_plus_cell(
             ),
             expected_evidence_annotator_enabled=isinstance(
                 goal_plus_profile["evidence_annotator"], dict
+            ),
+            expected_search_scheduler=search_scheduler_from_json(
+                profile.get("search_scheduler")
             ),
         )
     except (KeyError, TypeError, ValueError):

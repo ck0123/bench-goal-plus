@@ -18,6 +18,10 @@ from bench_goal_plus.goal_plus_command import (
     goal_plus_entrypoint,
     render_goal_plus_command,
 )
+from bench_goal_plus.search_scheduler import (
+    render_search_scheduler_instructions,
+    search_scheduler_from_json,
+)
 from bench_runtime_paths import configure_temp_environment, ensure_temp_root
 
 from .config import (
@@ -145,6 +149,7 @@ def _visible_task(instance: dict[str, Any], profile: dict[str, Any]) -> dict[str
 
 
 def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
+    search_scheduler = search_scheduler_from_json(profile.get("search_scheduler"))
     destination = campaign_dir(campaign_id)
     preserved = preserve_conflict(destination)
     destination.mkdir(parents=True, exist_ok=False)
@@ -205,6 +210,11 @@ def prepare(campaign_id: str, profile: dict[str, Any]) -> Path:
                     else "pi-rpc"
                 ),
                 "command_config": swe_goal_plus_command_config(profile),
+                **(
+                    {"search_scheduler": search_scheduler.as_dict()}
+                    if search_scheduler is not None
+                    else {}
+                ),
             }
             if profile["methods"][0] in {"goal-plus-codex", "goal-plus-pi"}
             else None
@@ -1097,9 +1107,11 @@ def build_goal_plus_prompt(task: dict[str, Any], profile: dict[str, Any]) -> str
         "Freeze exactly one SearchSpec discovered from the public issue and repository. "
         "Honor every leading typed command field. Use source_path=/testbed, "
         "metric_name=visible_test_score, direction=maximize, "
-        f"strategy.worker_host={worker_host}, and strategy.orchestration_mode=parallel_loops. "
-        "Do not set the deprecated max_candidates field. "
-        "Set strategy.worker_budget.max_runtime_seconds="
+        f"strategy.worker_host={worker_host}. "
+        + render_search_scheduler_instructions(
+            search_scheduler_from_json(profile.get("search_scheduler"))
+        )
+        + "Set strategy.worker_budget.max_runtime_seconds="
         f"{goal_plus['worker_runtime_seconds']}. "
         f"{minimum_budget_instruction}"
         "Set "
@@ -1682,6 +1694,9 @@ def _export_goal_plus_state(
         ),
         expected_worker_host=(
             "codex" if profile["methods"][0] == "goal-plus-codex" else "pi-rpc"
+        ),
+        expected_search_scheduler=search_scheduler_from_json(
+            profile.get("search_scheduler")
         ),
     )
     record_completion_check(

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from bench_goal_plus.agent_events import parse_codex_event_file
+from bench_goal_plus.search_scheduler import summarize_worker_concurrency
 from bench_runtime_paths import configure_temp_environment
 
 from . import io
@@ -165,6 +166,7 @@ def goal_plus_stats(task_run: Path) -> dict[str, Any] | None:
     if not archive_path.is_file():
         return None
     candidates: set[tuple[str, str]] = set()
+    initial_candidates: set[tuple[str, str]] = set()
     sessions = 0
     worker_sessions: list[dict[str, Any]] = []
     bound_worker_handles: list[dict[str, Any]] = []
@@ -181,6 +183,10 @@ def goal_plus_stats(task_run: Path) -> dict[str, Any] | None:
     annotation_states: dict[str, int] = defaultdict(int)
     worker_usage: dict[str, int | float] = defaultdict(int)
     worker_logs = 0
+    run_records: dict[str, dict[str, Any]] = {}
+    frozen_specs: dict[str, dict[str, Any]] = {}
+    pi_worker_intervals: list[dict[str, Any]] = []
+    codex_leases: dict[str, dict[str, Any]] = {}
     try:
         with tarfile.open(archive_path) as archive:
             for member in archive:
@@ -193,6 +199,7 @@ def goal_plus_stats(task_run: Path) -> dict[str, Any] | None:
                             payload = json.loads(
                                 extracted.read().decode("utf-8", errors="replace")
                             )
+                            run_records[run_match.group(1)] = payload
                             state = payload.get("state")
                             if state:
                                 search_run_states[str(state)] += 1
@@ -215,8 +222,21 @@ def goal_plus_stats(task_run: Path) -> dict[str, Any] | None:
                     member.name,
                 )
                 if match:
-                    search_runs.add(match.group(1))
-                    candidates.add((match.group(1), match.group(2)))
+                    run_id, candidate_id = match.groups()
+                    search_runs.add(run_id)
+                    candidates.add((run_id, candidate_id))
+                    extracted = archive.extractfile(member)
+                    if extracted:
+                        try:
+                            payload = json.loads(
+                                extracted.read().decode("utf-8", errors="replace")
+                            )
+                            task = payload.get("task")
+                            task = task if isinstance(task, dict) else {}
+                            if int(task.get("allocation_depth") or 0) == 0:
+                                initial_candidates.add((run_id, candidate_id))
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            pass
                 if "/goal-plus/" in member.name and member.name.endswith(
                     "/goal.json"
                 ):
@@ -237,7 +257,28 @@ def goal_plus_stats(task_run: Path) -> dict[str, Any] | None:
                                     )
                                     if payload.get(key) is not None
                                 }
+                                | {
+                                    "linked_run_id": (
+                                        (payload.get("linked_search") or {}).get(
+                                            "run_id"
+                                        )
+                                    )
+                                }
                             )
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                spec_match = re.search(
+                    r"/specs/([^/]+)/frozen_spec\.json$", member.name
+                )
+                if spec_match:
+                    extracted = archive.extractfile(member)
+                    if extracted:
+                        try:
+                            payload = json.loads(
+                                extracted.read().decode("utf-8", errors="replace")
+                            )
+                            if isinstance(payload, dict):
+                                frozen_specs[spec_match.group(1)] = payload
                         except (json.JSONDecodeError, TypeError):
                             pass
                 if "/agent_sessions/" in member.name and member.name.endswith(".json"):
@@ -283,6 +324,8 @@ def goal_plus_stats(task_run: Path) -> dict[str, Any] | None:
                                     bound_worker_handles.append(
                                         {
                                             "agent_session_id": session_id,
+                                            "run_id": payload.get("run_id"),
+                                            "candidate_id": candidate_id,
                                             **compact_handle,
                                         }
                                     )
@@ -330,15 +373,106 @@ def goal_plus_stats(task_run: Path) -> dict[str, Any] | None:
                         text = extracted.read().decode("utf-8", errors="replace")
                         for event in iter_json_lines(text):
                             add_pi_usage(worker_usage, event)
+                if "/host-pools/pi/" in member.name and member.name.endswith(
+                    "/job.json"
+                ):
+                    extracted = archive.extractfile(member)
+                    if extracted:
+                        try:
+                            payload = json.loads(
+                                extracted.read().decode("utf-8", errors="replace")
+                            )
+                            if isinstance(payload, dict):
+                                pi_worker_intervals.append(
+                                    {
+                                        "candidate_id": payload.get("candidate_id"),
+                                        "started_at": payload.get("started_at"),
+                                        "ended_at": payload.get("finished_at"),
+                                    }
+                                )
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                lease_match = re.search(
+                    r"/host-logs/codex-autoresearch-leases/([^/]+)\.json$",
+                    member.name,
+                )
+                if lease_match:
+                    extracted = archive.extractfile(member)
+                    if extracted:
+                        try:
+                            payload = json.loads(
+                                extracted.read().decode("utf-8", errors="replace")
+                            )
+                            if isinstance(payload, dict):
+                                codex_leases[lease_match.group(1)] = payload
+                        except (json.JSONDecodeError, TypeError):
+                            pass
     except tarfile.TarError:
         return {"archive": "invalid"}
+    linked_run_ids = {
+        str(item["linked_run_id"])
+        for item in goal_statuses
+        if isinstance(item.get("linked_run_id"), str)
+        and item.get("linked_run_id")
+    }
+    contract_run_ids = linked_run_ids or search_runs
+    search_run_contracts = []
+    for run_id in sorted(contract_run_ids):
+        run = run_records.get(run_id) or {}
+        frozen_spec_id = run.get("frozen_spec_id")
+        frozen = frozen_specs.get(str(frozen_spec_id)) or {}
+        spec = frozen.get("spec") if isinstance(frozen.get("spec"), dict) else {}
+        strategy = spec.get("strategy") if isinstance(spec.get("strategy"), dict) else {}
+        budget = spec.get("budget") if isinstance(spec.get("budget"), dict) else {}
+        search_run_contracts.append(
+            {
+                "run_id": run_id,
+                "frozen_spec_id": frozen_spec_id,
+                "frozen_spec_present": bool(frozen),
+                "max_parallel": budget.get("max_parallel"),
+                "max_candidates": budget.get("max_candidates"),
+                "orchestration_mode": strategy.get("orchestration_mode"),
+                "search_scheduler": strategy.get("search_scheduler"),
+            }
+        )
+    worker_intervals = list(pi_worker_intervals)
+    for session in worker_sessions:
+        lease = codex_leases.get(str(session.get("agent_session_id")))
+        if lease:
+            worker_intervals.append(
+                {
+                    "candidate_id": session.get("candidate_id"),
+                    "started_at": lease.get("started_at"),
+                    "ended_at": lease.get("released_at")
+                    or session.get("updated_at"),
+                }
+            )
+    initial_candidate_ids = {candidate_id for _, candidate_id in initial_candidates}
+    worker_concurrency = summarize_worker_concurrency(worker_intervals)
+    initial_worker_concurrency = summarize_worker_concurrency(
+        interval
+        for interval in worker_intervals
+        if interval.get("candidate_id") in initial_candidate_ids
+    )
     return {
         "search_runs": len(search_runs),
         "candidates": len(candidates),
         "candidate_ids": sorted({candidate_id for _, candidate_id in candidates}),
+        "initial_candidates": len(initial_candidates),
+        "initial_candidate_ids": sorted(initial_candidate_ids),
         "agent_sessions": sessions,
         "worker_sessions": worker_sessions,
         "bound_worker_handles": bound_worker_handles,
+        "initial_agent_sessions": sum(
+            (str(item.get("run_id")), str(item.get("candidate_id")))
+            in initial_candidates
+            for item in worker_sessions
+        ),
+        "initial_bound_worker_handles": sum(
+            (str(item.get("run_id")), str(item.get("candidate_id")))
+            in initial_candidates
+            for item in bound_worker_handles
+        ),
         "worker_verifier_runs": verifier_runs,
         "verifier_candidate_ids": sorted(verifier_candidates),
         "verifier_candidate_count": len(verifier_candidates),
@@ -346,6 +480,9 @@ def goal_plus_stats(task_run: Path) -> dict[str, Any] | None:
         "selected_candidate_ids": sorted(selected_candidate_ids),
         "promoted_candidate_ids": sorted(promoted_candidate_ids),
         "goal_statuses": goal_statuses,
+        "search_run_contracts": search_run_contracts,
+        "worker_concurrency": worker_concurrency,
+        "initial_worker_concurrency": initial_worker_concurrency,
         "worker_usage": {
             **dict(sorted(worker_usage.items())),
             "sessions": worker_logs,
@@ -705,14 +842,26 @@ def goal_plus_completion_evidence(
             },
         }
     expected_workers = int(cell["inner_search_concurrency"])
+    scheduler_contract = (cell.get("goal_plus_config") or {}).get(
+        "search_scheduler"
+    )
+    scheduler_enabled = isinstance(scheduler_contract, dict)
+    max_candidates = (
+        scheduler_contract.get("max_candidates") if scheduler_enabled else None
+    )
     candidates = 0
+    initial_candidates = 0
     agent_sessions = 0
+    initial_agent_sessions = 0
     verifier_candidates: set[str] = set()
     verifier_runs = 0
     spawned_worker_threads = 0
     bound_worker_handles = 0
+    initial_bound_worker_handles = 0
     selected: set[str] = set()
     promoted: set[str] = set()
+    actual_scheduler_contracts: list[dict[str, Any]] = []
+    scheduler_worker_evidence: list[dict[str, Any]] = []
     for observation in observations:
         archived = observation.get("goal_plus") or {}
         events = observation.get("agent_events") or {}
@@ -722,10 +871,18 @@ def goal_plus_completion_evidence(
             int(archived.get("candidates") or 0),
             len(event_goal_plus.get("candidate_ids") or []),
         )
+        initial_candidates = max(
+            initial_candidates,
+            int(archived.get("initial_candidates") or 0),
+        )
         agent_sessions = max(
             agent_sessions,
             int(archived.get("agent_sessions") or 0),
             len(event_goal_plus.get("agent_session_ids") or []),
+        )
+        initial_agent_sessions = max(
+            initial_agent_sessions,
+            int(archived.get("initial_agent_sessions") or 0),
         )
         spawned_worker_threads = max(
             spawned_worker_threads,
@@ -733,7 +890,12 @@ def goal_plus_completion_evidence(
         )
         bound_worker_handles = max(
             bound_worker_handles,
+            len(archived.get("bound_worker_handles") or []),
             int(event_goal_plus.get("bound_worker_handle_count") or 0),
+        )
+        initial_bound_worker_handles = max(
+            initial_bound_worker_handles,
+            int(archived.get("initial_bound_worker_handles") or 0),
         )
         ledger = event_goal_plus.get("verifier_ledger") or []
         verifier_runs = max(
@@ -755,38 +917,181 @@ def goal_plus_completion_evidence(
         selected.update(event_goal_plus.get("selected_candidate_ids") or [])
         promoted.update(archived.get("promoted_candidate_ids") or [])
         promoted.update(event_goal_plus.get("promoted_candidate_ids") or [])
+        actual_scheduler_contracts.extend(
+            contract
+            for contract in archived.get("search_run_contracts") or []
+            if isinstance(contract, dict)
+        )
+        scheduler_worker_evidence.append(
+            {
+                "candidate_ids": archived.get("candidate_ids") or [],
+                "initial_candidate_ids": archived.get("initial_candidate_ids") or [],
+                "all": archived.get("worker_concurrency") or {},
+                "initial": archived.get("initial_worker_concurrency") or {},
+            }
+        )
 
+    requested_scheduler_spec = (
+        scheduler_contract.get("search_scheduler") if scheduler_enabled else None
+    )
+    scheduler_contract_passed = bool(
+        not scheduler_enabled
+        or (
+            actual_scheduler_contracts
+            and all(
+                contract.get("frozen_spec_present") is True
+                and contract.get("max_parallel") == expected_workers
+                and contract.get("max_candidates") == max_candidates
+                and contract.get("orchestration_mode") == "adaptive_search"
+                and contract.get("search_scheduler") == requested_scheduler_spec
+                for contract in actual_scheduler_contracts
+            )
+        )
+    )
+    live_worker_limit_passed = bool(
+        not scheduler_enabled
+        or (
+            scheduler_worker_evidence
+            and all(
+                evidence["all"].get("invalid_interval_count") == 0
+                and set(evidence["all"].get("candidate_ids") or [])
+                == set(evidence["candidate_ids"])
+                and isinstance(evidence["all"].get("max_live_workers"), int)
+                and evidence["all"]["max_live_workers"] <= expected_workers
+                and evidence["initial"].get("invalid_interval_count") == 0
+                and set(evidence["initial"].get("candidate_ids") or [])
+                == set(evidence["initial_candidate_ids"])
+                and len(evidence["initial_candidate_ids"]) == expected_workers
+                for evidence in scheduler_worker_evidence
+            )
+        )
+    )
+
+    candidate_limit_passed = (
+        candidates >= expected_workers
+        and (not scheduler_enabled or initial_candidates == expected_workers)
+        and (max_candidates is None or candidates <= int(max_candidates))
+    )
+    agent_sessions_passed = (
+        initial_agent_sessions == expected_workers and agent_sessions >= candidates
+        if scheduler_enabled
+        else agent_sessions >= expected_workers
+    )
+    actual_worker_launches_passed = (
+        initial_bound_worker_handles == expected_workers
+        if scheduler_enabled
+        else spawned_worker_threads >= expected_workers
+    )
+    spawn_coverage_passed = max(spawned_worker_threads, bound_worker_handles) >= (
+        candidates if scheduler_enabled else expected_workers
+    )
     checks: dict[str, dict[str, Any]] = {
-        "valid_trajectory": {"expected": 1, "actual": valid_trajectories},
-        "candidates": {"expected": expected_workers, "actual": candidates},
-        "agent_sessions": {"expected": expected_workers, "actual": agent_sessions},
-        "worker_verifier_runs": {"expected": expected_workers, "actual": verifier_runs},
-        "promotion": {"expected": 1, "actual": max(len(selected), len(promoted))},
+        "valid_trajectory": {
+            "expected": 1,
+            "actual": valid_trajectories,
+        },
+        "candidates": {
+            "expected": (
+                {
+                    "initial": expected_workers,
+                    "cumulative_minimum": expected_workers,
+                    "cumulative_maximum": max_candidates,
+                }
+                if scheduler_enabled
+                else expected_workers
+            ),
+            "actual": candidates,
+        },
+        "agent_sessions": {
+            "expected": (
+                {"initial": expected_workers, "cumulative_minimum": candidates}
+                if scheduler_enabled
+                else expected_workers
+            ),
+            "actual": (
+                {
+                    "initial": initial_agent_sessions,
+                    "cumulative": agent_sessions,
+                }
+                if scheduler_enabled
+                else agent_sessions
+            ),
+        },
+        "worker_verifier_runs": {
+            "expected": expected_workers,
+            "actual": verifier_runs,
+        },
+        "promotion": {
+            "expected": 1,
+            "actual": max(len(selected), len(promoted)),
+        },
+        "search_scheduler_contract": {
+            "expected": (
+                {
+                    "max_parallel": expected_workers,
+                    "max_candidates": max_candidates,
+                    "orchestration_mode": "adaptive_search",
+                    "search_scheduler": requested_scheduler_spec,
+                }
+                if scheduler_enabled
+                else "not required"
+            ),
+            "actual": actual_scheduler_contracts,
+        },
+        "scheduler_live_worker_limit": {
+            "expected": (
+                {"initial_workers": expected_workers, "maximum_live": expected_workers}
+                if scheduler_enabled
+                else "not required"
+            ),
+            "actual": scheduler_worker_evidence,
+        },
     }
     if cell["method"] == "goal-plus-codex":
         checks["actual_worker_launches"] = {
             "expected": expected_workers,
-            "actual": spawned_worker_threads,
+            "actual": (
+                initial_bound_worker_handles
+                if scheduler_enabled
+                else spawned_worker_threads
+            ),
         }
         checks["spawn_agent_event_coverage"] = {
-            "expected": expected_workers,
-            "actual": spawned_worker_threads,
+            "expected": candidates if scheduler_enabled else expected_workers,
+            "actual": max(spawned_worker_threads, bound_worker_handles),
         }
     checks["verifier_candidate_coverage"] = {
         "expected": expected_workers,
         "actual": len(verifier_candidates),
     }
     required_evidence_present = all(
-        int(check["actual"]) >= int(check["expected"]) for check in checks.values()
+        (
+            valid_trajectories >= 1,
+            candidate_limit_passed,
+            agent_sessions_passed,
+            verifier_runs >= expected_workers,
+            max(len(selected), len(promoted)) >= 1,
+            len(verifier_candidates) >= expected_workers,
+            scheduler_contract_passed,
+            live_worker_limit_passed,
+            (
+                actual_worker_launches_passed and spawn_coverage_passed
+                if cell["method"] == "goal-plus-codex"
+                else True
+            ),
+        )
     )
     actual_subagent_check = (
         checks["actual_worker_launches"]
         if cell["method"] == "goal-plus-codex"
         else checks["agent_sessions"]
     )
-    actual_subagent_count_matches_k = (
-        int(actual_subagent_check["actual"]) == expected_workers
+    actual_subagent_count = (
+        initial_agent_sessions
+        if scheduler_enabled and cell["method"] != "goal-plus-codex"
+        else int(actual_subagent_check["actual"])
     )
+    actual_subagent_count_matches_k = actual_subagent_count == expected_workers
     passed = required_evidence_present and actual_subagent_count_matches_k
     return {
         "required": True,
@@ -795,9 +1100,14 @@ def goal_plus_completion_evidence(
         "reason": (
             None
             if passed
-            else "Goal Plus method did not persist exactly K actual subagents plus "
-            "the required verifier, promotion, and official trajectory evidence"
+            else "Goal Plus method did not persist the required initial K actual "
+            "subagents, scheduler candidate limit, verifier, promotion, and official "
+            "trajectory evidence"
         ),
+        "search_scheduler_enabled": scheduler_enabled,
+        "actual_subagent_count": actual_subagent_count,
+        "cumulative_candidate_count": candidates,
+        "cumulative_agent_session_count": agent_sessions,
     }
 
 

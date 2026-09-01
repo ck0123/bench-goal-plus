@@ -7,6 +7,10 @@ import json
 from pathlib import Path
 
 from bench_runtime_paths import configure_temp_environment
+from bench_goal_plus.search_scheduler import (
+    add_internal_search_scheduler_argument,
+    search_scheduler_from_namespace,
+)
 
 from .environment import doctor, provision, resolve_goal_plus_source
 from .io import campaign_dir
@@ -46,9 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--wall-time-seconds", type=int)
     prepare_parser.add_argument("--concurrency", type=int)
     prepare_parser.add_argument("--cell-concurrency", type=int)
+    add_internal_search_scheduler_argument(prepare_parser)
     metadata_parser = subparsers.add_parser("plan-metadata")
     metadata_parser.add_argument("--profile", default="vliw-smoke")
     metadata_parser.add_argument("--method", action="append", choices=sorted(METHODS))
+    add_internal_search_scheduler_argument(metadata_parser)
     for name in ("run", "status", "stop", "finalize", "_execute"):
         child = subparsers.add_parser(name)
         child.add_argument("--campaign", required=True)
@@ -68,6 +74,13 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command in {"provision", "doctor", "prepare", "plan-metadata"}:
         _, profile = load_profile(args.profile)
+        search_scheduler = search_scheduler_from_namespace(args)
+        if search_scheduler is not None:
+            selected_concurrency = int(
+                getattr(args, "concurrency", None) or profile["concurrency"]
+            )
+            search_scheduler.validate_max_candidates(selected_concurrency)
+            profile = {**profile, "search_scheduler": search_scheduler.as_dict()}
         if args.command == "plan-metadata":
             if args.method:
                 profile = {**profile, "methods": args.method}
@@ -100,6 +113,15 @@ def main(argv: list[str] | None = None) -> int:
                                     profile.get(
                                         "supplemental_evaluation_enabled", False
                                     )
+                                ),
+                                **(
+                                    {
+                                        "search_scheduler": (
+                                            search_scheduler.as_dict()
+                                        )
+                                    }
+                                    if search_scheduler is not None
+                                    else {}
                                 ),
                             }
                         }

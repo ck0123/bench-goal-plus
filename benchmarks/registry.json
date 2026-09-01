@@ -666,6 +666,40 @@
       ]
     },
     {
+      "id": "goal-plus-search-scheduler",
+      "display_name": "Goal Plus Search Scheduler",
+      "kind": "search_backend",
+      "gate_set": "search_backend",
+      "priority": 3,
+      "repositories": [
+        {
+          "role": "search-backend",
+          "upstream_url": "https://gitcode.com/yiyanzhi_akane1/muyuan",
+          "subdirectory": "plugins/goal-plus",
+          "tracking_branch": "master",
+          "license": "NOASSERTION"
+        }
+      ],
+      "local_path": "third_party/muyuan/plugins/goal-plus",
+      "docker_requirement": "not_required",
+      "docker_scope": "The scheduler and common adapters run on the host. Individual benchmarks may independently require Docker for their official evaluator.",
+      "stages": {
+        "source_forked": "n/a",
+        "native_smoke": "partial",
+        "benchmark_adapter": "partial",
+        "usage_telemetry": "partial",
+        "matched_baseline": "todo"
+      },
+      "evidence": [
+        "evidence/environment/2026-09-03-goal-plus-adaptive-search-source.json"
+      ],
+      "next_action": "Run one real-model Goal Plus + Pi campaign from official master with max_candidates=null and one bounded campaign on the same task, then archive scheduler decisions, frozen scheduler policy references, actual unique candidate count, live-worker peak, token usage, and official metric evidence.",
+      "blockers": [
+        "No real-model benchmark campaign has yet proven scheduler-driven retirement and derivation through the adapted control plane.",
+        "Matched comparisons remain unavailable until scheduler and non-scheduler methods share frozen T/K/C/R, model, reasoning, task, and evaluator contracts."
+      ]
+    },
+    {
       "id": "zsoft-l1",
       "display_name": "ZSoft L1 PoC",
       "kind": "benchmark",

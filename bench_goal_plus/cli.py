@@ -11,6 +11,7 @@ from typing import Any
 from .application import BenchmarkAgent
 from .errors import BenchGoalPlusError, ContractError
 from .scaffold import scaffold_benchmark
+from .search_scheduler import add_search_scheduler_arguments
 
 
 def add_selection(parser: argparse.ArgumentParser) -> None:
@@ -49,6 +50,7 @@ def add_start_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cell-concurrency", type=int)
     parser.add_argument("--worker-runtime-seconds", type=int)
     parser.add_argument("--worker-min-runtime-seconds", type=int)
+    add_search_scheduler_arguments(parser)
     parser.add_argument(
         "--retain-containers",
         action="store_true",
@@ -146,6 +148,13 @@ def spec_from_args(agent: BenchmarkAgent, args: argparse.Namespace):
         cell_concurrency=args.cell_concurrency,
         worker_runtime_seconds=args.worker_runtime_seconds,
         worker_min_runtime_seconds=args.worker_min_runtime_seconds,
+        search_scheduler_host=args.search_scheduler_host,
+        search_scheduler_model=args.search_scheduler_model,
+        search_scheduler_reasoning_effort=args.search_scheduler_reasoning_effort,
+        search_scheduler_timeout_seconds=args.search_scheduler_timeout_seconds,
+        search_scheduler_reward=args.search_scheduler_reward,
+        search_scheduler_allocation=args.search_scheduler_allocation,
+        max_candidates=args.max_candidates,
         retain_containers=args.retain_containers,
     )
 
