@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from bench_artifacts import sanitize_id, utc_now
+from bench_goal_plus.search_scheduler import search_scheduler_from_json
 
 from experiments.benchmark_compare import experiment as standalone
 
@@ -42,6 +43,7 @@ def preserve_conflict(path: Path) -> Path | None:
 
 
 def prepare(campaign_id: str, profile: dict[str, Any], profile_path: Path) -> Path:
+    search_scheduler = search_scheduler_from_json(profile.get("search_scheduler"))
     destination = campaign_dir(campaign_id)
     backup = preserve_conflict(destination)
     destination.mkdir(parents=True)
@@ -59,6 +61,11 @@ def prepare(campaign_id: str, profile: dict[str, Any], profile_path: Path) -> Pa
         "seeds": profile["seeds"],
         "model": profile["model"],
         "reasoning_effort": profile["reasoning_effort"],
+        **(
+            {"search_scheduler": search_scheduler.as_dict()}
+            if search_scheduler is not None
+            else {}
+        ),
         "budget": {
             "wall_time_seconds": profile["wall_time_seconds"],
             "live_search_concurrency": profile["concurrency"],
@@ -125,6 +132,7 @@ def prepare(campaign_id: str, profile: dict[str, Any], profile_path: Path) -> Pa
                                 environment_manifest=ROOT / "environment/upstreams.json",
                                 checkout_root=ROOT / "third_party",
                                 venv=ROOT / ".bench-env/venv",
+                                search_scheduler=search_scheduler,
                             ).to_namespace()
                         )
                     cell["state"] = "prepared"

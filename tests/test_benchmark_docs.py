@@ -64,7 +64,7 @@ class BenchmarkDocsTest(unittest.TestCase):
             "## T/K/C/R 契约",
             "`K` 只在 Goal Plus 方法中生效",
             "`C` 是一个 campaign 同时运行的不同 task cell 数量",
-            "`budget.max_candidates` 已弃用",
+            "`budget.max_candidates` 可独立设置",
             "实际 subagent 数量不等于 `K`",
             "## 目录职责",
             "`bench_goal_plus/`",

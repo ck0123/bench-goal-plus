@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "kind": "source-provenance",
+  "status": "pass",
+  "checked_at": "2026-09-03",
+  "component": "goal-plus-search-scheduler",
+  "repository": "https://gitcode.com/yiyanzhi_akane1/muyuan.git",
+  "tracking_branch": "master",
+  "remote_commit": "ca4302825c034a43f37a17945dd7f55a9b0f91ef",
+  "checkout": "third_party/muyuan",
+  "source_subdirectory": "plugins/goal-plus",
+  "checks": [
+    "git -C third_party/muyuan fetch origin master",
+    "git -C third_party/muyuan rev-parse origin/master",
+    "git -C third_party/muyuan show origin/master:plugins/goal-plus/src/goal_plus/adaptive_search/scheduler.py"
+  ],
+  "contracts": {
+    "orchestration_mode": "adaptive_search",
+    "reward_policy": "evidence_llm_value/v3",
+    "allocation_policy": "value_guided_replace/v2",
+    "max_candidates_null": "unbounded cumulative unique candidates",
+    "max_parallel": "independent live-worker limit"
+  },
+  "scope": "This proves official branch availability, exact source provenance, and the Adaptive Search policy identifiers used by the adapters. Native smoke, benchmark adaptation, and matched comparison readiness remain separate gates."
+}

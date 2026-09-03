@@ -35,6 +35,14 @@ from bench_goal_plus.goal_plus_command import (  # noqa: E402
     goal_plus_entrypoint,
     render_goal_plus_command,
 )
+from bench_goal_plus.search_scheduler import (  # noqa: E402
+    GoalPlusSearchScheduler,
+    add_internal_search_scheduler_argument,
+    render_search_scheduler_instructions,
+    search_scheduler_from_json,
+    search_scheduler_from_namespace,
+    summarize_worker_concurrency,
+)
 from bench_goal_plus.upstreams import upstream_source_path  # noqa: E402
 from bench_runtime_paths import configure_temp_environment  # noqa: E402
 from adapters.openevolve_examples.adapter import (  # noqa: E402
@@ -278,6 +286,7 @@ def render_goal(
     search_space_mode: str | None = None,
     shared_dir_enabled: bool = False,
     controller_only_official_evaluation: bool = False,
+    search_scheduler: GoalPlusSearchScheduler | None = None,
 ) -> str:
     """Add the host-native Goal Plus entrypoint and config to the common prompt."""
     exploration_seconds = max(1, wall_seconds - closeout_seconds)
@@ -376,10 +385,14 @@ def render_goal(
             "from the configuration below. The benchmark-owned Pi boundary keeps the "
             "official evaluator and official metric outside every worker trajectory; Goal "
             "Plus receives only the public verifier and its safe shared Evidence.\n\n"
-            "- Honor every leading typed command field in the SearchSpec and omit "
-            "deprecated `budget.max_candidates`.\n"
-            f"- Set `strategy.worker_host=\"{worker_host}\"` and "
-            "`strategy.orchestration_mode=\"parallel_loops\"`.\n"
+            "- Honor every leading typed command field in the SearchSpec.\n"
+            + render_search_scheduler_instructions(search_scheduler)
+            + "- After triage and before freezing the SearchSpec, call "
+            "`goal_plus_upsert_work_items` with one required `route=\"search\"` item "
+            "for this benchmark Search. After linking the run, record "
+            "`search_routed` for that item and leave its result acceptance to the host "
+            "controller closeout.\n"
+            f"- Set `strategy.worker_host=\"{worker_host}\"`.\n"
             + "- Set `strategy.config.global_evidence_mode=\"manual\"` so every worker can "
             "read settled public-verifier Evidence from the other candidates as reference.\n"
             + (
@@ -447,10 +460,9 @@ def render_goal(
         "Use the current workspace and construct the verifier-backed Goal Plus search from "
         "the configuration below. Goal Plus owns intake, triage, SearchSpec freezing, candidate "
         "workspaces, selection, promotion, and final reporting.\n\n"
-        "- Honor every leading typed command field in the SearchSpec and omit "
-        "deprecated `budget.max_candidates`.\n"
-        f"- Set `strategy.worker_host=\"{worker_host}\"` and "
-        "`strategy.orchestration_mode=\"parallel_loops\"`.\n"
+        "- Honor every leading typed command field in the SearchSpec.\n"
+        + render_search_scheduler_instructions(search_scheduler)
+        + f"- Set `strategy.worker_host=\"{worker_host}\"`.\n"
         + (
             "- Set top-level `shared_dir.enabled=true`.\n"
             if shared_dir_enabled
@@ -690,6 +702,12 @@ def write_openevolve_config(
 def prepare(args: argparse.Namespace) -> int:
     method = canonical_method(args.method)
     is_sky = sky_backend.is_method(method)
+    search_scheduler = search_scheduler_from_namespace(args)
+    if search_scheduler is not None and method not in {
+        "goal-plus-codex",
+        "goal-plus-pi",
+    }:
+        raise ValueError("Search Scheduler requires a Goal Plus method")
     if args.wall_time_seconds <= args.soft_closeout_seconds:
         raise ValueError("wall time must be greater than the soft closeout reserve")
     if args.concurrency < 1:
@@ -817,6 +835,7 @@ def prepare(args: argparse.Namespace) -> int:
             worker_host=worker_host,
             worker_model=worker_model,
             reasoning_effort=args.reasoning_effort,
+            search_scheduler=search_scheduler,
         )
         (workspace / "GOAL.md").write_text(goal)
         workspaces.append(workspace)
@@ -846,6 +865,11 @@ def prepare(args: argparse.Namespace) -> int:
                 annotator_model=worker_model,
                 workspace_backend="git_worktree",
                 promotion_mode="apply",
+            ),
+            **(
+                {"search_scheduler": search_scheduler.as_dict()}
+                if search_scheduler is not None
+                else {}
             ),
             "worker_host": worker_host,
             "worker_model": worker_model,
@@ -1006,6 +1030,11 @@ def prepare_batch(args: argparse.Namespace) -> int:
     """Prepare every task/method cell in a reusable experiment campaign."""
     run_root = args.run_root.expanduser().absolute()
     methods = list(dict.fromkeys(canonical_method(item) for item in args.methods))
+    search_scheduler = search_scheduler_from_namespace(args)
+    if search_scheduler is not None and any(
+        not method.startswith("goal-plus-") for method in methods
+    ):
+        raise ValueError("Search Scheduler requires only Goal Plus batch methods")
     tasks = list_catalog_tasks(args.task_set)
     run_root.mkdir(parents=True, exist_ok=False)
     entries: list[dict[str, Any]] = []
@@ -1029,6 +1058,9 @@ def prepare_batch(args: argparse.Namespace) -> int:
                 environment_manifest=args.environment_manifest,
                 checkout_root=args.checkout_root,
                 venv=args.venv,
+                search_scheduler_config_json=getattr(
+                    args, "search_scheduler_config_json", None
+                ),
             )
             entry = {
                 "task_id": task_id,
@@ -1055,6 +1087,11 @@ def prepare_batch(args: argparse.Namespace) -> int:
         "prepared_count": prepared_count,
         "model": args.model,
         "reasoning_effort": args.reasoning_effort,
+        **(
+            {"search_scheduler": search_scheduler.as_dict()}
+            if search_scheduler is not None
+            else {}
+        ),
         "seed": args.seed,
         "budget": {
             "wall_time_seconds": args.wall_time_seconds,
@@ -1402,6 +1439,8 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
                 "job_id": job.get("job_id"),
                 "candidate_id": job.get("candidate_id"),
                 "status": job.get("status"),
+                "started_at": job.get("started_at"),
+                "finished_at": job.get("finished_at"),
                 "lease": result.get("lease") if isinstance(result, dict) else None,
             }
         )
@@ -1424,6 +1463,11 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
         metric_direction = None
         worker_host = None
         worker_budget = None
+        search_scheduler_enabled = False
+        search_scheduler_spec = None
+        orchestration_mode = None
+        max_parallel = None
+        max_candidates = None
         frozen_spec_id = payload.get("frozen_spec_id")
         if isinstance(frozen_spec_id, str):
             frozen_spec_path = root / "specs" / frozen_spec_id / "frozen_spec.json"
@@ -1433,6 +1477,12 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
                 strategy = spec.get("strategy") or {}
                 worker_host = strategy.get("worker_host")
                 worker_budget = strategy.get("worker_budget")
+                search_scheduler_spec = strategy.get("search_scheduler")
+                search_scheduler_enabled = search_scheduler_spec is not None
+                orchestration_mode = strategy.get("orchestration_mode")
+                budget = spec.get("budget") or {}
+                max_parallel = budget.get("max_parallel")
+                max_candidates = budget.get("max_candidates")
         candidate_paths = sorted(run_dir.glob("candidates/*/candidate.json"))
         session_paths = sorted(run_dir.glob("agent_sessions/agent_*.json"))
         process_verifier_logs = sorted(
@@ -1450,8 +1500,17 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
         session_counts_by_candidate: dict[str, int] = {}
         bound_session_counts_by_candidate: dict[str, int] = {}
         same_agent_continuation_session_count = 0
+        initial_candidate_ids: set[str] = set()
+        worker_intervals: list[dict[str, Any]] = []
         for candidate_path in candidate_paths:
             candidate = load_json(candidate_path)
+            candidate_id = candidate.get("candidate_id")
+            task = candidate.get("task") or {}
+            if (
+                isinstance(candidate_id, str)
+                and int(task.get("allocation_depth") or 0) == 0
+            ):
+                initial_candidate_ids.add(candidate_id)
             iterations = candidate.get("iterations")
             if isinstance(iterations, list):
                 iteration_count += len(iterations)
@@ -1501,12 +1560,53 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
                 and counters["verifier_runs"] > 0
             ):
                 worker_verified_candidate_ids.add(candidate_id)
+            if worker_host == "codex" and isinstance(candidate_id, str):
+                lease_path = (
+                    root
+                    / "host-logs"
+                    / "codex-autoresearch-leases"
+                    / f"{session.get('agent_session_id')}.json"
+                )
+                lease = load_json(lease_path) if lease_path.is_file() else {}
+                if lease:
+                    worker_intervals.append(
+                        {
+                            "candidate_id": candidate_id,
+                            "started_at": lease.get("started_at"),
+                            "ended_at": lease.get("released_at")
+                            or session.get("updated_at"),
+                        }
+                    )
+        if worker_host == "pi-rpc":
+            worker_intervals.extend(
+                {
+                    "candidate_id": str(job.get("candidate_id") or ""),
+                    "started_at": job.get("started_at"),
+                    "ended_at": job.get("finished_at"),
+                }
+                for job in pi_pool_jobs_by_run.get(str(payload.get("run_id")), [])
+            )
+        worker_concurrency = summarize_worker_concurrency(worker_intervals)
+        initial_worker_concurrency = summarize_worker_concurrency(
+            interval
+            for interval in worker_intervals
+            if interval.get("candidate_id") in initial_candidate_ids
+        )
         search_space = collect_search_space_state(run_dir)
         runs.append(
             {
                 "run_id": payload.get("run_id"),
                 "status": payload.get("state", payload.get("status")),
                 "candidate_count": len(candidate_paths),
+                "initial_candidate_count": len(initial_candidate_ids),
+                "initial_candidate_ids": sorted(initial_candidate_ids),
+                "search_scheduler_enabled": search_scheduler_enabled,
+                "search_scheduler": search_scheduler_spec,
+                "orchestration_mode": orchestration_mode,
+                "max_parallel": max_parallel,
+                "max_candidates": max_candidates,
+                "worker_concurrency": worker_concurrency,
+                "initial_worker_concurrency": initial_worker_concurrency,
                 "agent_session_count": len(session_paths),
                 "bound_agent_session_count": (
                     len(session_paths) - unbound_agent_session_count
@@ -1564,6 +1664,7 @@ def goal_plus_incomplete_reason(
     expected_goal_plus_id: str | None = None,
     expected_run_id: str | None = None,
     codex_events: dict[str, Any] | None = None,
+    expected_search_scheduler: GoalPlusSearchScheduler | None = None,
 ) -> str | None:
     goals = state.get("goals") or []
     if not goals:
@@ -1681,10 +1782,76 @@ def goal_plus_incomplete_reason(
                 "expected concurrency"
             )
         for run in runs:
-            if run.get("candidate_count") != expected_concurrency:
+            scheduler_enabled = bool(run.get("search_scheduler_enabled"))
+            candidate_count = int(run.get("candidate_count") or 0)
+            if expected_search_scheduler is not None and not scheduler_enabled:
+                return (
+                    f"Search run {run.get('run_id')} did not freeze the requested "
+                    "Search Scheduler"
+                )
+            if scheduler_enabled:
+                if run.get("orchestration_mode") != "adaptive_search":
+                    return (
+                        f"Search run {run.get('run_id')} froze scheduler mode "
+                        f"{run.get('orchestration_mode')!r}; expected 'adaptive_search'"
+                    )
+                if run.get("max_parallel") != expected_concurrency:
+                    return (
+                        f"Search run {run.get('run_id')} froze max_parallel="
+                        f"{run.get('max_parallel')!r}; expected K={expected_concurrency}"
+                    )
+                if expected_search_scheduler is not None and (
+                    run.get("search_scheduler")
+                    != expected_search_scheduler.scheduler_spec
+                    or run.get("max_candidates")
+                    != expected_search_scheduler.max_candidates
+                ):
+                    return (
+                        f"Search run {run.get('run_id')} frozen scheduler contract "
+                        "does not match the campaign configuration"
+                    )
+                if run.get("initial_candidate_count") != expected_concurrency:
+                    return (
+                        f"Search run {run.get('run_id')} materialized "
+                        f"{run.get('initial_candidate_count')} initial candidates; "
+                        f"expected K={expected_concurrency}"
+                    )
+                max_candidates = run.get("max_candidates")
+                if (
+                    candidate_count < expected_concurrency
+                    or (
+                        isinstance(max_candidates, int)
+                        and candidate_count > max_candidates
+                    )
+                ):
+                    return (
+                        f"Search run {run.get('run_id')} materialized "
+                        f"{candidate_count} cumulative candidates outside the scheduler "
+                        f"contract K={expected_concurrency}, "
+                        f"max_candidates={max_candidates!r}"
+                    )
+                all_concurrency = run.get("worker_concurrency") or {}
+                initial_concurrency = run.get("initial_worker_concurrency") or {}
+                candidate_ids = set(
+                    (run.get("bound_session_counts_by_candidate") or {}).keys()
+                )
+                if (
+                    all_concurrency.get("invalid_interval_count") != 0
+                    or set(all_concurrency.get("candidate_ids") or []) != candidate_ids
+                    or not isinstance(all_concurrency.get("max_live_workers"), int)
+                    or all_concurrency["max_live_workers"] > expected_concurrency
+                    or initial_concurrency.get("invalid_interval_count") != 0
+                    or set(initial_concurrency.get("candidate_ids") or [])
+                    != set(run.get("initial_candidate_ids") or [])
+                ):
+                    return (
+                        f"Search run {run.get('run_id')} lacks complete worker interval "
+                        f"evidence proving initial K and live workers <= K: {all_concurrency}"
+                    )
+            elif candidate_count != expected_concurrency:
                 return (
                     f"Search run {run.get('run_id')} materialized "
-                    f"{run.get('candidate_count')} candidates; expected {expected_concurrency}"
+                    f"{candidate_count} candidates; expected {expected_concurrency}"
                 )
             session_counts = (
                 run.get("bound_session_counts_by_candidate")
@@ -1696,7 +1863,13 @@ def goal_plus_incomplete_reason(
                 for candidate_id, count in session_counts.items()
                 if count != 1
             }
-            if len(session_counts) != expected_concurrency or duplicate_sessions:
+            expected_session_candidates = (
+                candidate_count if scheduler_enabled else expected_concurrency
+            )
+            if (
+                len(session_counts) != expected_session_candidates
+                or duplicate_sessions
+            ):
                 return (
                     f"Search run {run.get('run_id')} did not keep exactly one bound session per "
                     f"candidate: {session_counts}"
@@ -2656,6 +2829,9 @@ def execute(args: argparse.Namespace) -> int:
             )
     else:
         workspace = Path(manifest["workspace"])
+        search_scheduler = search_scheduler_from_json(
+            (manifest.get("goal_plus_config") or {}).get("search_scheduler")
+        )
         write_json(run_dir / "seed-eval.json", evaluate_workspace(workspace, "public"))
         setup_evaluator_calls = evaluator_budget_for_workspace(workspace)[
             "total_claimed"
@@ -2676,6 +2852,7 @@ def execute(args: argparse.Namespace) -> int:
                 worker_host="codex",
                 worker_model=args.model,
                 reasoning_effort=reasoning_effort,
+                search_scheduler=search_scheduler,
             )
             command = [
                 args.codex_bin,
@@ -2712,6 +2889,7 @@ def execute(args: argparse.Namespace) -> int:
                 worker_host="pi-rpc",
                 worker_model=qualified_model,
                 reasoning_effort=reasoning_effort,
+                search_scheduler=search_scheduler,
             )
             pi_home = run_dir / "pi-home"
             write_pi_models_config(
@@ -2799,6 +2977,7 @@ def execute(args: argparse.Namespace) -> int:
             expected_worker_min_verifier_runs=(
                 1 if budget.get("worker_min_runtime_seconds") is not None else None
             ),
+            expected_search_scheduler=search_scheduler,
         )
         if goal_reason and not control.get("result_incomplete_reason"):
             control["result_incomplete_reason"] = goal_reason
@@ -2903,6 +3082,9 @@ def repair_closeout(args: argparse.Namespace) -> int:
             if manifest["budget"].get("worker_min_runtime_seconds") is not None
             else None
         ),
+        expected_search_scheduler=search_scheduler_from_json(
+            (manifest.get("goal_plus_config") or {}).get("search_scheduler")
+        ),
     )
     if reason is None and not control.get("hard_killed"):
         control.pop("result_incomplete_reason", None)
@@ -2950,6 +3132,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--checkout-root", type=Path, default=DEFAULT_CHECKOUT_ROOT
     )
     prepare_parser.add_argument("--venv", type=Path, default=DEFAULT_VENV)
+    add_internal_search_scheduler_argument(prepare_parser)
 
     prepare_batch_parser = subparsers.add_parser("prepare-batch")
     prepare_batch_parser.add_argument("--task-set", default="cpu_portable")
@@ -2985,6 +3168,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--checkout-root", type=Path, default=DEFAULT_CHECKOUT_ROOT
     )
     prepare_batch_parser.add_argument("--venv", type=Path, default=DEFAULT_VENV)
+    add_internal_search_scheduler_argument(prepare_batch_parser)
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--run-dir", type=Path, required=True)

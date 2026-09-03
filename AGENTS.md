@@ -74,9 +74,10 @@
 - `T` 是一条 task trajectory 或一次 Goal Plus search 的墙钟探索时间预算。
 - `K` 只在 Goal Plus 方法中生效，是同一个 task cell 内实际并行工作的内部 subagent
   数量。非 Goal Plus 方法必须固定 `K=1`，一个 cell 只启动一条 outer trajectory。
-  配置中不再引入另一套最大值、上限或策略参数。
+  `K` 不表示一个 run 累计产生过的 candidate 数量。
 - Goal Plus adapter 把 `K` 映射为唯一的 `parallel-num`/`budget.max_parallel`。
-  `budget.max_candidates` 已弃用，不得作为第二个可独立配置的数量。
+  启用 `search_scheduler` 时，`budget.max_candidates` 可独立设置整个 run 的累计唯一
+  candidate 上限；正整数必须不小于 `K`，`null` 表示不设累计上限。它不得代替或改写 `K`。
 - `C` 是一个 campaign 同时运行的不同 task cell 数量。`C` 只控制 task 之间的并发，
   不能代替或改写每个 task 内部的 `K`。
 - `R` 是独立重复次数或 seed 数量，不能用 `C` 代替。
@@ -101,9 +102,14 @@ Goal Plus 结束后必须统计实际 subagent 数量并与 `K` 核对：
   handle 证明实际 subagent；仅分配 session 不代表已经启动 subagent。
 - Goal Plus + Pi 使用不同的、已绑定 candidate 的 Pi worker session 作为实际
   subagent 证据。
+- 启用 `search_scheduler` 时，初始实际 worker 数必须等于 `K`，runtime 必须证明 live
+  worker 始终不超过 `K`；淘汰后派生的累计 candidate/session 数可以大于 `K`，必须另列。
 - candidate 数、session 分配数、verifier 调用次数和 outer replica 数必须分别记录，
   不得互相替代。
-- 实际 subagent 数量不等于 `K`，或者缺少可核对证据时，保留已有分数和原始证据，
+- 启用 `search_scheduler` 时还必须冻结 scheduler 配置和 `max_candidates`，并记录实际累计
+  candidate 数；`max_candidates=null` 不得在任一 adapter 中改写为 `K`。
+- 固定候选模式实际 subagent 数量不等于 `K`，或 scheduler 模式缺少上述初始/live 证据时，
+  保留已有分数和原始证据，
   但 cell/campaign 必须标记为 `partial`，不得进入 matched comparison。
 
 ## 目录职责

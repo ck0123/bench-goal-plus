@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .search_scheduler import GoalPlusSearchScheduler
+
 
 @dataclass(frozen=True)
 class RunnerCapabilities:
@@ -145,6 +147,7 @@ class CampaignSpec:
     cell_concurrency: int | None = None
     worker_runtime_seconds: int | None = None
     worker_min_runtime_seconds: int | None = None
+    search_scheduler: GoalPlusSearchScheduler | None = None
     retain_containers: bool = False
     campaign_dir: Path | None = None
 
@@ -165,7 +168,7 @@ class CampaignSpec:
         }
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "campaign_id": self.campaign_id,
             "targets": list(self.target_ids),
             "runner_id": self.runner.runner_id,
@@ -194,6 +197,9 @@ class CampaignSpec:
             "retain_containers": self.retain_containers,
             "concurrency": self.concurrency(),
         }
+        if self.search_scheduler is not None:
+            payload["search_scheduler"] = self.search_scheduler.as_dict()
+        return payload
 
 
 @dataclass(frozen=True)

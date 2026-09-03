@@ -46,7 +46,7 @@ class EdgeBenchUpstreamGoalPlusContractTest(unittest.TestCase):
             "strategy=agent_guided workers=openai-codex/gpt-test*2 ",
             command,
         )
-        self.assertIn("omit the deprecated budget.max_candidates field", command)
+        self.assertIn("Leave strategy.search_scheduler unset", command)
         self.assertIn('"max_runtime_seconds": 240', command)
         self.assertIn('"min_runtime_seconds": 180', command)
         self.assertIn('"min_verifier_runs": 1', command)

@@ -11,6 +11,7 @@ from pathlib import Path
 from ..errors import ContractError, UnsupportedOperation
 from ..models import CampaignRef, CampaignSpec, StatusSnapshot
 from ..paths import ROOT, managed_python
+from ..search_scheduler import internal_search_scheduler_args
 from .base import BenchmarkRunner
 
 
@@ -55,6 +56,7 @@ class NativeProfileRunner(BenchmarkRunner):
         ]
         for method in spec.methods:
             command.extend(["--method", method])
+        command.extend(internal_search_scheduler_args(spec.search_scheduler))
         completed = subprocess.run(
             command,
             cwd=ROOT,
@@ -155,6 +157,7 @@ class NativeProfileRunner(BenchmarkRunner):
             command.extend(["--seeds", *(str(seed) for seed in spec.seeds)])
         if spec.retain_containers:
             command.append("--retain-containers")
+        command.extend(internal_search_scheduler_args(spec.search_scheduler))
         campaign = CampaignRef(
             campaign_id=spec.campaign_id,
             path=ROOT / "runs" / target.target_id / spec.campaign_id,

@@ -8,6 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from bench_goal_plus.search_scheduler import (
+    GoalPlusSearchScheduler,
+    summarize_worker_concurrency,
+)
+
 
 ACTIVE_POOL_STATES = {"starting", "running"}
 VISIBLE_VERIFIER_SUFFIX = ".goal-plus-verifiers/visible_test_verifier.py"
@@ -578,6 +583,7 @@ def collect_goal_plus_state(
     expected_supplemental_evaluation_enabled: bool = False,
     expected_evidence_annotator_enabled: bool = False,
     expected_worker_host: str = "pi-rpc",
+    expected_search_scheduler: GoalPlusSearchScheduler | None = None,
 ) -> dict[str, Any]:
     goal_records = []
     for path in sorted((root / "goal-plus").glob("gp_*/goal.json")):
@@ -600,6 +606,20 @@ def collect_goal_plus_state(
     runs: list[dict[str, Any]] = []
     all_bound_sessions: list[dict[str, Any]] = []
     candidate_records_by_run: dict[str, list[dict[str, Any]]] = {}
+    pi_worker_intervals_by_run: dict[str, list[dict[str, Any]]] = {}
+    for job_path in sorted(
+        (root / "host-pools" / "pi").glob("pool_*/jobs/job_*/job.json")
+    ):
+        job = _read_object(job_path)
+        run_id = job.get("run_id")
+        if isinstance(run_id, str):
+            pi_worker_intervals_by_run.setdefault(run_id, []).append(
+                {
+                    "candidate_id": job.get("candidate_id"),
+                    "started_at": job.get("started_at"),
+                    "ended_at": job.get("finished_at"),
+                }
+            )
     for path in sorted((root / "runs").glob("run_*/run.json")):
         payload = _read_object(path)
         run_id = str(payload.get("run_id") or path.parent.name)
@@ -635,6 +655,13 @@ def collect_goal_plus_state(
         candidates = sorted(path.parent.glob("candidates/*/candidate.json"))
         candidate_records = [_read_object(candidate) for candidate in candidates]
         candidate_records_by_run[run_id] = candidate_records
+        initial_candidate_ids = sorted(
+            str(candidate["candidate_id"])
+            for candidate in candidate_records
+            if isinstance(candidate.get("candidate_id"), str)
+            and int((candidate.get("task") or {}).get("allocation_depth") or 0)
+            == 0
+        )
         expected_annotation_iterations = sum(
             len(candidate.get("iterations") or [])
             for candidate in candidate_records
@@ -659,6 +686,7 @@ def collect_goal_plus_state(
         ]
         bound_sessions: list[dict[str, Any]] = []
         autoresearch_leases: list[dict[str, Any]] = []
+        worker_intervals: list[dict[str, Any]] = []
         bound_counts: dict[str, int] = {}
         verifier_candidate_ids: set[str] = set()
         for session in sessions:
@@ -688,11 +716,27 @@ def collect_goal_plus_state(
                     / f"{session.get('agent_session_id')}.json"
                 )
                 if lease:
-                    autoresearch_leases.append(
-                        _observed_autoresearch_lease(
-                            lease, session, run_state=payload.get("state")
-                        )
+                    observed_lease = _observed_autoresearch_lease(
+                        lease, session, run_state=payload.get("state")
                     )
+                    autoresearch_leases.append(observed_lease)
+                    observed_interval = observed_lease.get("observed_interval")
+                    if isinstance(observed_interval, dict):
+                        worker_intervals.append(
+                            {
+                                "candidate_id": candidate_id,
+                                "started_at": observed_interval.get("started_at"),
+                                "ended_at": observed_interval.get("ended_at"),
+                            }
+                        )
+        if expected_worker_host == "pi-rpc":
+            worker_intervals.extend(pi_worker_intervals_by_run.get(run_id, []))
+        worker_concurrency = summarize_worker_concurrency(worker_intervals)
+        initial_worker_concurrency = summarize_worker_concurrency(
+            interval
+            for interval in worker_intervals
+            if interval.get("candidate_id") in initial_candidate_ids
+        )
         global_evidence_reads = _global_evidence_read_receipts(
             bound_sessions,
             candidate_records,
@@ -716,6 +760,11 @@ def collect_goal_plus_state(
                 "frozen_spec_id": frozen_spec_id,
                 "frozen_spec_present": bool(frozen),
                 "max_parallel": budget.get("max_parallel"),
+                "max_candidates": budget.get("max_candidates"),
+                "search_scheduler": strategy.get("search_scheduler"),
+                "search_scheduler_enabled": (
+                    strategy.get("search_scheduler") is not None
+                ),
                 "worker_host": strategy.get("worker_host"),
                 "orchestration_mode": strategy.get("orchestration_mode"),
                 "worker_budget": worker_budget,
@@ -729,6 +778,8 @@ def collect_goal_plus_state(
                 "visible_verifier_integrity": verifier_integrity,
                 "promotion_visible_test": promotion_visible_test,
                 "candidate_count": len(candidates),
+                "initial_candidate_count": len(initial_candidate_ids),
+                "initial_candidate_ids": initial_candidate_ids,
                 "agent_session_count": len(sessions),
                 "bound_session_count": len(bound_sessions),
                 "bound_candidate_ids": sorted(bound_counts),
@@ -738,6 +789,8 @@ def collect_goal_plus_state(
                     for session in bound_sessions
                 ],
                 "autoresearch_leases": autoresearch_leases,
+                "worker_concurrency": worker_concurrency,
+                "initial_worker_concurrency": initial_worker_concurrency,
                 "verifier_candidate_ids": sorted(verifier_candidate_ids),
                 "selected_candidate_id": selected_candidate_id,
                 "promotion_artifact": (
@@ -767,8 +820,25 @@ def collect_goal_plus_state(
         if selected_run is not None
         else {}
     )
+    scheduler_enabled = bool(
+        selected_run and selected_run.get("search_scheduler_enabled")
+    )
+    scheduler_requested = expected_search_scheduler is not None
+    cumulative_candidate_count = int(
+        selected_run.get("candidate_count") or 0
+    ) if selected_run else 0
+    expected_bound_candidate_count = (
+        cumulative_candidate_count if scheduler_enabled else expected_k
+    )
     exact_one_session_per_candidate = bool(
-        len(counts) == expected_k and all(value == 1 for value in counts.values())
+        len(counts) == expected_bound_candidate_count
+        and all(value == 1 for value in counts.values())
+    )
+    initial_candidate_ids = set(
+        selected_run.get("initial_candidate_ids") or []
+    ) if selected_run else set()
+    initial_bound_session_count = sum(
+        int(counts.get(candidate_id) or 0) for candidate_id in initial_candidate_ids
     )
     legacy_acceptance_contract = (
         selected_run.get("legacy_acceptance_view_contract")
@@ -990,9 +1060,50 @@ def collect_goal_plus_state(
             for reference in window.get("completed_views", [])
         )
     ]
+    overlap_leases = selected_run.get("autoresearch_leases", []) if selected_run else []
+    if scheduler_enabled:
+        overlap_leases = [
+            lease
+            for lease in overlap_leases
+            if lease.get("candidate_id") in initial_candidate_ids
+        ]
     worker_overlap = _worker_overlap(
-        selected_run.get("autoresearch_leases", []) if selected_run else [],
+        overlap_leases,
         expected_k,
+    )
+    expected_orchestration_mode = (
+        "adaptive_search" if scheduler_requested else "parallel_loops"
+    )
+    expected_scheduler_spec = (
+        expected_search_scheduler.scheduler_spec
+        if expected_search_scheduler is not None
+        else None
+    )
+    expected_max_candidates = (
+        expected_search_scheduler.max_candidates
+        if expected_search_scheduler is not None
+        else None
+    )
+    worker_concurrency = (
+        selected_run.get("worker_concurrency") or {} if selected_run else {}
+    )
+    initial_worker_concurrency = (
+        selected_run.get("initial_worker_concurrency") or {}
+        if selected_run
+        else {}
+    )
+    live_worker_evidence_passed = bool(
+        not scheduler_requested
+        or (
+            selected_run
+            and worker_concurrency.get("invalid_interval_count") == 0
+            and set(worker_concurrency.get("candidate_ids") or []) == candidate_ids
+            and isinstance(worker_concurrency.get("max_live_workers"), int)
+            and worker_concurrency["max_live_workers"] <= expected_k
+            and initial_worker_concurrency.get("invalid_interval_count") == 0
+            and set(initial_worker_concurrency.get("candidate_ids") or [])
+            == initial_candidate_ids
+        )
     )
     checks = {
         "durable_state": _check(True, root.is_dir(), root.is_dir()),
@@ -1013,7 +1124,7 @@ def collect_goal_plus_state(
             bool(selected_run and selected_run.get("max_parallel") == expected_k),
         ),
         "worker_topology": _check(
-            f"{expected_worker_host}/parallel_loops",
+            f"{expected_worker_host}/{expected_orchestration_mode}",
             (
                 f"{selected_run.get('worker_host')}/"
                 f"{selected_run.get('orchestration_mode')}"
@@ -1023,8 +1134,44 @@ def collect_goal_plus_state(
             bool(
                 selected_run
                 and selected_run.get("worker_host") == expected_worker_host
-                and selected_run.get("orchestration_mode") == "parallel_loops"
+                and selected_run.get("orchestration_mode")
+                == expected_orchestration_mode
             ),
+        ),
+        "search_scheduler_contract": _check(
+            {
+                "search_scheduler": expected_scheduler_spec,
+                "max_candidates": expected_max_candidates,
+            },
+            (
+                {
+                    "search_scheduler": selected_run.get("search_scheduler"),
+                    "max_candidates": selected_run.get("max_candidates"),
+                }
+                if selected_run
+                else None
+            ),
+            bool(
+                selected_run
+                and scheduler_enabled == scheduler_requested
+                and selected_run.get("search_scheduler") == expected_scheduler_spec
+                and selected_run.get("max_candidates") == expected_max_candidates
+            ),
+        ),
+        "scheduler_live_worker_limit": _check(
+            (
+                {
+                    "initial_worker_candidates": expected_k,
+                    "max_live_workers": expected_k,
+                }
+                if scheduler_requested
+                else "not required"
+            ),
+            {
+                "all": worker_concurrency,
+                "initial": initial_worker_concurrency,
+            },
+            live_worker_evidence_passed,
         ),
         "worker_runtime": _check(
             expected_worker_runtime_seconds,
@@ -1250,7 +1397,7 @@ def collect_goal_plus_state(
                 else "not required"
             ),
             worker_overlap,
-            bool(expected_k == 1 or worker_overlap["passed"]),
+            bool(scheduler_requested or expected_k == 1 or worker_overlap["passed"]),
         ),
         "view_agent_contract": _check(
             (
@@ -1272,17 +1419,41 @@ def collect_goal_plus_state(
             ),
         ),
         "candidates": _check(
-            expected_k,
-            selected_run.get("candidate_count") if selected_run else 0,
-            bool(selected_run and selected_run.get("candidate_count") == expected_k),
+            (
+                {"initial": expected_k, "max_candidates": selected_run.get("max_candidates")}
+                if scheduler_enabled and selected_run
+                else expected_k
+            ),
+            cumulative_candidate_count,
+            bool(
+                selected_run
+                and (
+                    (
+                        selected_run.get("initial_candidate_count") == expected_k
+                        and cumulative_candidate_count >= expected_k
+                        and (
+                            selected_run.get("max_candidates") is None
+                            or cumulative_candidate_count
+                            <= int(selected_run["max_candidates"])
+                        )
+                    )
+                    if scheduler_enabled
+                    else cumulative_candidate_count == expected_k
+                )
+            ),
         ),
         "bound_pi_worker_sessions": _check(
-            expected_k,
+            expected_bound_candidate_count,
             selected_run.get("bound_session_count") if selected_run else 0,
             bool(
                 selected_run
-                and selected_run.get("bound_session_count") == expected_k
+                and selected_run.get("bound_session_count")
+                == expected_bound_candidate_count
                 and exact_one_session_per_candidate
+                and (
+                    not scheduler_enabled
+                    or initial_bound_session_count == expected_k
+                )
             ),
         ),
         "worker_verifier_candidates": _check(
@@ -1290,7 +1461,12 @@ def collect_goal_plus_state(
             len(selected_run.get("verifier_candidate_ids", [])) if selected_run else 0,
             bool(
                 selected_run
-                and len(selected_run.get("verifier_candidate_ids", [])) == expected_k
+                and (
+                    len(selected_run.get("verifier_candidate_ids", [])) >= expected_k
+                    if scheduler_enabled
+                    else len(selected_run.get("verifier_candidate_ids", []))
+                    == expected_k
+                )
             ),
         ),
         "promotion": _check(
@@ -1321,6 +1497,14 @@ def collect_goal_plus_state(
         "runs": runs,
         "active_pi_pool_jobs": active_pool_jobs,
         "actual_subagent_count": (
+            initial_bound_session_count
+            if scheduler_enabled
+            else int(selected_run.get("bound_session_count") or 0)
+            if selected_run
+            else 0
+        ),
+        "cumulative_candidate_count": cumulative_candidate_count,
+        "cumulative_agent_session_count": (
             int(selected_run.get("bound_session_count") or 0) if selected_run else 0
         ),
         "worker_usage": _usage_from_sessions(all_bound_sessions),

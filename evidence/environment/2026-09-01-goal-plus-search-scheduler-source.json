@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "kind": "source-provenance",
+  "status": "pass",
+  "checked_at": "2026-09-01",
+  "component": "goal-plus-search-scheduler",
+  "repository": "https://gitcode.com/dairenjie/muyuan.git",
+  "tracking_branch": "search_scheduler",
+  "remote_commit": "a1e2f09d8996f01595719aaa75284840b5c9e43e",
+  "checkout": "third_party/muyuan",
+  "source_subdirectory": "plugins/goal-plus",
+  "checks": [
+    "git ls-remote https://gitcode.com/dairenjie/muyuan.git refs/heads/search_scheduler",
+    "git clone --branch search_scheduler --single-branch https://gitcode.com/dairenjie/muyuan.git third_party/muyuan",
+    "git -C third_party/muyuan rev-parse HEAD"
+  ],
+  "scope": "This proves branch availability and exact source provenance only. Native smoke, benchmark adaptation, and matched comparison readiness remain separate gates."
+}
