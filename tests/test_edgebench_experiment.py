@@ -2921,7 +2921,7 @@ class EdgeBenchExperimentTest(unittest.TestCase):
             [list(EDGE_ENV.GOAL_PLUS_CODEX_HOOK_ASSETS)],
         )
 
-    def test_active_codex_goal_plus_adapter_requires_exact_host_commands(self) -> None:
+    def test_active_codex_goal_plus_adapter_requires_exact_start_and_native_resume(self) -> None:
         contract = EDGE_ENV.active_sforge_codex_runtime_contract()
 
         self.assertTrue(contract["valid"], contract)
@@ -2929,10 +2929,10 @@ class EdgeBenchExperimentTest(unittest.TestCase):
         self.assertTrue(contract["project_hooks_enabled"])
         self.assertTrue(contract["exact_start"])
         self.assertTrue(contract["typed_command_config"])
-        self.assertTrue(contract["exact_resume"])
+        self.assertTrue(contract["native_resume"])
         self.assertFalse(contract["plugin_install"])
 
-    def test_active_pi_goal_plus_adapter_requires_exact_host_commands(self) -> None:
+    def test_active_pi_goal_plus_adapter_requires_exact_start_and_native_resume(self) -> None:
         contract = EDGE_ENV.active_sforge_pi_runtime_contract()
 
         self.assertTrue(contract["valid"], contract)
@@ -2942,7 +2942,7 @@ class EdgeBenchExperimentTest(unittest.TestCase):
         self.assertTrue(contract["extension_loaded"])
         self.assertTrue(contract["reasoning_explicit"])
         self.assertTrue(contract["promotion_sync_persisted"])
-        self.assertTrue(contract["exact_resume"])
+        self.assertTrue(contract["native_resume"])
 
     def test_goal_plus_source_checks_active_sforge_runtime_compatibility(self) -> None:
         root = self.test_paths.goal_plus_root
