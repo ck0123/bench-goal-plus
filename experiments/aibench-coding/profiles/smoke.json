@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "id": "smoke",
+  "benchmark_id": "aibench-coding",
+  "case_set": "_clean2026",
+  "expected_case_set_fingerprint": "9149d02169845dc5",
+  "task_ids": [
+    "rev-09f7740f614d3ea9"
+  ],
+  "validity_policy": "valid-only",
+  "methods": [
+    "plain-codex",
+    "plain-pi",
+    "goal-plus-codex",
+    "goal-plus-pi"
+  ],
+  "model": "bench-openai/gpt-5.6-sol",
+  "reasoning_effort": "medium",
+  "agent_provider": {
+    "id": "bench-openai",
+    "name": "Benchmark OpenAI-compatible proxy",
+    "auth_mode": "openai-compatible",
+    "base_url_env": "OPENAI_BASE_URL",
+    "api_key_env": "OPENAI_API_KEY",
+    "wire_api": "responses"
+  },
+  "wall_time_seconds": 300,
+  "concurrency": 1,
+  "cell_concurrency": 1,
+  "soft_closeout_seconds": 60,
+  "hard_kill_grace_seconds": 30,
+  "worker_runtime_seconds": 180,
+  "verifier_timeout_seconds": 120,
+  "seeds": [1]
+}

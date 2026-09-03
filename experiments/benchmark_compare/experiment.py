@@ -108,7 +108,9 @@ METHODS = (
     "goal-plus-pi",
     *sky_backend.METHODS,
 )
-CONTROLLER_ONLY_METHODS = frozenset({"goal-plus-pi"})
+CONTROLLER_ONLY_METHODS = frozenset(
+    {"plain-codex", "plain-pi", "goal-plus-codex", "goal-plus-pi"}
+)
 SKYDISCOVER_EDIT_PROTOCOL = """
 
 ## SkyDiscover candidate response contract
@@ -342,7 +344,7 @@ def _configure_pi_worker_sandbox_environment(
             "prepared Pi worker sandbox policy does not match the adapter contract"
         )
     if shutil.which("bwrap", path=environment.get("PATH")) is None:
-        raise RuntimeError("ZSoft Goal Plus Pi worker sandbox requires bwrap")
+        raise RuntimeError("Goal Plus Pi worker sandbox requires bwrap")
     for executable in (
         PI_WORKER_LAUNCHER,
         PI_TOOL_PROXY,
@@ -351,9 +353,11 @@ def _configure_pi_worker_sandbox_environment(
     ):
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise RuntimeError(
-                f"ZSoft Pi worker launcher asset is unavailable: {executable}"
+                f"benchmark Pi worker launcher asset is unavailable: {executable}"
             )
-    real_pi = _resolve_real_pi_binary(pi_bin, environment)
+    real_pi = _resolve_real_pi_binary(
+        environment.get(REAL_PI_BIN_ENV, pi_bin), environment
+    )
     environment.pop(LEGACY_GOAL_PLUS_WORKER_LAUNCHER_ENV, None)
     environment[REAL_PI_BIN_ENV] = str(real_pi)
     environment[SANDBOX_POLICY_ENV] = json.dumps(
@@ -1472,7 +1476,7 @@ def execute_goal_plus(
     promotion_calls = sum(
         item.get("promotion_verifier_command_count", 0) for item in goal_runs
     )
-    final_claims = final["budget"]["total_claimed"] if final is not None else 0
+    final_claims = 1 if final is not None else 0
     control["evaluator_calls"] = {
         "total_claimed": (
             setup_calls
@@ -1852,7 +1856,7 @@ def repair_closeout(args: argparse.Namespace) -> int:
     setup_calls = (control.get("evaluator_calls") or {}).get(
         "setup_claimed_before_t", 1
     )
-    final_claims = final["budget"]["total_claimed"] if final is not None else 0
+    final_claims = 1 if final is not None else 0
     control["evaluator_calls"] = {
         "total_claimed": (
             setup_calls

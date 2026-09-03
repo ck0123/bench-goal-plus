@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "kind": "aibench_coding_native_goal_plus_codex_smoke",
+  "run_date": "2026-09-03",
+  "status": "completed",
+  "campaign_id": "aibench-coding-goal-plus-codex-api-mcp60-closeout-v2-sol-30m-k1-c1-r1-20260903",
+  "task": {
+    "benchmark": "aibench-coding",
+    "task_id": "rev-09f7740f614d3ea9",
+    "case_set": "_clean2026",
+    "case_set_fingerprint": "9149d02169845dc5",
+    "metric": "task_success",
+    "direction": "maximize"
+  },
+  "method": {
+    "id": "goal-plus-codex",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "medium",
+    "provider": "bench-openai",
+    "auth_mode": "openai-compatible",
+    "wire_api": "responses"
+  },
+  "budget": {
+    "T": 1800,
+    "K": 1,
+    "C": 1,
+    "R": 1,
+    "exploration_seconds": 1740,
+    "closeout_seconds": 60
+  },
+  "source": {
+    "bench_goal_plus_implementation_commit": "0c4fef8146e15b2b17c4b9d79242eca99b4f0809",
+    "bench_goal_plus_dirty_at_prepare": true,
+    "dirty_at_prepare_explanation": "The native adapter and compatibility fixes were exercised before their implementation commit; the reviewed implementation was then committed as 0c4fef8.",
+    "aibench_repository": "https://gitcode.com/caohaotiantian/muyuan.git",
+    "aibench_tracking_branch": "coding-benchmark",
+    "aibench_commit": "3a6885b5be902fd6bf108c9baa65a89b790b1cfe",
+    "goal_plus_commit": "467ada9d7daa24e0b98d0ab23b1ebf2ff4840ea4"
+  },
+  "environment": {
+    "platform": "linux/amd64",
+    "sandbox": "bubblewrap",
+    "hidden_checkout_masked": true,
+    "inventory_check": "pass",
+    "full_doctor": "pass"
+  },
+  "execution": {
+    "duration_seconds": 1740.0026134587824,
+    "deadline_reached": true,
+    "hard_killed": false,
+    "official_evaluator_calls": 1,
+    "evaluator_calls": {
+      "total_claimed": 4,
+      "setup_claimed_before_t": 1,
+      "process_verifier_commands": 1,
+      "promotion_verifier_commands": 1,
+      "controller_final_claimed": 1,
+      "coverage": "seed plus Goal Plus verifier logs plus controller final ledger"
+    },
+    "topology": {
+      "expected_outer_trajectories": 1,
+      "actual_outer_trajectories": 1,
+      "expected_subagents": 1,
+      "actual_subagent_count": 1,
+      "subagent_count_source": "distinct Codex worker threads/host handles",
+      "matches_k": true,
+      "matched_comparison_eligible": true
+    },
+    "usage": {
+      "input_tokens": 17458,
+      "cached_input_tokens": 0,
+      "output_tokens": 87,
+      "reasoning_output_tokens": 0,
+      "cost_usd": 0.08990000000000001,
+      "coverage": "top-level agent usage plus persisted Goal Plus Evidence annotator turns"
+    }
+  },
+  "result": {
+    "score_valid": true,
+    "task_success": true,
+    "test_pass_ratio": 1.0,
+    "passed": true,
+    "infra_error": false,
+    "official_detail": "6 passed in 0.07s",
+    "task_success_rate": 1.0,
+    "pass_at_1": 1.0,
+    "pass_at_k": 1.0,
+    "pass_power_k": 1.0,
+    "k_metric_coverage": "K=1 identity"
+  },
+  "artifacts": {
+    "full_run_directory": "runs/aibench-coding/aibench-coding-goal-plus-codex-api-mcp60-closeout-v2-sol-30m-k1-c1-r1-20260903",
+    "full_run_directory_policy": "ignored and preserved on the Linux execution host",
+    "sha256": {
+      "campaign_manifest": "cd0bf6897f63135416619b949d49103da19253976e2e38abe38906128ce854f5",
+      "campaign_summary": "bf12cc87e2255392d50a0e2b75dd3213c4b15756a37a4bbec1e31f0ccecfa6aa",
+      "cell_manifest": "a887264add72ef09ca73f6584e0bdfd1277bed83fcdc93a679643b6db1a0a391",
+      "official_report": "c3b761aeea4cf7489656e310b87c9ca7f532846c905be2c1fb40948e82de46b0",
+      "report_markdown": "400a7fe619f15ca6b7b04ca526a28e088315d8a51186939de8abba648c8acf3c",
+      "report_workbook": "d03d7a961b428f65115c4d5be83904725ebde34fc803088616433e8133202a1f"
+    }
+  },
+  "reproduction": {
+    "check": "python3 scripts/bench.py check --benchmark aibench-coding --profile smoke",
+    "setup": "python3 scripts/bench.py setup --benchmark aibench-coding --profile smoke --method goal-plus-codex --model bench-openai/gpt-5.6-sol",
+    "plan": "python3 scripts/bench.py plan --benchmark aibench-coding --profile smoke --method goal-plus-codex --model bench-openai/gpt-5.6-sol --reasoning-effort medium --wall-time-seconds 1800 --live-search-concurrency 1 --cell-concurrency 1 --seed 1 --campaign-id <new-campaign-id>",
+    "launch": "python3 scripts/bench.py launch --benchmark aibench-coding --profile smoke --method goal-plus-codex --model bench-openai/gpt-5.6-sol --reasoning-effort medium --wall-time-seconds 1800 --live-search-concurrency 1 --cell-concurrency 1 --seed 1 --campaign-id <new-campaign-id>",
+    "finish": "python3 scripts/bench.py finish --campaign runs/aibench-coding/<new-campaign-id>"
+  },
+  "limitations": [
+    "This smoke proves one valid _clean2026 task on Linux with Goal Plus + Codex at K=1, C=1, and R=1; it does not prove the full case set.",
+    "Plain Codex, Plain Pi, Goal Plus + Pi, native baseline, K>1, and matched cross-method campaigns remain separately unproven.",
+    "The development run preceded implementation commit 0c4fef8; the dirty-at-prepare provenance is retained rather than rewritten."
+  ],
+  "secret_scan": {
+    "scope": "committed evidence projection",
+    "result": "clean",
+    "credential_values_persisted": false
+  }
+}

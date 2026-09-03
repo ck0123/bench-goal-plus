@@ -151,7 +151,7 @@ class BenchmarkDocsTest(unittest.TestCase):
         for required in (
             "## K/C 启动确认门禁",
             "不得执行 `launch` 或 `e2e`",
-            "K=<数量>：仅 Goal Plus 生效",
+            "K=<数量>：Plain 的隔离 outer trajectories 数",
             "C=<数量>：campaign 同时运行的不同 task cell 数",
             "方法运行时源码=<source kind；ref/branch；完整 commit SHA",
             "同时运行规模=<按该方法解释的 K × C>",

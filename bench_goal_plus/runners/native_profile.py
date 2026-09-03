@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from ..errors import ContractError, UnsupportedOperation
@@ -89,8 +90,9 @@ class NativeProfileRunner(BenchmarkRunner):
     ) -> list[list[str]]:
         if not profile:
             raise ContractError("native-profile local-asset check requires a profile")
+        python = managed_python()
         command = [
-            str(managed_python()),
+            str(python if python.is_file() else Path(sys.executable)),
             str(self.definition.controller.relative_to(ROOT)),
             "doctor",
             "--profile",

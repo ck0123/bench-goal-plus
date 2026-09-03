@@ -106,6 +106,38 @@
       }
     },
     {
+      "id": "aibench-coding-native",
+      "kind": "native-profile",
+      "controller": "experiments/aibench-coding/experiment.py",
+      "evidence_filename": "campaign-summary.json",
+      "supported_methods": [
+        "plain-codex",
+        "plain-pi",
+        "goal-plus-codex",
+        "goal-plus-pi"
+      ],
+      "method_contracts": {
+        "plain-pi": {
+          "model_format": "provider/model"
+        },
+        "goal-plus-pi": {
+          "model_format": "provider/model"
+        }
+      },
+      "capabilities": {
+        "provision": true,
+        "detach": false,
+        "stop": false,
+        "resume": false,
+        "repeat_seeds": true,
+        "cell_concurrency": true,
+        "retain_containers": false,
+        "official_evaluator": true,
+        "attempt_seed": false,
+        "resume_semantics": "foreground cells are non-resumable; retry uses a new campaign"
+      }
+    },
+    {
       "id": "zsoft-detect-native",
       "kind": "native-profile",
       "controller": "experiments/zsoft_detect_swe_agent/experiment.py",
@@ -204,6 +236,20 @@
         "owner": "runner",
         "provision_mode": "external",
         "scope": "The Agent runs in the exact task evaluation image; the official SWE-bench harness owns a separate final evaluation container. The image is retained, and optional debug mode stops and retains the Agent container. No host-only score path is supported."
+      }
+    },
+    {
+      "id": "aibench-coding",
+      "runner": "aibench-coding-native",
+      "adapter": null,
+      "bootstrap_targets": ["aibench_coding", "goal_plus"],
+      "local_asset_inventory": true,
+      "default_inventory_profile": "smoke",
+      "docker": {
+        "requirement": "not_required",
+        "owner": "host",
+        "provision_mode": "none",
+        "scope": "The controller grades with the locked upstream Python runtime on Linux. Agents run inside Bubblewrap with the managed aibench checkout masked; Docker is not used."
       }
     },
     {
@@ -668,6 +714,35 @@
           "wire_api": "responses"
         },
         "wall_time_seconds": 1800,
+        "concurrency": 1,
+        "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "aibench-coding-smoke",
+      "description": "One valid _clean2026 coding repair case across the four Plain and Goal Plus Codex/Pi methods with T=300, K=1, C=1, R=1.",
+      "benchmarks": ["aibench-coding"],
+      "profile": "smoke",
+      "campaign_id_template": "aibench-coding-four-method-gpt-5-6-sol-medium-5m-k1-c1-r1-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": [
+          "plain-codex",
+          "plain-pi",
+          "goal-plus-codex",
+          "goal-plus-pi"
+        ],
+        "model": "bench-openai/gpt-5.6-sol",
+        "reasoning_effort": "medium",
+        "agent_provider": {
+          "id": "bench-openai",
+          "name": "Benchmark OpenAI-compatible proxy",
+          "auth_mode": "openai-compatible",
+          "base_url_env": "OPENAI_BASE_URL",
+          "api_key_env": "OPENAI_API_KEY",
+          "wire_api": "responses"
+        },
+        "wall_time_seconds": 300,
         "concurrency": 1,
         "cell_concurrency": 1
       }

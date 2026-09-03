@@ -93,7 +93,7 @@ class BenchmarkAgentContractTest(unittest.TestCase):
         self.assertIn("skydiscover-cpu-evaluators", self.catalog.asset_packs)
         self.assertIn("openevolve-cpu-portable", self.catalog.targets)
         self.assertIn("swe-bench-verified", self.catalog.targets)
-        self.assertEqual(len(self.catalog.runners), 6)
+        self.assertEqual(len(self.catalog.runners), 7)
         self.assertEqual(
             self.catalog.targets["frontier-engineering"].runner_id,
             "frontier-engineering-native",
@@ -453,6 +453,7 @@ class BenchmarkAgentContractTest(unittest.TestCase):
         for profile in (
             "vliw-smoke",
             "sympy-16886-codex-smoke",
+            "smoke",
             "ahc027-cpp20-202301",
             "problem-0",
             "v1-lite-cpu-codex-1h",
@@ -467,6 +468,7 @@ class BenchmarkAgentContractTest(unittest.TestCase):
             [
                 "edgebench",
                 "swe-bench-verified",
+                "aibench-coding",
                 "ale-bench-lite",
                 "frontier-cs-problem-0",
                 "frontier-engineering",
@@ -474,6 +476,18 @@ class BenchmarkAgentContractTest(unittest.TestCase):
                 "skydiscover-cpu-evaluators",
             ],
         )
+
+    def test_native_inventory_works_before_managed_environment_exists(self) -> None:
+        runner = create_runner(self.catalog.runners["aibench-coding-native"])
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "missing-python"
+            with mock.patch(
+                "bench_goal_plus.runners.native_profile.managed_python",
+                return_value=missing,
+            ):
+                command = runner.local_asset_check_commands("smoke")[0]
+        self.assertEqual(command[0], sys.executable)
+        self.assertIn("--local-assets-only", command)
 
     def test_every_target_has_an_explicit_docker_owner_and_mode(self) -> None:
         for target in self.catalog.targets.values():
@@ -666,17 +680,23 @@ class BenchmarkAgentContractTest(unittest.TestCase):
                 seeds=(1, 2),
             )
 
-    def test_non_goal_plus_methods_reject_k_greater_than_one(self) -> None:
-        with self.assertRaisesRegex(ContractError, "reserved for Goal Plus"):
+    def test_plain_methods_accept_k_as_outer_trajectory_count(self) -> None:
+        spec = self.agent.resolve_spec(
+            target_ids=("aibench-coding",),
+            profile="smoke",
+            methods=("plain-codex",),
+            model="bench-openai/gpt-5.6-sol",
+            live_search_concurrency=2,
+        )
+        self.assertEqual(spec.live_search_concurrency, 2)
+
+    def test_methods_without_parallel_topology_reject_k_greater_than_one(self) -> None:
+        with self.assertRaisesRegex(ContractError, "K>1"):
             self.agent.resolve_spec(
-                target_ids=("frontier-engineering",),
-                profile="v1-lite-cpu-codex-1h",
-                methods=("plain-pi",),
-                model="gpt-5.6-sol",
-                reasoning_effort="medium",
-                wall_time_seconds=3600,
+                target_ids=("zsoft-detect-swe-agent",),
+                profile="civetweb-swe-agent-smoke",
+                methods=("zsoft-swe-agent",),
                 live_search_concurrency=2,
-                cell_concurrency=1,
             )
 
     def test_common_runner_rejects_method_outside_its_contract(self) -> None:

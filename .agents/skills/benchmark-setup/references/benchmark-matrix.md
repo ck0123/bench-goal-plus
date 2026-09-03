@@ -11,6 +11,7 @@ benchmark 依赖和命令路由。macOS/Linux、OAuth/direct API、agent/provide
 | ALE-Bench lite | `ale_bench` | required | 官方 lite C++/judge images |
 | HeuriGym | `heurigym` | not required | pinned Python + dataset bootstrap |
 | Frontier Engineering v1-lite | `frontier_engineering` | not required | native controller; default 9-task CPU subset; full 10-task profile explicitly opts into NVIDIA CUDA for RobotArm; managed driver/main/summit uv runtimes |
+| aibench coding | `aibench_coding` | not required | native Linux+bwrap controller; managed `_clean2026` cases; controller-only hidden `grade_case`; Codex OAuth or OpenAI-compatible profile |
 | AutoLab CPU | `autolab` | mixed | toy ISA needs host C compiler + `make`; paper path needs containers |
 | SwarmResearch | `swarmresearch`, `swarmresearch_tasks` | required | paper-compatible container path |
 | Frontier-CS | `frontier_cs` | required | eager adapter hook builds the pinned judge image and creates its preserved container |

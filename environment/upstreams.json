@@ -22,6 +22,13 @@
       "always": true,
       "editable": true
     },
+    "aibench_coding": {
+      "repository": "https://gitcode.com/caohaotiantian/muyuan.git",
+      "checkout_dir": "aibench-coding",
+      "source_subdir": "benchmarks/coding",
+      "tracking_branch": "coding-benchmark",
+      "editable": true
+    },
     "edgebench": {
       "repository": "https://github.com/ck0123/EdgeBench.git",
       "checkout_dir": "edgebench",

@@ -11,6 +11,7 @@
 | `swe-bench-native` | SWE-bench Verified task image、patch 导出与官方 harness | [SWE-bench Verified](benchmarks/swe-bench-verified.md) |
 | `frontier-engineering-native` | Frontier-Engineering v1-lite UnifiedTask evaluator；默认 9 题 CPU subset，完整 10 题需显式 CUDA opt-in | [Frontier-Engineering](benchmarks/frontier-engineering.md) |
 | `zsoft-detect-native` | ZSoft Detect 自带的 Linux Bubblewrap + pinned SWE-agent + metered proxy + official scorer | [ZSoft Detect SWE-agent](benchmarks/zsoft-detect-swe-agent.md) |
+| `aibench-coding-native` | aibench coding 可见测试、Linux Bubblewrap 隐藏集隔离和 controller-only 原生评分 | [aibench coding](../../../../experiments/aibench-coding/README.md) |
 | `common-matrix` | 单 artifact + evaluator 的普通 benchmark adapter | [Common matrix](benchmarks/common-matrix.md) |
 | `openevolve-batch` | OpenEvolve `cpu_portable` task set 和原生 OpenEvolve 对比 | [OpenEvolve](benchmarks/openevolve.md) |
 

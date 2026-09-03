@@ -611,6 +611,61 @@
       ]
     },
     {
+      "id": "aibench-coding",
+      "display_name": "aibench AI-Coding-Assist",
+      "kind": "benchmark",
+      "gate_set": "benchmark_methods",
+      "priority": 4,
+      "repositories": [
+        {
+          "role": "benchmark-and-data",
+          "upstream_url": "https://gitcode.com/caohaotiantian/muyuan.git",
+          "subdirectory": "benchmarks/coding",
+          "tracking_branch": "coding-benchmark",
+          "license": "LicenseRef-Proprietary"
+        }
+      ],
+      "data_url": "https://gitcode.com/caohaotiantian/muyuan/tree/coding-benchmark/benchmarks/coding/benchmarks/ai_coding/cases/_clean2026",
+      "local_path": "third_party/aibench-coding/benchmarks/coding",
+      "docker_requirement": "not_required",
+      "docker_scope": "The native adapter uses the locked upstream Python grading runtime on Linux. Bubblewrap, not Docker, isolates agents from hidden cases and gold files.",
+      "stages": {
+        "source_forked": "pass",
+        "environment": "pass",
+        "official_verifier": "pass",
+        "native_baseline": "todo",
+        "plain_codex": "partial",
+        "goal_plus_codex": "pass",
+        "plain_pi": "partial",
+        "goal_plus_pi": "partial",
+        "matched_baseline": "todo",
+        "campaign_ready": "partial"
+      },
+      "evidence": [
+        "evidence/runs/2026-09-03-aibench-coding-goal-plus-codex/summary.json"
+      ],
+      "stage_evidence": {
+        "source_forked": [
+          "evidence/runs/2026-09-03-aibench-coding-goal-plus-codex/summary.json"
+        ],
+        "environment": [
+          "evidence/runs/2026-09-03-aibench-coding-goal-plus-codex/summary.json"
+        ],
+        "official_verifier": [
+          "evidence/runs/2026-09-03-aibench-coding-goal-plus-codex/summary.json"
+        ],
+        "goal_plus_codex": [
+          "evidence/runs/2026-09-03-aibench-coding-goal-plus-codex/summary.json"
+        ]
+      },
+      "next_action": "Run the same exact-revision Linux+bwrap task with Plain Codex, Plain Pi, and Goal Plus + Pi, then archive a matched four-method campaign before promoting campaign_ready.",
+      "blockers": [
+        "Only Goal Plus + Codex K=1 has real-model Linux+bwrap evidence; the other three registered methods and the native baseline remain separately unproven.",
+        "The _clean2026 revision contains 45 cases but only 38 pass the upstream validity gate; the initial profile uses valid-only selection.",
+        "For K>1, only the selected result receives hidden grading, so pass@K and pass^K remain unavailable even though task-level K topology is checked."
+      ]
+    },
+    {
       "id": "zsoft-l1",
       "display_name": "ZSoft L1 PoC",
       "kind": "benchmark",

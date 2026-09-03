@@ -329,10 +329,12 @@ class BenchmarkAgent:
                 if not value or not value.replace("_", "A").isalnum():
                     raise ContractError(f"{flag} must name an environment variable")
         if live_search_concurrency is not None and live_search_concurrency > 1:
-            non_goal_plus_methods = [
+            unsupported_parallel_methods = [
                 method
                 for method in selected_methods
-                if not method.startswith("goal-plus-")
+                if not (
+                    method.startswith("goal-plus-") or method.startswith("plain-")
+                )
             ]
             non_goal_plus_conditions = [
                 condition
@@ -340,13 +342,13 @@ class BenchmarkAgent:
                 if condition not in {"B3", "B4"}
             ]
             if (
-                non_goal_plus_methods
+                unsupported_parallel_methods
                 or non_goal_plus_conditions
                 or not (selected_methods or selected_conditions)
             ):
                 raise ContractError(
-                    "K>1 is reserved for Goal Plus internal subagents; "
-                    "non-Goal-Plus methods require K=1"
+                    "K>1 is unsupported: methods without a Plain outer-trajectory "
+                    "or Goal Plus internal-subagent topology require K=1"
                 )
         for method in selected_methods:
             contract = runner_definition.method_contracts.get(method, {})

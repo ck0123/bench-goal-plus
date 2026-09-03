@@ -378,11 +378,6 @@ def render_goal(
             "Plus receives only the public verifier and its safe shared Evidence.\n\n"
             "- Honor every leading typed command field in the SearchSpec and omit "
             "deprecated `budget.max_candidates`.\n"
-            "- After triage and before freezing the SearchSpec, call "
-            "`goal_plus_upsert_work_items` with one required `route=\"search\"` item "
-            "for this benchmark Search. After linking the run, record "
-            "`search_routed` for that item and leave its result acceptance to the host "
-            "controller closeout.\n"
             f"- Set `strategy.worker_host=\"{worker_host}\"` and "
             "`strategy.orchestration_mode=\"parallel_loops\"`.\n"
             + "- Set `strategy.config.global_evidence_mode=\"manual\"` so every worker can "
@@ -572,7 +567,7 @@ def codex_goal_plus_mcp_args(extra_env_vars: tuple[str, ...] = ()) -> list[str]:
         "--config",
         f"mcp_servers.goal-plus.env_vars={json.dumps(env_vars)}",
         "--config",
-        "mcp_servers.goal-plus.startup_timeout_sec=10",
+        "mcp_servers.goal-plus.startup_timeout_sec=60",
         "--config",
         "mcp_servers.goal-plus.tool_timeout_sec=300",
         "--config",
@@ -1844,146 +1839,6 @@ def _goal_plus_runtime_types() -> tuple[type[Any], type[Any], type[Any]]:
     return FileGoalPlusRuntime, FileSearchRuntime, SearchTools
 
 
-def _ensure_controller_search_work_item(
-    goal_runtime: Any, goal_plus_id: str, run_id: str
-) -> str:
-    """Return the auditable work item that controller closeout will resolve."""
-    goal = goal_runtime.status(goal_plus_id)
-    current_items = [
-        item
-        for item in goal.work_items
-        if item.goal_revision == goal.goal_revision
-    ]
-    linked_items = [
-        item
-        for item in current_items
-        if item.route == "search" and item.search_run_id == run_id
-    ]
-    if len(linked_items) > 1:
-        raise RuntimeError(
-            f"Goal Plus {goal_plus_id} has multiple work items for Search run {run_id}"
-        )
-    if linked_items:
-        linked_item = linked_items[0]
-        if linked_item.status in {"planned", "blocked", "failed"}:
-            goal_runtime.record_work_event(
-                goal_plus_id,
-                linked_item.work_item_id,
-                "search_routed",
-                "Controller closeout resumed the linked fixed-budget Search run.",
-                search_run_id=run_id,
-                evidence=[{"type": "search_run", "run_id": run_id}],
-            )
-        return linked_item.work_item_id
-
-    unbound_search_items = [
-        item
-        for item in current_items
-        if item.route == "search"
-        and item.status in {"planned", "blocked", "failed"}
-        and item.search_run_id is None
-    ]
-    if len(unbound_search_items) > 1:
-        raise RuntimeError(
-            f"Goal Plus {goal_plus_id} has ambiguous unbound Search work items"
-        )
-    if unbound_search_items:
-        work_item_id = unbound_search_items[0].work_item_id
-    elif current_items:
-        raise RuntimeError(
-            f"Goal Plus {goal_plus_id} has no work item for Search run {run_id}"
-        )
-    else:
-        work_item_id = "benchmark_search"
-        goal_runtime.upsert_work_items(
-            goal_plus_id,
-            [
-                {
-                    "work_item_id": work_item_id,
-                    "title": "Run benchmark Search",
-                    "objective": (
-                        "Run the fixed-budget candidate search and let controller closeout "
-                        "apply the frozen selection and promotion contract."
-                    ),
-                    "route": "search",
-                    "depends_on": [],
-                    "scope": [run_id],
-                    "acceptance": [
-                        "The linked Search run is selected and promoted",
-                        "The controller promotion verifier passes",
-                        "The Goal Plus Search result is recorded",
-                    ],
-                    "required": True,
-                }
-            ],
-        )
-
-    goal_runtime.record_work_event(
-        goal_plus_id,
-        work_item_id,
-        "search_routed",
-        "Controller closeout adopted the linked fixed-budget Search run.",
-        search_run_id=run_id,
-        evidence=[{"type": "search_run", "run_id": run_id}],
-    )
-    return work_item_id
-
-
-def _accept_controller_search_work_item(
-    goal_runtime: Any,
-    goal_plus_id: str,
-    work_item_id: str,
-    *,
-    run_id: str,
-    candidate_id: str,
-    selected_score: Any,
-) -> None:
-    evidence = [
-        {
-            "type": "controller_closeout",
-            "run_id": run_id,
-            "selected_candidate_id": candidate_id,
-            "selected_score": selected_score,
-        }
-    ]
-    goal = goal_runtime.status(goal_plus_id)
-    item = next(
-        item
-        for item in goal.work_items
-        if item.goal_revision == goal.goal_revision
-        and item.work_item_id == work_item_id
-    )
-    if item.status == "active":
-        goal_runtime.record_work_event(
-            goal_plus_id,
-            work_item_id,
-            "result",
-            "Controller selected and promoted the verifier-backed Search result.",
-            search_run_id=run_id,
-            evidence=evidence,
-        )
-        goal = goal_runtime.status(goal_plus_id)
-        item = next(
-            item
-            for item in goal.work_items
-            if item.goal_revision == goal.goal_revision
-            and item.work_item_id == work_item_id
-        )
-    if item.status == "result_ready":
-        goal_runtime.record_work_event(
-            goal_plus_id,
-            work_item_id,
-            "accepted",
-            "Controller verified the Search selection, promotion, and recorded result.",
-            search_run_id=run_id,
-            evidence=evidence,
-        )
-    elif item.status != "accepted":
-        raise RuntimeError(
-            f"Goal Plus work item {work_item_id} cannot be accepted from {item.status}"
-        )
-
-
 def _expected_public_gate_selection(run_path: Path) -> dict[str, Any]:
     expected: dict[str, Any] | None = None
     compliant_scores: set[float] = set()
@@ -2085,12 +1940,6 @@ def finalize_goal_plus_search(
         for run_id, goal_ids in goals_by_run.items():
             run_path = root / "runs" / run_id / "run.json"
             run_data = load_json(run_path)
-            work_items_by_goal = {
-                goal_plus_id: _ensure_controller_search_work_item(
-                    goal_runtime, goal_plus_id, run_id
-                )
-                for goal_plus_id in goal_ids
-            }
             initial_state = run_data.get("state")
             candidate_paths = sorted(
                 (run_path.parent / "candidates").glob("*/candidate.json")
@@ -2173,14 +2022,6 @@ def finalize_goal_plus_search(
                         promotion_artifact_path=promotion["artifact_path"],
                         summary="Controller finalized the drained fixed-budget Search run.",
                     )
-                _accept_controller_search_work_item(
-                    goal_runtime,
-                    goal_plus_id,
-                    work_items_by_goal[goal_plus_id],
-                    run_id=run_id,
-                    candidate_id=candidate_id,
-                    selected_score=selection.get("selected_score"),
-                )
                 goal = goal_runtime.status(goal_plus_id)
                 if goal.status != "complete":
                     goal_runtime.set_status(

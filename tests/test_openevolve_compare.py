@@ -341,6 +341,8 @@ class OpenEvolveComparisonTest(unittest.TestCase):
         self.assertEqual(common, experiment.render_plain_prompt(task, 300, 60))
         self.assertNotIn("independent lane", common)
         self.assertNotIn("controller-prepared", prompt)
+        self.assertNotIn("goal_plus_upsert_work_items", prompt)
+        self.assertNotIn("search_routed", prompt)
 
     def test_codex_event_parser_records_actual_worker_launches(self) -> None:
         events = [
@@ -1040,6 +1042,7 @@ class OpenEvolveComparisonTest(unittest.TestCase):
         joined = "\n".join(experiment.codex_goal_plus_mcp_args())
         self.assertIn('mcp_servers.goal-plus.command="goal-plus"', joined)
         self.assertIn('mcp_servers.goal-plus.args=["--root", ".gp"]', joined)
+        self.assertIn("mcp_servers.goal-plus.startup_timeout_sec=60", joined)
         self.assertIn("mcp_servers.goal-plus.tool_timeout_sec=300", joined)
         self.assertIn(
             'mcp_servers.goal-plus.default_tools_approval_mode="approve"', joined
