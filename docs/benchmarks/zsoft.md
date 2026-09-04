@@ -15,11 +15,15 @@ the two benchmark directories and records the resolved commit in each campaign.
 The representative task is `civetweb-detect`. Preparation checks out the pinned
 project revision, exports only the public benchmark contract, and creates an
 empty `submission/` directory. Agents write one schema-valid JSON finding per
-file. Goal Plus selection uses only the public `format_valid` gate and a frozen
-candidate-id tie-break. After selection and closeout, the official deterministic
-scorer runs once for the selected artifact and returns precision, recall, F1,
-TP, FP, and FN. The complete final score payload is retained for analysis;
-intermediate rounds are not officially scored or exported.
+file. Online Goal Plus selection uses only the public `format_valid` gate and a
+frozen candidate-id tie-break. After every agent exits and controller closeout
+completes, the official deterministic scorer evaluates every publicly compliant
+committed iteration; identical artifact snapshots are cached. `final-eval.json`
+contains the highest F1 result, with ties resolved by the lowest candidate id
+and then that candidate's latest tied iteration. The complete precision,
+recall, F1, TP, FP, and FN payload is retained for analysis. Candidate scores
+remain controller-only under the run directory and are never written back into
+the worker workspace or exposed during search.
 
 Detect uses a directory artifact, so the common runner permits multiple changed
 files inside `submission/`. The benchmark repository commit and audited project
@@ -78,8 +82,13 @@ L1 has the same host-filesystem risk as Detect: each upstream task directory
 contains private reference PoCs, negative PoCs, judge code, and fix patches.
 Goal Plus Pi therefore uses the same Bubblewrap boundary for L1, exposing only
 the candidate workspace with `public/` remounted read-only; private task and
-judge directories are not mounted. Workers can reference peer public-verifier
-Evidence, but no per-round or final `success` value enters Search state.
+judge directories are not mounted. Unlike Detect, L1 runs the official
+differential judge for each submitted process iteration and exposes only its
+binary `success` value. A clean settled `success=1` iteration stops exploration
+early; controller-owned selection, promotion, and final verification still run.
+The frozen worker minimum runtime remains part of the campaign contract, but
+workers need not run out that lease after the final judge confirms the live-pass
+stop. Without that confirmation, normal minimum-lease completeness still applies.
 
 ## Run
 

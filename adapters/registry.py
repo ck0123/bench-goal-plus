@@ -41,6 +41,7 @@ class BenchmarkAdapterModule(Protocol):
     CASE_SET_DESCRIPTION: str
     CODEX_SANDBOX: str
     DIRECTION: Literal["minimize", "maximize"]
+    EVALUATION_MODE: Literal["visible", "blind"]
     GOAL_PLUS_PROCESS_METRIC: str
     PRIMARY_METRIC: str
     TASK_ID: str
@@ -86,8 +87,16 @@ class LoadedAdapter:
         controller_only_official_evaluation = getattr(
             self.module, "CONTROLLER_ONLY_OFFICIAL_EVALUATION", False
         )
+        evaluation_mode = getattr(self.module, "EVALUATION_MODE", "visible")
+        requires_protected_pi_workers = getattr(
+            self.module, "REQUIRES_PROTECTED_PI_WORKERS", False
+        )
         process_metric = getattr(
             self.module, "GOAL_PLUS_PROCESS_METRIC", self.module.PRIMARY_METRIC
+        )
+        early_stop = getattr(self.module, "GOAL_PLUS_EARLY_STOP_CONTRACT", None)
+        posthoc_selection = getattr(
+            self.module, "GOAL_PLUS_POSTHOC_SELECTION_CONTRACT", None
         )
         return {
             "adapter_id": self.adapter_id,
@@ -101,6 +110,10 @@ class LoadedAdapter:
             "controller_only_official_evaluation": (
                 controller_only_official_evaluation
             ),
+            "evaluation_mode": evaluation_mode,
+            "requires_protected_pi_workers": requires_protected_pi_workers,
+            "goal_plus_early_stop": early_stop,
+            "goal_plus_posthoc_selection": posthoc_selection,
             "direction": self.module.DIRECTION,
             "upstream_subdir": getattr(self.module, "UPSTREAM_SUBDIR", None),
             "workspace_isolation": "one Git workspace per long-lived lane",
@@ -176,11 +189,51 @@ def _validate_module(definition: AdapterDefinition, module: ModuleType) -> None:
             f"adapter {definition.adapter_id} controller-only official evaluation "
             "flag must be boolean"
         )
+    evaluation_mode = getattr(module, "EVALUATION_MODE", "visible")
+    if evaluation_mode not in {"visible", "blind"}:
+        raise AdapterContractError(
+            f"adapter {definition.adapter_id} has invalid evaluation mode "
+            f"{evaluation_mode!r}"
+        )
+    requires_protected_pi_workers = getattr(
+        module, "REQUIRES_PROTECTED_PI_WORKERS", False
+    )
+    if type(requires_protected_pi_workers) is not bool:
+        raise AdapterContractError(
+            f"adapter {definition.adapter_id} protected Pi worker flag must be boolean"
+        )
+    if controller_only_official_evaluation != (evaluation_mode == "blind"):
+        raise AdapterContractError(
+            f"adapter {definition.adapter_id} evaluation mode conflicts with its "
+            "controller-only official evaluation flag"
+        )
     process_metric = getattr(module, "GOAL_PLUS_PROCESS_METRIC", module.PRIMARY_METRIC)
     if not isinstance(process_metric, str) or not process_metric:
         raise AdapterContractError(
             f"adapter {definition.adapter_id} Goal Plus process metric must be non-empty"
         )
+    posthoc_selection = getattr(
+        module, "GOAL_PLUS_POSTHOC_SELECTION_CONTRACT", None
+    )
+    if posthoc_selection is not None:
+        expected_posthoc = {
+            "enabled": True,
+            "metric_name": module.PRIMARY_METRIC,
+            "metric_direction": module.DIRECTION,
+            "candidate_scope": "all_publicly_compliant_iterations",
+            "tie_break": "lowest_candidate_id_then_latest_iteration",
+            "timing": "after_agent_exit_and_controller_closeout",
+            "visible_to_workers": False,
+        }
+        if posthoc_selection != expected_posthoc:
+            raise AdapterContractError(
+                f"adapter {definition.adapter_id} has an invalid posthoc-selection contract"
+            )
+        if not controller_only_official_evaluation:
+            raise AdapterContractError(
+                f"adapter {definition.adapter_id} posthoc selection requires "
+                "controller-only official evaluation"
+            )
     if module.CODEX_SANDBOX not in {
         "read-only",
         "workspace-write",

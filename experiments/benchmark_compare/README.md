@@ -17,7 +17,7 @@ Codex/Pi launch, Goal Plus launch, wall deadline, concurrency, and evidence.
 | `heurigym` | `solver.py` | `total_cost` minimize | 不需要 | `0 GB` | Python only after dataset bootstrap |
 | `local-vliw` | `solution.py` | `cycles` minimize | 不需要 | `0 GB` | Python standard library；local replica，非官方 EdgeBench |
 | `zsoft-detect` | `submission/` | `format_valid` public; `f1` final-only | 不需要 | `0 GB` | pinned project source + controller-only deterministic scorer |
-| `zsoft-l1` | `poc` | `format_valid` public; `success` final-only | **必需** | 依任务镜像和源码缓存而定 | controller-only Docker Compose vulnerable/fixed differential judge |
+| `zsoft-l1` | `poc` | live binary `success` | **必需** | 依任务镜像和源码缓存而定 | controller-owned Docker Compose vulnerable/fixed differential judge |
 
 Every upstream checkout lives in the ignored `third_party/` directory. Run a
 task-specific bootstrap instead of cloning beside the repository:
@@ -27,7 +27,7 @@ python3 scripts/repro_env.py bootstrap --only autolab
 python3 scripts/repro_env.py doctor --only autolab
 ```
 
-ZSoft has no visible/blind option: official evaluation is always controller-only.
+ZSoft Detect keeps official F1 controller-only and invisible during Search.
 Workers see the public task material and `format_valid` checker, while the Pi
 tool proxy returns minimal candidate-local context, opaque direct verifier
 receipts, and a schema-filtered Global Evidence view of settled public-verifier
@@ -37,10 +37,12 @@ stage/copy operations are available through the same session-bound proxy. Full
 candidate histories, official metrics and commands, ground truth, benchmark
 roots, peer workspaces, and transcripts remain controller-only. After
 deterministic public-compliance selection and complete Goal Plus
-promotion/closeout, the controller makes one official final call. It does not
-score or export official F1/success for intermediate rounds. Plain,
-`goal-plus-codex`, and SkyDiscover methods are rejected for ZSoft; use the
-Bubblewrap-backed `goal-plus-pi` method.
+promotion/closeout, the controller makes one official final call. L1 instead
+runs the controller-owned judge for each iteration, exposes only binary
+`success`, and stops exploration after the first clean settled pass. Private
+judge inputs and raw results remain outside the Bubblewrap worker. Use the
+Bubblewrap-backed `goal-plus-pi` method for the protected ZSoft paths; other
+methods are rejected before workspace preparation.
 
 The upstream keys are `ale_bench`, `autolab`, `frontier_cs`,
 `frontier_engineering`, `heurigym`, and `zsoft_l1`. OpenEvolve and Goal Plus

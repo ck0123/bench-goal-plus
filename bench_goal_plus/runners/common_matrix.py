@@ -96,6 +96,8 @@ class CommonMatrixRunner(BenchmarkRunner):
                     str(spec.pi_api),
                     "--pi-api-key-env",
                     str(spec.pi_api_key_env),
+                    "--pi-api-base-env",
+                    str(spec.pi_api_base_env),
                 ]
             )
         campaign = CampaignRef(

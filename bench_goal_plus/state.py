@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,9 +39,14 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def ensure_under(path: Path, root: Path, *, label: str) -> Path:
-    resolved = path.expanduser().resolve()
+    # Normalize (collapse "..") and make absolute WITHOUT resolving symlinks, so a
+    # campaign directory that is a symlink onto a roomier disk (e.g. /data2) is not
+    # rejected for physically living outside runs/. The ".." collapse keeps the
+    # escape guard intact for genuinely-outside paths.
+    resolved = Path(os.path.normpath(path.expanduser().absolute()))
+    root_normalized = Path(os.path.normpath(root.expanduser().absolute()))
     try:
-        resolved.relative_to(root.expanduser().resolve())
+        resolved.relative_to(root_normalized)
     except ValueError as error:
         raise ContractError(f"{label} must stay under {root}: {resolved}") from error
     return resolved

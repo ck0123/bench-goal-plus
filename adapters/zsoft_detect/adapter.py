@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Adapter for the cybergym-zsoft-detect static detection benchmark.
 
-Worker-visible validation checks only the public finding format. The trusted
-benchmark controller runs the benchmark-owned scorer once after selection.
+Worker-visible validation checks only the public finding format. After every
+worker has exited, the trusted benchmark controller scores the compliant
+committed snapshots and selects the one with the highest official F1.
 """
 
 from __future__ import annotations
@@ -47,13 +48,25 @@ PRIMARY_METRIC = "f1"
 GOAL_PLUS_PROCESS_METRIC = PUBLIC_METRIC
 PUBLIC_FORMAT_METRIC = PUBLIC_METRIC
 CONTROLLER_ONLY_OFFICIAL_EVALUATION = True
+EVALUATION_MODE = "blind"
+REQUIRES_PROTECTED_PI_WORKERS = True
 DIRECTION = "maximize"
+GOAL_PLUS_POSTHOC_SELECTION_CONTRACT = {
+    "enabled": True,
+    "metric_name": PRIMARY_METRIC,
+    "metric_direction": DIRECTION,
+    "candidate_scope": "all_publicly_compliant_iterations",
+    "tie_break": "lowest_candidate_id_then_latest_iteration",
+    "timing": "after_agent_exit_and_controller_closeout",
+    "visible_to_workers": False,
+}
 CASE_SET_DESCRIPTION = (
     "one zsoft-detect project bench: static findings on a pinned commit"
 )
 CODEX_SANDBOX = "workspace-write"
 PI_WORKER_SANDBOX = {
     "engine": "bubblewrap",
+    "evaluation_mode": EVALUATION_MODE,
     "workspace_access": "read_only",
     "read_only_workspace_paths": ["source", "schemas"],
     "writable_workspace_paths": [ARTIFACT_NAME],
@@ -306,6 +319,8 @@ def materialize_workspace(
         "source_materialization": source_materialization,
         "framework_version": _framework_version(benchmark_root),
         "controller_only_official_evaluation": True,
+        "evaluation_mode": EVALUATION_MODE,
+        "requires_protected_pi_workers": REQUIRES_PROTECTED_PI_WORKERS,
         "public_validation_kind": DETECT_VALIDATION_KIND,
         "primary_metric": GOAL_PLUS_PROCESS_METRIC,
         "direction": DIRECTION,

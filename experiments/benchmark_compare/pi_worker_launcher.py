@@ -82,6 +82,7 @@ _BLIND_CONTEXT_SOURCE_FIELDS = {
     "candidate_id",
     "candidate_task",
     "directive",
+    "evaluation_mode",
     "host",
     "host_handle",
     "iteration_count",
@@ -435,6 +436,9 @@ class SandboxPolicy:
     read_only_workspace_paths: tuple[str, ...]
     writable_workspace_paths: tuple[str, ...]
     pass_env: tuple[str, ...]
+    # The launcher historically served only blind ZSoft workers. Keep missing
+    # policy fields fail-closed; L1 opts into live binary feedback explicitly.
+    evaluation_mode: str = "blind"
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> SandboxPolicy:
@@ -449,6 +453,7 @@ class SandboxPolicy:
             raise TypeError(f"{SANDBOX_POLICY_ENV} must be a JSON object")
         allowed = {
             "engine",
+            "evaluation_mode",
             "workspace_access",
             "read_only_workspace_paths",
             "writable_workspace_paths",
@@ -463,6 +468,12 @@ class SandboxPolicy:
         if engine != "bubblewrap":
             raise ValueError(
                 f"{SANDBOX_POLICY_ENV}.engine must be 'bubblewrap', got {engine!r}"
+            )
+        evaluation_mode = payload.get("evaluation_mode", "blind")
+        if evaluation_mode not in {"visible", "blind"}:
+            raise ValueError(
+                f"{SANDBOX_POLICY_ENV}.evaluation_mode must be 'visible' or "
+                f"'blind', got {evaluation_mode!r}"
             )
         workspace_access = payload.get("workspace_access")
         if workspace_access != "read_only":
@@ -513,6 +524,7 @@ class SandboxPolicy:
             read_only_workspace_paths=tuple(read_only_paths),
             writable_workspace_paths=tuple(writable_paths),
             pass_env=tuple(pass_env),
+            evaluation_mode=evaluation_mode,
         )
 
 
@@ -573,6 +585,7 @@ def _blind_context_response(
         or result["run_id"] != context.run_id
         or result["candidate_id"] != context.candidate_id
         or result["workspace"] != str(context.workspace)
+        or result.get("evaluation_mode", "blind") != "blind"
         or result["metric_name"] != _BLIND_PUBLIC_METRIC
         or result["metric_direction"] != "maximize"
     ):
@@ -933,6 +946,26 @@ class _ThreadingUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamS
     daemon_threads = True
 
 
+def _run_host_tool(
+    root: Path,
+    tool: str,
+    args: dict[str, Any],
+    environment: Mapping[str, str],
+) -> Any:
+    completed = subprocess.run(
+        [str(_HOST_TOOL_BIN), "--root", str(root), tool],
+        cwd=root,
+        env=environment,
+        input=json.dumps(args, ensure_ascii=False, separators=(",", ":")),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("host tool call failed")
+    return json.loads(completed.stdout)
+
+
 class WorkerToolProxy:
     def __init__(
         self,
@@ -940,13 +973,17 @@ class WorkerToolProxy:
         root: Path,
         context: LaunchContext,
         socket_dir: Path,
-        environment: Mapping[str, str],
+        environment: Mapping[str, str] | None = None,
+        evaluation_mode: str = "blind",
     ) -> None:
         self.root = root
         self.context = context
         self.socket_dir = socket_dir
         self.socket_path = socket_dir / "tool.sock"
-        self.host_environment = dict(environment)
+        if evaluation_mode not in {"visible", "blind"}:
+            raise ValueError(f"unsupported proxy evaluation mode: {evaluation_mode}")
+        self.evaluation_mode = evaluation_mode
+        self.host_environment = dict(os.environ if environment is None else environment)
         for name in (
             "GIT_DIR",
             "GIT_OPTIONAL_LOCKS",
@@ -973,8 +1010,16 @@ class WorkerToolProxy:
                     try:
                         request = json.loads(raw.decode("utf-8"))
                         response = proxy.dispatch(request)
-                    except Exception:  # noqa: BLE001
-                        response = dict(_BLIND_RESPONSE_REJECTED)
+                    except Exception as exc:  # noqa: BLE001
+                        response = (
+                            dict(_BLIND_RESPONSE_REJECTED)
+                            if proxy.evaluation_mode == "blind"
+                            else {
+                                "ok": False,
+                                "error": str(exc),
+                                "error_type": type(exc).__name__,
+                            }
+                        )
                 self.wfile.write(
                     (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
                 )
@@ -998,32 +1043,22 @@ class WorkerToolProxy:
         if not isinstance(args, dict):
             raise TypeError("proxy tool args must be a JSON object")
         self._authorize(str(tool), args)
-        if tool in _BLIND_BLOCKED_TOOLS:
+        if self.evaluation_mode == "blind" and tool in _BLIND_BLOCKED_TOOLS:
             return dict(_BLIND_RESPONSE_REJECTED)
 
         try:
-            completed = subprocess.run(
-                [
-                    str(_HOST_TOOL_BIN),
-                    "--root",
-                    str(self.root),
-                    str(tool),
-                ],
-                cwd=self.root,
-                env=self.host_environment,
-                input=json.dumps(args, ensure_ascii=False, separators=(",", ":")),
-                capture_output=True,
-                text=True,
-                check=False,
+            result = _run_host_tool(
+                self.root,
+                str(tool),
+                args,
+                self.host_environment,
             )
-            if completed.returncode != 0:
-                return dict(_BLIND_RESPONSE_REJECTED)
-            result = json.loads(completed.stdout)
         except Exception:  # workers must not receive raw host exceptions
             return dict(_BLIND_RESPONSE_REJECTED)
-        result = _blind_tool_response(str(tool), result, self.context)
-        if result is _INVALID_BLIND_RESPONSE:
-            return dict(_BLIND_RESPONSE_REJECTED)
+        if self.evaluation_mode == "blind":
+            result = _blind_tool_response(str(tool), result, self.context)
+            if result is _INVALID_BLIND_RESPONSE:
+                return dict(_BLIND_RESPONSE_REJECTED)
         return {
             "ok": True,
             "result": result,
@@ -1087,6 +1122,7 @@ class BubblewrapWorker:
             context=context,
             socket_dir=proxy_base / f"bgp-pi-{uuid.uuid4().hex[:16]}",
             environment=self.environment,
+            evaluation_mode=policy.evaluation_mode,
         )
         self.private_git_admin: PrivateGitAdmin | None = None
 
@@ -1912,7 +1948,9 @@ def _shim_worker_launch(
     )
     real_pi = _real_pi_binary(environment)
     wrapped = [str(real_pi), *command]
-    wrapped.extend(["--append-system-prompt", _BLIND_SYSTEM_PROMPT])
+    policy = SandboxPolicy.from_environment(environment)
+    if policy.evaluation_mode == "blind":
+        wrapped.extend(["--append-system-prompt", _BLIND_SYSTEM_PROMPT])
     return context, wrapped
 
 

@@ -8,10 +8,13 @@ import json
 import math
 import os
 import signal
+import subprocess
 import sys
+import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +39,20 @@ DEFAULT_RUNS = ROOT / "runs/benchmark-campaigns"
 DEFAULT_CONDITIONS = ("B0", "B1", "B3", "B4")
 TERMINAL_STATES = {"finished", "incomplete", "failed", "prepare_failed"}
 _stop_requested = False
+
+PI_API_BASE_RUNTIME_ENV = "BENCH_GOAL_PLUS_PI_API_BASE"
+
+
+@dataclass
+class ActiveCell:
+    cell: dict[str, Any]
+    process: subprocess.Popen[str]
+    stdout: TextIO
+    stderr: TextIO
+
+    def close_logs(self) -> None:
+        self.stdout.close()
+        self.stderr.close()
 
 
 def parse_thresholds(values: list[str]) -> dict[str, float]:
@@ -147,6 +164,7 @@ def prepare_campaign(args: argparse.Namespace) -> int:
             for condition_id in selected_conditions
         ]
     )
+    pi_provider = _campaign_provider(args, methods=[method for _, method in axes])
 
     campaign_dir = (args.campaign_dir or default_campaign_dir()).expanduser().absolute()
     campaign_dir.mkdir(parents=True, exist_ok=False)
@@ -169,6 +187,7 @@ def prepare_campaign(args: argparse.Namespace) -> int:
             if search_scheduler is not None
             else {}
         ),
+        "pi_provider": pi_provider,
         "budget": {
             "wall_time_seconds": args.wall_time_seconds,
             "live_search_concurrency": args.concurrency,
@@ -258,22 +277,204 @@ def _handle_stop(signum: int, _frame: object) -> None:
     raise KeyboardInterrupt
 
 
+def _campaign_provider(
+    args: argparse.Namespace, *, methods: list[str]
+) -> dict[str, Any] | None:
+    """Resolve the non-secret Pi provider contract for this campaign."""
+    if not any(method in {"plain-pi", "goal-plus-pi"} for method in methods):
+        return None
+    return {
+        "id": args.pi_provider_id,
+        "api": args.pi_api,
+        "api_key_env": args.pi_api_key_env,
+        "api_base_env": args.pi_api_base_env,
+    }
+
+
+def _provider_matches(
+    prepared: dict[str, Any] | None, runtime: dict[str, Any] | None
+) -> bool:
+    if prepared is None and runtime is None:
+        return True
+    if prepared is None or runtime is None:
+        return False
+    # Provider URL values and credentials are never serialized; only env names are.
+    return (
+        prepared.get("id") == runtime.get("id")
+        and prepared.get("api") == runtime.get("api")
+        and (prepared.get("api_key_env") or None) == (runtime.get("api_key_env") or None)
+        and (prepared.get("api_base_env") or None)
+        == (runtime.get("api_base_env") or None)
+    )
+
+
+def cell_run_command(args: argparse.Namespace, cell: dict[str, Any]) -> list[str]:
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "run-cell",
+        "--run-dir",
+        str(cell["run_dir"]),
+        "--model",
+        args.model,
+        "--codex-bin",
+        args.codex_bin,
+        "--pi-provider-id",
+        args.pi_provider_id,
+        "--pi-api",
+        args.pi_api,
+        "--pi-api-key-env",
+        args.pi_api_key_env,
+    ]
+
+
+def launch_cell(
+    args: argparse.Namespace,
+    cell: dict[str, Any],
+    *,
+    api_base: str | None,
+) -> ActiveCell:
+    cell["state"] = "running"
+    cell["started_at"] = utc_now()
+    run_dir = Path(cell["run_dir"])
+    run_dir.mkdir(parents=True, exist_ok=True)
+    stdout = (run_dir / "controller-stdout.log").open("a")
+    stderr = (run_dir / "controller-stderr.log").open("a")
+    environment = os.environ.copy()
+    environment.pop("OPENAI_BASE_URL", None)
+    environment.pop("OPENAI_API_BASE_URL", None)
+    if api_base:
+        environment[PI_API_BASE_RUNTIME_ENV] = api_base
+    process = subprocess.Popen(
+        cell_run_command(args, cell),
+        cwd=ROOT,
+        env=environment,
+        stdout=stdout,
+        stderr=stderr,
+        text=True,
+        start_new_session=True,
+    )
+    return ActiveCell(cell=cell, process=process, stdout=stdout, stderr=stderr)
+
+
+def finish_cell(active: ActiveCell) -> None:
+    cell = active.cell
+    returncode = active.process.poll()
+    cell["returncode"] = returncode
+    active.close_logs()
+    manifest_path = Path(cell["run_dir"]) / "experiment.json"
+    if manifest_path.exists():
+        try:
+            manifest = read_json(manifest_path)
+            manifest_status = manifest.get("status")
+            if manifest_status in TERMINAL_STATES:
+                cell["state"] = manifest_status
+            else:
+                cell["state"] = "failed"
+                cell["error"] = (
+                    "cell process ended before its experiment reached a terminal state"
+                )
+        except Exception:
+            cell["state"] = "failed"
+    elif returncode == 0:
+        # no manifest means the cell process was interrupted before writing one
+        cell["state"] = "interrupted"
+    else:
+        cell["state"] = "failed"
+    cell["finished_at"] = utc_now()
+
+
+def terminate_active_cells(
+    active_cells: list[ActiveCell], hard_kill_grace_seconds: int
+) -> None:
+    for active in active_cells:
+        process = active.process
+        if process.poll() is not None:
+            continue
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + hard_kill_grace_seconds
+    for active in active_cells:
+        process = active.process
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            process.wait()
+
+
+def run_cell(args: argparse.Namespace) -> int:
+    run_args = standalone.RunConfig(
+        run_dir=Path(args.run_dir),
+        model=args.model,
+        codex_bin=args.codex_bin,
+        api_base=os.environ.get(PI_API_BASE_RUNTIME_ENV),
+        pi_provider_id=args.pi_provider_id,
+        pi_api=args.pi_api,
+        pi_api_key_env=args.pi_api_key_env,
+    ).to_namespace()
+    return standalone.execute(run_args)
+
+
 def run_campaign(args: argparse.Namespace) -> int:
     global _stop_requested
     _stop_requested = False
     campaign_dir = args.campaign.expanduser().absolute()
     campaign_path = campaign_dir / "campaign.json"
     campaign = read_json(campaign_path)
-    api_base_env = args.pi_api_base_env or "OPENAI_BASE_URL"
-    api_base = args.api_base or os.environ.get(api_base_env)
     if args.model != campaign["model"]:
         raise ValueError(
             f"model mismatch: campaign uses {campaign['model']}, got {args.model}"
+        )
+    prepared_provider = campaign.get("pi_provider")
+    runtime_provider = _campaign_provider(
+        args, methods=[str(cell["method"]) for cell in campaign["cells"]]
+    )
+    if not _provider_matches(prepared_provider, runtime_provider):
+        raise ValueError(
+            "provider mismatch: campaign was prepared for "
+            f"{prepared_provider!r}, got {runtime_provider!r}"
         )
     selected = set(args.conditions) if args.conditions else None
     unknown = (selected or set()) - set(campaign.get("conditions") or [])
     if unknown:
         raise ValueError(f"conditions not in campaign: {', '.join(sorted(unknown))}")
+    api_base = None
+    if runtime_provider is not None:
+        api_base = args.api_base or os.environ.get(runtime_provider["api_base_env"])
+        if not api_base:
+            raise RuntimeError(
+                f"{runtime_provider['api_base_env']} is required for the Pi provider"
+            )
+        if not os.environ.get(runtime_provider["api_key_env"]):
+            raise RuntimeError(
+                f"{runtime_provider['api_key_env']} is required for the Pi provider"
+            )
+        generic_base = os.environ.get("OPENAI_BASE_URL")
+        if (
+            args.api_base is None
+            and runtime_provider["api_base_env"] != "OPENAI_BASE_URL"
+            and generic_base
+            and api_base == generic_base
+        ):
+            raise RuntimeError(
+                "the provider-specific Pi base URL must not alias OPENAI_BASE_URL"
+            )
+    cell_concurrency = max(
+        int(campaign.get("budget", {}).get("cell_concurrency", 1)), 1
+    )
 
     previous_handlers = {
         signum: signal.signal(signum, _handle_stop)
@@ -281,51 +482,61 @@ def run_campaign(args: argparse.Namespace) -> int:
     }
     campaign["state"] = "running"
     campaign["execution_started_at"] = campaign.get("execution_started_at") or utc_now()
-    campaign["controller"] = {"pid": os.getpid(), "updated_at": utc_now()}
+    campaign["controller"] = {
+        "pid": os.getpid(),
+        "current_cell": None,
+        "updated_at": utc_now(),
+    }
     write_json(campaign_path, campaign)
+
+    active_cells: list[ActiveCell] = []
+    pending = [
+        cell
+        for cell in campaign["cells"]
+        if cell["state"] not in TERMINAL_STATES
+        and (selected is None or cell["condition"] in selected)
+    ]
     try:
-        for cell in campaign["cells"]:
+        while pending or active_cells:
             if _stop_requested:
                 break
-            if (
-                selected is not None and cell["condition"] not in selected
-            ) or cell["state"] in TERMINAL_STATES:
-                continue
-            cell["state"] = "running"
-            cell["started_at"] = utc_now()
-            campaign["controller"].update(
-                {"current_cell": cell["cell_id"], "updated_at": utc_now()}
-            )
-            write_json(campaign_path, campaign)
-            run_args = standalone.RunConfig(
-                run_dir=Path(cell["run_dir"]),
-                model=args.model,
-                codex_bin=args.codex_bin,
-                api_base=api_base,
-                pi_provider_id=args.pi_provider_id,
-                pi_api=args.pi_api,
-                pi_api_key_env=args.pi_api_key_env,
-            ).to_namespace()
-            try:
-                returncode = standalone.execute(run_args)
-                manifest = read_json(Path(cell["run_dir"]) / "experiment.json")
-                cell["state"] = manifest["status"]
-                cell["returncode"] = returncode
-            except BaseException as error:
-                if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                    _stop_requested = True
-                    cell["state"] = "interrupted"
-                else:
-                    cell["state"] = "failed"
-                cell["error"] = f"{type(error).__name__}: {error}"
-            cell["finished_at"] = utc_now()
-            write_json(campaign_path, campaign)
-            summarize_campaign(campaign_dir)
-            if args.fail_fast and cell["state"] != "finished":
-                break
+            while pending and len(active_cells) < cell_concurrency:
+                cell = pending.pop(0)
+                active_cells.append(
+                    launch_cell(
+                        args,
+                        cell,
+                        api_base=api_base,
+                    )
+                )
+                campaign["controller"].update(
+                    {"current_cell": cell["cell_id"], "updated_at": utc_now()}
+                )
+                write_json(campaign_path, campaign)
+            done = [
+                active
+                for active in active_cells
+                if active.process.poll() is not None
+            ]
+            for active in done:
+                finish_cell(active)
+                active_cells.remove(active)
+                write_json(campaign_path, campaign)
+                if args.fail_fast and active.cell["state"] != "finished":
+                    pending.clear()
+            if active_cells:
+                time.sleep(0.1)
     except KeyboardInterrupt:
         _stop_requested = True
     finally:
+        if active_cells:
+            terminate_active_cells(
+                active_cells, int(campaign.get("budget", {}).get("hard_kill_grace_seconds", 10))
+            )
+            for active in active_cells:
+                finish_cell(active)
+                write_json(campaign_path, campaign)
+            active_cells.clear()
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
 
@@ -349,6 +560,7 @@ def run_campaign(args: argparse.Namespace) -> int:
     campaign["controller"] = {
         "pid": os.getpid(),
         "current_cell": None,
+        "active_cells": [],
         "updated_at": utc_now(),
         "active": False,
     }
@@ -824,6 +1036,7 @@ def build_parser() -> argparse.ArgumentParser:
         prepare_parser, reasoning_choices=("low", "medium", "high", "xhigh")
     )
     prepare_parser.add_argument("--threshold", action="append", default=[])
+    prepare_parser.add_argument("--pi-api-base-env", default="OPENAI_BASE_URL")
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--campaign", type=Path, required=True)
@@ -840,6 +1053,20 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--pi-api-base-env", default="OPENAI_BASE_URL")
     run_parser.add_argument("--conditions", nargs="+", choices=tuple(CONDITIONS))
     run_parser.add_argument("--fail-fast", action="store_true")
+
+    run_cell_parser = subparsers.add_parser("run-cell")
+    run_cell_parser.add_argument("--run-dir", type=Path, required=True)
+    run_cell_parser.add_argument("--model", required=True)
+    run_cell_parser.add_argument("--codex-bin", default="codex")
+    run_cell_parser.add_argument(
+        "--pi-provider-id", default=standalone.PI_PROVIDER_ID
+    )
+    run_cell_parser.add_argument(
+        "--pi-api", choices=standalone.PI_APIS, default="openai-responses"
+    )
+    run_cell_parser.add_argument(
+        "--pi-api-key-env", default=standalone.PI_API_KEY_ENV
+    )
 
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--campaign", type=Path, required=True)
@@ -859,6 +1086,8 @@ def main() -> int:
         return prepare_campaign(args)
     if args.command == "run":
         return run_campaign(args)
+    if args.command == "run-cell":
+        return run_cell(args)
     if args.command == "status":
         return status_campaign(args)
     return summarize_command(args)

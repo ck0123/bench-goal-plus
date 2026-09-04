@@ -13,22 +13,24 @@ The adapter:
 - materializes one Git workspace per task: the task's exported `public/`
   bundle, a placeholder `poc` artifact, `TASK.md`, `AGENTS.md`, and a
   self-contained `public_check.py`;
-- exposes only the `format_valid` public gate, which checks that `poc` is a
-  bounded, regular, non-symlink UTF-8 file containing parseable Python;
-- selects the lowest candidate id with public `process_passed` evidence and
-  that candidate's latest compliant iteration, then runs `python3 -m zsoft_poc
-  evaluate <task-id> <file> --submission-kind final` exactly once from the
-  trusted controller after selection, promotion, and Goal Plus closeout;
+- keeps `public_check.py` as a local format gate, then runs `python3 -m
+  zsoft_poc evaluate <task-id> <file> --submission-kind final` as the
+  controller-owned process verifier for every submitted Goal Plus iteration;
+- records only binary `success` in Search evidence. Once a clean, settled
+  iteration records `success=1`, the campaign controller stops exploration,
+  selects and promotes that verifier-backed candidate, and runs the final
+  judge again. A configured worker minimum runtime remains frozen and audited,
+  but its completion requirement is waived only when that controlled stop is
+  confirmed by the controller-owned final judge;
 - requires Goal Plus Pi workers to use Bubblewrap with only the candidate
   workspace mounted and `public/` read-only; upstream `private/`, judge, and
-  reference-PoC files, full histories, and official results remain host-only.
-  Workers may read only schema-filtered Global Evidence derived from the public
-  `format_valid` verifier and, when enabled, verified shared-tool Views;
-- reports the official final `success` in {0, 1}, maximize, only after
-  closeout. The full EvaluationResult is preserved under `zsoft_result` in the
-  controller-owned final report. Intermediate candidate rounds are never sent
-  to the Docker judge. A second final claim is rejected before the judge is
-  invoked.
+  reference-PoC files and raw judge output remain host-only. Worker-visible
+  verifier and Global Evidence responses contain the binary `success` signal,
+  objective Views, and, when enabled, verified shared-tool metadata;
+- preserves the full EvaluationResult only under `zsoft_result` in the
+  controller-owned final report. Parallel process evaluations use isolated
+  staging directories, and a second final claim is rejected before the judge
+  is invoked.
 
 Constants:
 
@@ -45,10 +47,9 @@ The reproducible-environment bootstrap owns the default sparse checkout.
 `BENCH_GOAL_PLUS_ZSOFT_ROOT` may select another clean checkout for controlled
 experiments; the path must remain under this repository.
 
-ZSoft official evaluation is permanently controller-only and is not a
-configurable run mode. The common runner accepts only `goal-plus-pi` for this
-adapter; Plain, `goal-plus-codex`, and SkyDiscover methods are rejected before
-preparation because they lack the required Bubblewrap worker boundary.
+The official judge remains controller-owned, while its binary result is live
+Search feedback. The common runner accepts only `goal-plus-pi` for this adapter,
+so every candidate worker uses the protected Bubblewrap execution path.
 
 ## Smoke
 
