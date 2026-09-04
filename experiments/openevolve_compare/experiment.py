@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -282,13 +284,28 @@ def render_goal(
     worker_runtime_seconds: int | None = None,
     worker_min_runtime_seconds: int | None = None,
     verifier_timeout_seconds: int = 60,
+    process_verifier_timeout_seconds: int | None = None,
     coordination_condition: str | None = None,
     search_space_mode: str | None = None,
     shared_dir_enabled: bool = False,
     controller_only_official_evaluation: bool = False,
     search_scheduler: GoalPlusSearchScheduler | None = None,
+    evaluation_mode: str | None = None,
+    early_stop_contract: dict[str, Any] | None = None,
 ) -> str:
     """Add the host-native Goal Plus entrypoint and config to the common prompt."""
+    if evaluation_mode is None:
+        evaluation_mode = (
+            "blind" if controller_only_official_evaluation else "visible"
+        )
+    if evaluation_mode not in {"visible", "blind"}:
+        raise ValueError(f"unsupported evaluation mode: {evaluation_mode}")
+    if controller_only_official_evaluation and evaluation_mode != "blind":
+        raise ValueError(
+            "controller-only official evaluation requires blind worker feedback"
+        )
+    if evaluation_mode == "blind":
+        controller_only_official_evaluation = True
     exploration_seconds = max(1, wall_seconds - closeout_seconds)
     dispatch_seconds = (
         worker_runtime_seconds
@@ -301,8 +318,12 @@ def render_goal(
         1 <= worker_min_runtime_seconds <= dispatch_seconds
     ):
         raise ValueError("worker minimum runtime must fit inside the worker budget")
+    if process_verifier_timeout_seconds is None:
+        process_verifier_timeout_seconds = verifier_timeout_seconds
     if verifier_timeout_seconds < 1:
         raise ValueError("verifier timeout must be positive")
+    if process_verifier_timeout_seconds < 1:
+        raise ValueError("process verifier timeout must be positive")
     if search_space_mode not in {None, "observe", "enforce"}:
         raise ValueError(f"unsupported search-space mode: {search_space_mode}")
     if coordination_condition in {"B3", "B4"} and search_space_mode is None:
@@ -376,6 +397,26 @@ def render_goal(
         if artifact_is_directory
         else "allow at most one changed file.\n"
     )
+    worker_verification_text = (
+        "- Each candidate worker must submit its own final process verifier result. After a "
+        "worker returns with that durable result, do not run a duplicate parent-side process "
+        "verification for the same candidate; wait for all workers, then select and let the "
+        "promotion verifier perform the final gate.\n"
+    )
+    early_stop_text = ""
+    if early_stop_contract is not None:
+        target_metric = early_stop_contract["metric_name"]
+        target_score = float(early_stop_contract["target_score"])
+        worker_verification_text = (
+            "- Every worker should submit process verifier results while exploring. Once any "
+            "candidate records the target score, stop launching or resuming work and leave "
+            "the settled candidate available for host closeout.\n"
+        )
+        early_stop_text = (
+            "- The host controller stops exploration as soon as a fully settled, clean "
+            f"process iteration records `{target_metric}={target_score:g}`. Treat that stop "
+            "as expected; selection, promotion, and final verification still run afterward.\n"
+        )
     if controller_only_official_evaluation:
         return (
             f"{goal_plus_command}\n\n"
@@ -420,7 +461,7 @@ def render_goal(
             f"- Metric: `{metric_name}` with direction `{metric_direction}`; it is a public "
             "format gate only. No official evaluation value may enter this Search run.\n"
             "- Process verifier: `python3 public_check.py`, role `validity_gate`, feedback "
-            f"policy `final_only`, timeout {verifier_timeout_seconds} seconds.\n"
+            f"policy `final_only`, timeout {process_verifier_timeout_seconds} seconds.\n"
             "- Promotion verifier: the same command, role `promotion_gate`, feedback policy "
             f"`final_only`, timeout {verifier_timeout_seconds} seconds.\n"
             "- The benchmark-owned Pi shim keeps full verifier responses, worker histories, "
@@ -460,9 +501,16 @@ def render_goal(
         "Use the current workspace and construct the verifier-backed Goal Plus search from "
         "the configuration below. Goal Plus owns intake, triage, SearchSpec freezing, candidate "
         "workspaces, selection, promotion, and final reporting.\n\n"
-        "- Honor every leading typed command field in the SearchSpec.\n"
+        "- Honor every leading typed command field in the SearchSpec and omit "
+        "deprecated `budget.max_candidates`.\n"
         + render_search_scheduler_instructions(search_scheduler)
-        + f"- Set `strategy.worker_host=\"{worker_host}\"`.\n"
+        + "- After triage and before freezing the SearchSpec, call "
+        "`goal_plus_upsert_work_items` with one required `route=\"search\"` item "
+        "for this benchmark Search. After linking the run, record "
+        "`search_routed` for that item and leave its result acceptance to the host "
+        "controller closeout.\n"
+        + f"- Set `strategy.worker_host=\"{worker_host}\"` and "
+        "`strategy.orchestration_mode=\"parallel_loops\"`.\n"
         + (
             "- Set top-level `shared_dir.enabled=true`.\n"
             if shared_dir_enabled
@@ -487,20 +535,18 @@ def render_goal(
         f"- Metric: `{metric_name}` with direction `{metric_direction}`.\n"
         "- Process verifier: `python3 .goal-plus-verifiers/primary_metric.py`, role "
         "`ranking_signal`, feedback policy `summary_only`, timeout "
-        f"{verifier_timeout_seconds} seconds.\n"
+        f"{process_verifier_timeout_seconds} seconds.\n"
         "- Promotion verifier: the same command, role `promotion_gate`, feedback policy "
         f"`final_only`, timeout {verifier_timeout_seconds} seconds. The verifier is "
         "controller-owned and immutable.\n"
-        "- Each candidate worker must submit its own final process verifier result. After a "
-        "worker returns with that durable result, do not run a duplicate parent-side process "
-        "verification for the same candidate; wait for all workers, then select and let the "
-        "promotion verifier perform the final gate.\n"
+        f"{worker_verification_text}"
         f"- Edit surface: allow only `{artifact_name}`; deny `evaluate.py`, "
         "`.goal-plus-verifiers/**`, `task.json`, `TASK.md`, `AGENTS.md`, and `GOAL.md`; "
         f"{edit_surface_limit}"
         "- Workspace: use `source_path=\".\"`; backend and promotion mode come from "
         "the typed command config.\n"
         "- Constraints: no network; preserve the artifact's controller-checked fixed regions.\n"
+        f"{early_stop_text}"
         f"- `strategy.config.closeout_reserve_seconds={closeout_seconds}` so host "
         "supervisors stop worker continuation before final completion work.\n"
         f"- Outer budget: {wall_seconds} seconds total, with about {exploration_seconds} "
@@ -1654,6 +1700,47 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
     }
 
 
+def goal_plus_settled_selection(
+    state: dict[str, Any],
+    *,
+    target_score: float | None = None,
+) -> bool:
+    """True when the Goal Plus run materialized a real, committed result.
+
+    A fixed-budget Search run is "settled" once the controller (or the agent,
+    before closeout) committed a selection and promotion, or once a verified
+    candidate reached the frozen target score.  A settled run carries a real
+    PASS / NOT_PASS score; it must not be reported as INFRA just because the
+    host interrupted the pi workers before they each satisfied the minimum
+    lease.  Unsettled runs -- no materialized selection, no verified target
+    candidate, or no run at all (the seed never started, or the run is frozen
+    in selection_blocked) -- are genuine INFRA and stay incomplete.
+    """
+    runs = state.get("runs") or []
+    if not runs:
+        # No Search run exists: the seed never started or never linked. That is
+        # genuine INFRA, not a settled real result.
+        return False
+    for run in runs:
+        selected_score = run.get("selected_score")
+        if selected_score is not None:
+            try:
+                float(selected_score)
+                return True
+            except (TypeError, ValueError):
+                pass
+        best = run.get("best_recorded_score")
+        if best is not None and (target_score is None or float(best) == float(target_score)):
+            try:
+                float(best)
+            except (TypeError, ValueError):
+                continue
+            verified = run.get("worker_verified_candidate_count")
+            if isinstance(verified, int) and verified >= 1:
+                return True
+    return False
+
+
 def goal_plus_incomplete_reason(
     state: dict[str, Any],
     *,
@@ -1661,6 +1748,7 @@ def goal_plus_incomplete_reason(
     minimum_worker_verified_candidates: int | None = None,
     expected_worker_min_runtime_seconds: int | None = None,
     expected_worker_min_verifier_runs: int | None = None,
+    require_satisfied_pi_minimum_lease: bool = True,
     expected_goal_plus_id: str | None = None,
     expected_run_id: str | None = None,
     codex_events: dict[str, Any] | None = None,
@@ -1736,22 +1824,23 @@ def goal_plus_incomplete_reason(
             )
         if expected_lease and run.get("worker_host") == "pi-rpc":
             jobs = run.get("pi_pool_jobs") or []
-            unsatisfied = [
-                str(job.get("job_id") or job.get("candidate_id") or "unknown")
-                for job in jobs
-                if job.get("status") != "completed"
-                or not isinstance(job.get("lease"), dict)
-                or job["lease"].get("satisfied") is not True
-            ]
             if not jobs:
                 return (
                     f"Search run {run.get('run_id')} has no Pi minimum lease evidence"
                 )
-            if unsatisfied:
-                return (
-                    f"Search run {run.get('run_id')} did not satisfy the Pi minimum lease "
-                    "for jobs: " + ", ".join(unsatisfied)
-                )
+            if require_satisfied_pi_minimum_lease:
+                unsatisfied = [
+                    str(job.get("job_id") or job.get("candidate_id") or "unknown")
+                    for job in jobs
+                    if job.get("status") != "completed"
+                    or not isinstance(job.get("lease"), dict)
+                    or job["lease"].get("satisfied") is not True
+                ]
+                if unsatisfied:
+                    return (
+                        f"Search run {run.get('run_id')} did not satisfy the Pi minimum lease "
+                        "for jobs: " + ", ".join(unsatisfied)
+                    )
     if expected_concurrency is not None:
         if codex_events is not None:
             spawned_workers = int(
@@ -2012,6 +2101,256 @@ def _goal_plus_runtime_types() -> tuple[type[Any], type[Any], type[Any]]:
     return FileGoalPlusRuntime, FileSearchRuntime, SearchTools
 
 
+def _ensure_controller_search_work_item(
+    goal_runtime: Any, goal_plus_id: str, run_id: str
+) -> str:
+    """Return the auditable work item that controller closeout will resolve."""
+    goal = goal_runtime.status(goal_plus_id)
+    current_items = [
+        item
+        for item in goal.work_items
+        if item.goal_revision == goal.goal_revision
+    ]
+    linked_items = [
+        item
+        for item in current_items
+        if item.route == "search" and item.search_run_id == run_id
+    ]
+    if len(linked_items) > 1:
+        raise RuntimeError(
+            f"Goal Plus {goal_plus_id} has multiple work items for Search run {run_id}"
+        )
+    if linked_items:
+        linked_item = linked_items[0]
+        if linked_item.status in {"planned", "blocked", "failed"}:
+            goal_runtime.record_work_event(
+                goal_plus_id,
+                linked_item.work_item_id,
+                "search_routed",
+                "Controller closeout resumed the linked fixed-budget Search run.",
+                search_run_id=run_id,
+                evidence=[{"type": "search_run", "run_id": run_id}],
+            )
+        return linked_item.work_item_id
+
+    unbound_search_items = [
+        item
+        for item in current_items
+        if item.route == "search"
+        and item.status in {"planned", "blocked", "failed"}
+        and item.search_run_id is None
+    ]
+    if len(unbound_search_items) > 1:
+        raise RuntimeError(
+            f"Goal Plus {goal_plus_id} has ambiguous unbound Search work items"
+        )
+    if unbound_search_items:
+        work_item_id = unbound_search_items[0].work_item_id
+    else:
+        # A goal-plus agent can drive the fixed-budget Search run through an
+        # ordinary "main" work item whose scope names the run, then complete the
+        # goal on its own before controller closeout runs. In that terminal state
+        # the goal is no longer active, so the controller cannot upsert a search
+        # item or record a search_routed event (both require status=="active").
+        # Reuse that accepted main work item as the auditable item instead.
+        scope_matched = [
+            item
+            for item in current_items
+            if item.status == "accepted"
+            and run_id in item.scope
+        ]
+        if len(scope_matched) > 1:
+            raise RuntimeError(
+                f"Goal Plus {goal_plus_id} has multiple accepted work items "
+                f"scoping Search run {run_id}"
+            )
+        if len(scope_matched) == 1:
+            return scope_matched[0].work_item_id
+        # The host may interrupt the agent before it drafts any work item plan,
+        # leaving an active goal with an empty current-revision work list (the
+        # common early-stop-on-live-pass shape). The controller is authoritative
+        # for the drained Search run, so a dedicated auditable item is created
+        # now. The goal is active in this shape, so upsert is legal here.
+        work_item_id = "benchmark_search"
+        goal_runtime.upsert_work_items(
+            goal_plus_id,
+            [
+                {
+                    "work_item_id": work_item_id,
+                    "title": "Run benchmark Search",
+                    "objective": (
+                        "Run the fixed-budget candidate search and let controller closeout "
+                        "apply the frozen selection and promotion contract."
+                    ),
+                    "route": "search",
+                    "depends_on": [],
+                    "scope": [run_id],
+                    "acceptance": [
+                        "The linked Search run is selected and promoted",
+                        "The controller promotion verifier passes",
+                        "The Goal Plus Search result is recorded",
+                    ],
+                    "required": True,
+                }
+            ],
+        )
+
+    goal_runtime.record_work_event(
+        goal_plus_id,
+        work_item_id,
+        "search_routed",
+        "Controller closeout adopted the linked fixed-budget Search run.",
+        search_run_id=run_id,
+        evidence=[{"type": "search_run", "run_id": run_id}],
+    )
+    return work_item_id
+
+
+def _accept_controller_search_work_item(
+    goal_runtime: Any,
+    goal_plus_id: str,
+    work_item_id: str,
+    *,
+    run_id: str,
+    candidate_id: str,
+    selected_score: Any,
+) -> None:
+    evidence = [
+        {
+            "type": "controller_closeout",
+            "run_id": run_id,
+            "selected_candidate_id": candidate_id,
+            "selected_score": selected_score,
+        }
+    ]
+    goal = goal_runtime.status(goal_plus_id)
+    item = next(
+        item
+        for item in goal.work_items
+        if item.goal_revision == goal.goal_revision
+        and item.work_item_id == work_item_id
+    )
+    if item.status == "active":
+        goal_runtime.record_work_event(
+            goal_plus_id,
+            work_item_id,
+            "result",
+            "Controller selected and promoted the verifier-backed Search result.",
+            search_run_id=run_id,
+            evidence=evidence,
+        )
+        goal = goal_runtime.status(goal_plus_id)
+        item = next(
+            item
+            for item in goal.work_items
+            if item.goal_revision == goal.goal_revision
+            and item.work_item_id == work_item_id
+        )
+    if item.status == "result_ready":
+        goal_runtime.record_work_event(
+            goal_plus_id,
+            work_item_id,
+            "accepted",
+            "Controller verified the Search selection, promotion, and recorded result.",
+            search_run_id=run_id,
+            evidence=evidence,
+        )
+    elif item.status != "accepted":
+        raise RuntimeError(
+            f"Goal Plus work item {work_item_id} cannot be accepted from {item.status}"
+        )
+
+
+def _accept_controller_closeout_items(
+    goal_runtime: Any,
+    goal_plus_id: str,
+    *,
+    run_id: str,
+    selected_candidate_id: str,
+    selected_score: Any,
+) -> None:
+    """Resolve leftover orchestration items before the goal completes.
+
+    A goal-plus agent may draft a terminal "closeout" (or similar) main-route
+    work item that it never executes -- it depends on the Search run that the
+    controller owns.  The controller is authoritative for that item after the
+    frozen budget ends, so it drives the placeholder to accepted, which lets the
+    evaluation gate produce a real PASS / NOT_PASS instead of refusing to
+    complete.  Subagent route items are left untouched: they represent live
+    concurrent work that must not be swallowed.
+    """
+    goal = goal_runtime.status(goal_plus_id)
+    current_items = [
+        item
+        for item in goal.work_items
+        if item.goal_revision == goal.goal_revision
+    ]
+    unresolved = [
+        item
+        for item in current_items
+        if item.route != "search"
+        and item.route != "subagent"
+        and item.status != "accepted"
+        and not (not item.required and item.status in {"cancelled", "superseded"})
+    ]
+    for item in unresolved:
+        work_item_id = item.work_item_id
+        evidence = [
+            {
+                "type": "controller_closeout",
+                "run_id": run_id,
+                "selected_candidate_id": selected_candidate_id,
+                "selected_score": selected_score,
+            }
+        ]
+        if item.status in {"planned", "blocked", "failed"}:
+            goal_runtime.record_work_event(
+                goal_plus_id,
+                work_item_id,
+                "dispatch",
+                "Controller closeout adopted the orchestration placeholder.",
+                search_run_id=run_id,
+                evidence=evidence,
+            )
+            goal = goal_runtime.status(goal_plus_id)
+            item = next(
+                item
+                for item in goal.work_items
+                if item.goal_revision == goal.goal_revision
+                and item.work_item_id == work_item_id
+            )
+        if item.status == "active":
+            goal_runtime.record_work_event(
+                goal_plus_id,
+                work_item_id,
+                "result",
+                "Controller closeout resolved the orchestration placeholder.",
+                search_run_id=run_id,
+                evidence=evidence,
+            )
+            goal = goal_runtime.status(goal_plus_id)
+            item = next(
+                item
+                for item in goal.work_items
+                if item.goal_revision == goal.goal_revision
+                and item.work_item_id == work_item_id
+            )
+        if item.status == "result_ready":
+            goal_runtime.record_work_event(
+                goal_plus_id,
+                work_item_id,
+                "accepted",
+                "Controller closeout accepted the orchestration placeholder.",
+                search_run_id=run_id,
+                evidence=evidence,
+            )
+        elif item.status != "accepted":
+            raise RuntimeError(
+                f"Goal Plus work item {work_item_id} cannot be accepted "
+                f"from {item.status}"
+            )
+
+
 def _expected_public_gate_selection(run_path: Path) -> dict[str, Any]:
     expected: dict[str, Any] | None = None
     compliant_scores: set[float] = set()
@@ -2084,7 +2423,9 @@ def _validate_existing_public_gate_selection(
 
 
 def finalize_goal_plus_search(
-    workspace: Path, deterministic_public_gate: bool = False
+    workspace: Path,
+    deterministic_public_gate: bool = False,
+    verify_unsettled_candidates: bool = True,
 ) -> dict[str, Any]:
     """Controller-owned drain, selection, and promotion after agent execution."""
     FileGoalPlusRuntime, FileSearchRuntime, SearchTools = _goal_plus_runtime_types()
@@ -2145,17 +2486,18 @@ def finalize_goal_plus_search(
                     else:
                         selected = _existing_selection(run_path)
                         if selected is None:
-                            for candidate_path in candidate_paths:
-                                candidate = load_json(candidate_path)
-                                if not candidate.get("iterations"):
-                                    tools.search_run_verifier(
-                                        run_id,
-                                        candidate["candidate_id"],
-                                        hypothesis="controller post-deadline final verification",
-                                    )
-                                    verified_in_closeout.append(
-                                        candidate["candidate_id"]
-                                    )
+                            if verify_unsettled_candidates:
+                                for candidate_path in candidate_paths:
+                                    candidate = load_json(candidate_path)
+                                    if not candidate.get("iterations"):
+                                        tools.search_run_verifier(
+                                            run_id,
+                                            candidate["candidate_id"],
+                                            hypothesis="controller post-deadline final verification",
+                                        )
+                                        verified_in_closeout.append(
+                                            candidate["candidate_id"]
+                                        )
                             selection = tools.search_select(run_id)
                             candidate_id = selection["selected_candidate_id"]
                             run_data = load_json(run_path)
@@ -2197,6 +2539,54 @@ def finalize_goal_plus_search(
                     )
                 goal = goal_runtime.status(goal_plus_id)
                 if goal.status != "complete":
+                    # Reactivate a terminal-but-incomplete goal so the closeout
+                    # can resolve its outstanding Search work item. An agent that
+                    # promotes a Search run but then sets the goal "blocked"
+                    # (e.g. it gives up during final_audit) leaves the drained
+                    # run's route=search work item unaccepted. Work events --
+                    # which are the ONLY way to accept a work item -- require an
+                    # active goal record, and set_status("complete") in turn
+                    # requires every work item "accepted". So on a blocked goal
+                    # the item can neither be accepted (needs active) nor skipped
+                    # (unresolved), and closeout dead-locks into INFRA_ERROR. The
+                    # controller is authoritative for the drained Search run, so
+                    # it reactivates the goal (blocked -> active is an unguarded,
+                    # side-effect-free transition) to drive that item to accepted.
+                    if goal.status != "active":
+                        goal_runtime.set_status(
+                            goal_plus_id,
+                            status="active",
+                            reason=(
+                                "controller closeout reactivating terminal goal to "
+                                "resolve the drained fixed-budget Search work item"
+                            ),
+                        )
+                    # Drive the controller-owned Search work item to "accepted".
+                    # The "stop search on live pass" early-stop path leaves the
+                    # route=search work item "active" (result acceptance is
+                    # deliberately deferred to this closeout), and
+                    # _accept_controller_closeout_items skips route=search items,
+                    # so without this the item stays unresolved and set_status
+                    # ("complete") raises "unresolved work items: ...=active",
+                    # misclassifying a verified live pass as INFRA_ERROR.
+                    search_work_item_id = _ensure_controller_search_work_item(
+                        goal_runtime, goal_plus_id, run_id
+                    )
+                    _accept_controller_search_work_item(
+                        goal_runtime,
+                        goal_plus_id,
+                        search_work_item_id,
+                        run_id=run_id,
+                        candidate_id=candidate_id,
+                        selected_score=selection.get("selected_score"),
+                    )
+                    _accept_controller_closeout_items(
+                        goal_runtime,
+                        goal_plus_id,
+                        run_id=run_id,
+                        selected_candidate_id=candidate_id,
+                        selected_score=selection.get("selected_score"),
+                    )
                     goal_runtime.set_status(
                         goal_plus_id,
                         status="complete",
@@ -2292,10 +2682,13 @@ def run_controlled(
     wall_time_seconds: int,
     hard_kill_grace_seconds: int,
     recorded_command: list[str] | None = None,
+    stop_predicate: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     started_at = utc_now()
     started = time.monotonic()
     soft_stopped = False
+    deadline_reached = False
+    early_stop_triggered = False
     hard_killed = False
     controller_interrupted = False
     with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
@@ -2312,19 +2705,28 @@ def run_controlled(
         if stdin_text is not None and process.stdin is not None:
             process.stdin.write(stdin_text)
             process.stdin.close()
+        stop_reason: str | None = None
+        deadline = started + wall_time_seconds
         try:
-            process.wait(timeout=wall_time_seconds)
-        except subprocess.TimeoutExpired:
-            soft_stopped = True
-            send_soft_stop(process)
-            try:
-                process.wait(timeout=hard_kill_grace_seconds)
-            except subprocess.TimeoutExpired:
-                hard_killed = True
-                send_hard_stop(process)
-                process.wait()
+            while process.poll() is None:
+                if stop_predicate is not None and stop_predicate():
+                    early_stop_triggered = True
+                    stop_reason = "early_stop"
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    deadline_reached = True
+                    stop_reason = "deadline"
+                    break
+                try:
+                    process.wait(timeout=min(0.2, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
         except KeyboardInterrupt:
             controller_interrupted = True
+            stop_reason = "controller_interrupt"
+
+        if stop_reason is not None:
             soft_stopped = True
             send_soft_stop(process)
             try:
@@ -2339,7 +2741,8 @@ def run_controlled(
         "finished_at": utc_now(),
         "duration_seconds": time.monotonic() - started,
         "returncode": process.returncode,
-        "deadline_reached": soft_stopped,
+        "deadline_reached": deadline_reached,
+        "early_stop_triggered": early_stop_triggered,
         "controller_interrupted": controller_interrupted,
         "soft_stop_signal": "SIGTERM" if soft_stopped else None,
         "hard_killed": hard_killed,
@@ -2965,6 +3368,17 @@ def execute(args: argparse.Namespace) -> int:
             control["result_incomplete_reason"] = (
                 f"{method} process group exceeded the shutdown grace"
             )
+        early_stop_cfg = (goal_plus_config or {}).get("early_stop") or {}
+        target_score = early_stop_cfg.get("target_score")
+        settled = goal_plus_settled_selection(control["goal_plus"], target_score=target_score)
+        if settled:
+            # The run materialized a real, committed selection/promotion (or a
+            # verified live pass) before the host stopped the pi workers.  It
+            # carries a genuine PASS / NOT_PASS score, so the interrupted lease
+            # and reduced worker evidence must not reclassify it as INFRA.
+            control["minimum_lease_completion_waived"] = True
+            if control.get("early_stop_triggered"):
+                control["early_stop_completion_verified"] = True
         goal_reason = goal_plus_incomplete_reason(
             control["goal_plus"],
             expected_concurrency=budget["concurrency"],
@@ -2978,6 +3392,8 @@ def execute(args: argparse.Namespace) -> int:
                 1 if budget.get("worker_min_runtime_seconds") is not None else None
             ),
             expected_search_scheduler=search_scheduler,
+            minimum_worker_verified_candidates=(1 if settled else None),
+            require_satisfied_pi_minimum_lease=(not settled),
         )
         if goal_reason and not control.get("result_incomplete_reason"):
             control["result_incomplete_reason"] = goal_reason
@@ -2989,14 +3405,14 @@ def execute(args: argparse.Namespace) -> int:
                 )
             )
 
-    expected_deadline_stop = (
-        control.get("deadline_reached")
+    expected_controlled_stop = (
+        (control.get("deadline_reached") or control.get("early_stop_triggered"))
         and not control.get("hard_killed")
         and control.get("returncode") in {0, -signal.SIGTERM, 128 + signal.SIGTERM}
     )
     if (
         control.get("returncode", 0) != 0
-        and not expected_deadline_stop
+        and not expected_controlled_stop
         and not control.get("result_incomplete_reason")
     ):
         control["result_incomplete_reason"] = (
@@ -3068,6 +3484,19 @@ def repair_closeout(args: argparse.Namespace) -> int:
     control["evidence_annotator_usage"] = collect_evidence_annotator_usage(
         workspace
     )
+    early_stop_cfg = (manifest.get("goal_plus_config") or {}).get("early_stop") or {}
+    target_score = early_stop_cfg.get("target_score")
+    settled = goal_plus_settled_selection(
+        control["goal_plus"], target_score=target_score
+    )
+    if settled:
+        # A fixed-budget Search run that materialized a committed selection or
+        # a verified live pass before the host stopped the workers is a real
+        # PASS / NOT_PASS, not INFRA.  The relaxation below mirrors the main
+        # execute() gate so repair_closeout does not re-flag it incomplete.
+        control["minimum_lease_completion_waived"] = True
+        if control.get("early_stop_triggered"):
+            control["early_stop_completion_verified"] = True
     reason = goal_plus_incomplete_reason(
         control["goal_plus"],
         expected_concurrency=manifest["budget"]["concurrency"],
@@ -3085,6 +3514,8 @@ def repair_closeout(args: argparse.Namespace) -> int:
         expected_search_scheduler=search_scheduler_from_json(
             (manifest.get("goal_plus_config") or {}).get("search_scheduler")
         ),
+        minimum_worker_verified_candidates=(1 if settled else None),
+        require_satisfied_pi_minimum_lease=(not settled),
     )
     if reason is None and not control.get("hard_killed"):
         control.pop("result_incomplete_reason", None)

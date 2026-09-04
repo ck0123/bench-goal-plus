@@ -17,10 +17,13 @@ The adapter:
 - exposes only the `format_valid` public gate, which checks direct regular
   JSON files and the public finding schema without loading the official scorer
   or ground truth;
-- selects the lowest candidate id with public `process_passed` evidence and
-  that candidate's latest compliant iteration, then runs
-  `scripts/score_submission.py --release 0.1.0 --track tp` exactly once from
-  the trusted controller after selection, promotion, and Goal Plus closeout;
+- uses the lowest candidate id and its latest compliant iteration only for the
+  public closeout selection. After all agents exit and closeout completes, the
+  trusted controller runs the official `score_submission.py` scorer over every
+  publicly compliant committed iteration using release `0.1.0` and track `tp`,
+  caches identical artifact snapshots, and publishes the highest-F1 result. F1
+  ties choose the lowest candidate id and then that candidate's latest tied
+  iteration;
 - requires Goal Plus Pi workers to use the adapter-declared Bubblewrap policy:
   only the candidate workspace is mounted, with `source/` read-only, while
   scorer, ground-truth, full histories, official results, and controller runtime
@@ -29,9 +32,10 @@ The adapter:
   shared-tool Views;
 - reports the official final `f1`, maximize, only after closeout; the raw
   precision/recall/TP/FP/FN payload is preserved under `zsoft_score` in the
-  controller-owned final report. Intermediate candidate rounds are never sent
-  to the official scorer. A second final claim is rejected before the scorer is
-  invoked.
+  controller-owned final report. There is no aggregate one-call limit: each
+  unique immutable snapshot is scored once in an isolated controller runtime.
+  Per-iteration scores and selection provenance stay outside the worker
+  workspace in `posthoc-candidate-scores.json` and `final-eval.json`.
 
 Constants:
 

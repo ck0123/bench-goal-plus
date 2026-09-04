@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from bench_artifacts import read_json as load_json  # noqa: E402
-from bench_artifacts import utc_now, write_json  # noqa: E402
+from bench_artifacts import utc_now, write_json, write_json_atomic  # noqa: E402
 from bench_goal_plus.upstreams import (  # noqa: E402
     upstream_checkout_path,
     upstream_source_path,
@@ -231,6 +234,81 @@ def add_runtime_prepare_arguments(
     parser.add_argument("--venv", type=Path, default=DEFAULT_VENV)
 
 
+def _normalize_early_stop_contract(
+    value: Any,
+    *,
+    process_metric: str,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    required = {
+        "enabled",
+        "metric_name",
+        "target_score",
+        "require_process_passed",
+        "require_git_artifact_clean",
+        "require_settled_git_head",
+        "reject_touched_denied_files",
+        "reject_changed_outside_allowed",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ValueError("Goal Plus early-stop contract has an invalid schema")
+    if value["enabled"] is not True:
+        raise ValueError("Goal Plus early-stop contract must be enabled when present")
+    if value["metric_name"] != process_metric:
+        raise ValueError("Goal Plus early-stop metric must match the process metric")
+    if type(value["target_score"]) not in {int, float} or not math.isfinite(
+        float(value["target_score"])
+    ):
+        raise ValueError("Goal Plus early-stop target score must be finite")
+    for field in required - {"metric_name", "target_score"}:
+        if value[field] is not True:
+            raise ValueError(f"Goal Plus early-stop contract requires {field}=true")
+    normalized = dict(value)
+    normalized["target_score"] = float(value["target_score"])
+    return normalized
+
+
+def _normalize_posthoc_selection_contract(
+    value: Any,
+    *,
+    primary_metric: str,
+    direction: str,
+    controller_only: bool,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    required = {
+        "enabled",
+        "metric_name",
+        "metric_direction",
+        "candidate_scope",
+        "tie_break",
+        "timing",
+        "visible_to_workers",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ValueError("Goal Plus posthoc-selection contract has an invalid schema")
+    expected = {
+        "enabled": True,
+        "metric_name": primary_metric,
+        "metric_direction": direction,
+        "candidate_scope": "all_publicly_compliant_iterations",
+        "tie_break": "lowest_candidate_id_then_latest_iteration",
+        "timing": "after_agent_exit_and_controller_closeout",
+        "visible_to_workers": False,
+    }
+    if value != expected:
+        raise ValueError(
+            "Goal Plus posthoc-selection contract does not match the supported policy"
+        )
+    if not controller_only:
+        raise ValueError(
+            "Goal Plus posthoc selection requires controller-only official evaluation"
+        )
+    return dict(value)
+
+
 def configure_adapter(
     benchmark_id: str,
     *,
@@ -247,13 +325,17 @@ def configure_adapter(
     global ADAPTER_CONTRACT
     global ARTIFACT_NAME, BENCHMARK_NAME, CASE_SET_DESCRIPTION
     global CODEX_SANDBOX, DIRECTION, GOAL_PLUS_MCP_ENV_VARS
-    global CONTROLLER_ONLY_OFFICIAL_EVALUATION, GOAL_PLUS_PROCESS_METRIC
+    global CONTROLLER_ONLY_OFFICIAL_EVALUATION, EVALUATION_MODE
+    global GOAL_PLUS_PROCESS_METRIC, REQUIRES_PROTECTED_PI_WORKERS
+    global GOAL_PLUS_EARLY_STOP_CONTRACT, GOAL_PLUS_POSTHOC_SELECTION_CONTRACT
     global PI_WORKER_SANDBOX
     global PRIMARY_METRIC, TASK_ID, UPSTREAM_KEY
     global LOCAL_SOURCE_RELATIVE, UPSTREAM_SUBDIR
     global OFFICIAL_BENCHMARK_COMPARABLE
     global VERIFIER_TIMEOUT_SECONDS
+    global PROCESS_VERIFIER_TIMEOUT_SECONDS
     global evaluate_workspace, git_commit, materialize_workspace
+    global validate_runtime_assets
     ARTIFACT_NAME = module.ARTIFACT_NAME
     BENCHMARK_NAME = module.BENCHMARK_NAME
     CASE_SET_DESCRIPTION = module.CASE_SET_DESCRIPTION
@@ -264,8 +346,22 @@ def configure_adapter(
     CONTROLLER_ONLY_OFFICIAL_EVALUATION = getattr(
         module, "CONTROLLER_ONLY_OFFICIAL_EVALUATION", False
     )
+    EVALUATION_MODE = getattr(module, "EVALUATION_MODE", "visible")
+    REQUIRES_PROTECTED_PI_WORKERS = getattr(
+        module, "REQUIRES_PROTECTED_PI_WORKERS", False
+    )
     GOAL_PLUS_PROCESS_METRIC = getattr(
         module, "GOAL_PLUS_PROCESS_METRIC", module.PRIMARY_METRIC
+    )
+    GOAL_PLUS_EARLY_STOP_CONTRACT = _normalize_early_stop_contract(
+        getattr(module, "GOAL_PLUS_EARLY_STOP_CONTRACT", None),
+        process_metric=GOAL_PLUS_PROCESS_METRIC,
+    )
+    GOAL_PLUS_POSTHOC_SELECTION_CONTRACT = _normalize_posthoc_selection_contract(
+        getattr(module, "GOAL_PLUS_POSTHOC_SELECTION_CONTRACT", None),
+        primary_metric=module.PRIMARY_METRIC,
+        direction=module.DIRECTION,
+        controller_only=CONTROLLER_ONLY_OFFICIAL_EVALUATION,
     )
     PRIMARY_METRIC = module.PRIMARY_METRIC
     TASK_ID = module.TASK_ID
@@ -276,9 +372,15 @@ def configure_adapter(
         module, "OFFICIAL_BENCHMARK_COMPARABLE", True
     )
     VERIFIER_TIMEOUT_SECONDS = module.VERIFIER_TIMEOUT_SECONDS
+    PROCESS_VERIFIER_TIMEOUT_SECONDS = getattr(
+        module, "PROCESS_VERIFIER_TIMEOUT_SECONDS", VERIFIER_TIMEOUT_SECONDS
+    )
     evaluate_workspace = module.evaluate_workspace
     git_commit = module.git_commit
     materialize_workspace = module.materialize_workspace
+    validate_runtime_assets = getattr(
+        module, "validate_runtime_assets", lambda _source_root: None
+    )
     ADAPTER_CONTRACT = loaded.manifest_contract()
 
 
@@ -287,12 +389,15 @@ configure_adapter("heurigym")
 
 def validate_controller_only_method(method: str) -> None:
     if (
-        CONTROLLER_ONLY_OFFICIAL_EVALUATION
+        (
+            CONTROLLER_ONLY_OFFICIAL_EVALUATION
+            or REQUIRES_PROTECTED_PI_WORKERS
+        )
         and method not in CONTROLLER_ONLY_METHODS
     ):
         supported = ", ".join(sorted(CONTROLLER_ONLY_METHODS))
         raise ValueError(
-            "controller-only official evaluation rejects method "
+            "protected benchmark evaluation rejects method "
             f"{method!r}; supported methods: {supported}"
         )
 
@@ -531,6 +636,8 @@ def prepare(args: argparse.Namespace) -> int:
         if checkout_dirty(path):
             raise RuntimeError(f"managed {name} checkout has local changes: {path}")
 
+    validate_runtime_assets(benchmark_root)
+
     run_dir = (args.run_dir or default_run_dir(args.method)).expanduser().absolute()
     run_dir.mkdir(parents=True, exist_ok=False)
     workspaces: list[Path] = []
@@ -596,12 +703,15 @@ def prepare(args: argparse.Namespace) -> int:
             worker_runtime_seconds=args.worker_runtime_seconds,
             worker_min_runtime_seconds=args.worker_min_runtime_seconds,
             verifier_timeout_seconds=VERIFIER_TIMEOUT_SECONDS,
+            process_verifier_timeout_seconds=PROCESS_VERIFIER_TIMEOUT_SECONDS,
             coordination_condition=condition.condition_id if condition else None,
             search_space_mode=condition.search_space_mode if condition else None,
             shared_dir_enabled=getattr(args, "shared_dir", False),
             controller_only_official_evaluation=(
                 CONTROLLER_ONLY_OFFICIAL_EVALUATION
             ),
+            evaluation_mode=EVALUATION_MODE,
+            early_stop_contract=GOAL_PLUS_EARLY_STOP_CONTRACT,
         )
         (workspace / "GOAL.md").write_text(goal_prompt)
         workspaces.append(workspace)
@@ -634,7 +744,11 @@ def prepare(args: argparse.Namespace) -> int:
                 worker_model=worker_model,
                 annotator_model=worker_model,
                 workspace_backend="git_worktree",
-                promotion_mode="apply",
+                promotion_mode=(
+                    "artifact_only"
+                    if CONTROLLER_ONLY_OFFICIAL_EVALUATION
+                    else "apply"
+                ),
             ),
             **(
                 {"search_scheduler": search_scheduler.as_dict()}
@@ -648,6 +762,8 @@ def prepare(args: argparse.Namespace) -> int:
             "controller_only_official_evaluation": (
                 CONTROLLER_ONLY_OFFICIAL_EVALUATION
             ),
+            "early_stop": GOAL_PLUS_EARLY_STOP_CONTRACT,
+            "posthoc_selection": GOAL_PLUS_POSTHOC_SELECTION_CONTRACT,
             "artifact_name": ARTIFACT_NAME,
             "artifact_is_directory": (workspace / ARTIFACT_NAME).is_dir(),
             "shared_dir_enabled": getattr(args, "shared_dir", False),
@@ -763,6 +879,10 @@ def prepare(args: argparse.Namespace) -> int:
             "controller_only_official_evaluation": (
                 CONTROLLER_ONLY_OFFICIAL_EVALUATION
             ),
+            "evaluation_mode": EVALUATION_MODE,
+            "requires_protected_pi_workers": REQUIRES_PROTECTED_PI_WORKERS,
+            "goal_plus_early_stop": GOAL_PLUS_EARLY_STOP_CONTRACT,
+            "goal_plus_posthoc_selection": GOAL_PLUS_POSTHOC_SELECTION_CONTRACT,
             "direction": DIRECTION,
             "codex_sandbox": CODEX_SANDBOX,
             "upstream_key": UPSTREAM_KEY,
@@ -892,6 +1012,169 @@ def controller_only_official_evaluation(manifest: dict[str, Any]) -> bool:
     return prepared
 
 
+def goal_plus_early_stop_contract(
+    manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    task = manifest.get("task") or {}
+    if "goal_plus_early_stop" not in task:
+        if GOAL_PLUS_EARLY_STOP_CONTRACT is None:
+            return None
+        raise RuntimeError("prepared task is missing its Goal Plus early-stop contract")
+    prepared = task.get("goal_plus_early_stop")
+    if prepared != GOAL_PLUS_EARLY_STOP_CONTRACT:
+        raise RuntimeError(
+            "prepared Goal Plus early-stop contract does not match the adapter"
+        )
+    return prepared
+
+
+def goal_plus_posthoc_selection_contract(
+    manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    task = manifest.get("task") or {}
+    if "goal_plus_posthoc_selection" not in task:
+        if GOAL_PLUS_POSTHOC_SELECTION_CONTRACT is None:
+            return None
+        raise RuntimeError(
+            "prepared task is missing its Goal Plus posthoc-selection contract"
+        )
+    prepared = task.get("goal_plus_posthoc_selection")
+    if prepared != GOAL_PLUS_POSTHOC_SELECTION_CONTRACT:
+        raise RuntimeError(
+            "prepared Goal Plus posthoc-selection contract does not match the adapter"
+        )
+    return prepared
+
+
+def _iteration_satisfies_early_stop(
+    iteration: Any,
+    contract: dict[str, Any],
+) -> bool:
+    if not isinstance(iteration, dict):
+        return False
+    score = iteration.get("score")
+    if type(score) not in {int, float} or not math.isfinite(float(score)):
+        return False
+    if float(score) != float(contract["target_score"]):
+        return False
+    if iteration.get("process_passed") is not True:
+        return False
+    if iteration.get("git_artifact_clean") is not True:
+        return False
+    if iteration.get("touched_denied_files") is not False:
+        return False
+    if iteration.get("changed_outside_allowed") is not False:
+        return False
+    if iteration.get("disposition") not in {"keep", "retain"}:
+        return False
+    git_head = iteration.get("git_head")
+    ledger_head = iteration.get("ledger_git_head")
+    settled_head = iteration.get("workspace_git_head_after_settlement")
+    return (
+        isinstance(git_head, str)
+        and bool(git_head)
+        and isinstance(ledger_head, str)
+        and bool(ledger_head)
+        and settled_head == ledger_head
+    )
+
+
+def goal_plus_early_stop_reached(
+    workspace: Path,
+    contract: dict[str, Any],
+) -> bool:
+    workspace = workspace.resolve()
+    root = workspace / ".gp"
+    active_states = {
+        "running",
+        "waiting_for_workers",
+        "evaluating",
+        "selecting",
+        "selection_blocked",
+        "ready_to_promote",
+    }
+    for run_path in sorted((root / "runs").glob("*/run.json")):
+        if run_path.is_symlink() or not run_path.is_file():
+            continue
+        try:
+            run = load_json(run_path)
+            if not isinstance(run, dict):
+                continue
+            frozen_spec_id = run.get("frozen_spec_id")
+            frozen = load_json(root / "specs" / frozen_spec_id / "frozen_spec.json")
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        spec = frozen.get("spec") if isinstance(frozen, dict) else None
+        try:
+            source_matches = Path(run.get("source_path", "")).resolve() == workspace
+        except (OSError, RuntimeError):
+            source_matches = False
+        if (
+            run.get("run_id") != run_path.parent.name
+            or run.get("state") not in active_states
+            or not source_matches
+            or not isinstance(spec, dict)
+            or spec.get("metric_name") != contract["metric_name"]
+        ):
+            continue
+        for path in sorted((run_path.parent / "candidates").glob("*/candidate.json")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                candidate = load_json(path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                not isinstance(candidate, dict)
+                or candidate.get("candidate_id") != path.parent.name
+                or not isinstance(candidate.get("iterations"), list)
+            ):
+                continue
+            if any(
+                _iteration_satisfies_early_stop(iteration, contract)
+                for iteration in candidate["iterations"]
+            ):
+                return True
+    return False
+
+
+def verified_early_stop_completion(
+    control: dict[str, Any],
+    final: dict[str, Any] | None,
+    contract: dict[str, Any] | None,
+) -> bool:
+    """Confirm that a controlled live-pass stop survived official final scoring."""
+    if (
+        not isinstance(contract, dict)
+        or contract.get("enabled") is not True
+        or control.get("early_stop_triggered") is not True
+        or control.get("deadline_reached") is not False
+        or control.get("controller_interrupted") is not False
+        or control.get("hard_killed") is not False
+        or control.get("soft_stop_signal") != "SIGTERM"
+        or control.get("returncode")
+        not in {0, -signal.SIGTERM, 128 + signal.SIGTERM}
+        or not isinstance(final, dict)
+        or final.get("valid") is not True
+        or final.get("mode") != "final"
+    ):
+        return False
+    primary = final.get("primary_metric")
+    if (
+        not isinstance(primary, dict)
+        or primary.get("name") != contract.get("metric_name")
+    ):
+        return False
+    score = primary.get("value")
+    return (
+        type(score) in {int, float}
+        and math.isfinite(float(score))
+        and type(contract.get("target_score")) in {int, float}
+        and math.isfinite(float(contract["target_score"]))
+        and float(score) == float(contract["target_score"])
+    )
+
+
 @contextmanager
 def controller_subprocess_environment(
     *, runtime_bin_dir: Path, verifier_tmpdir: Path
@@ -928,6 +1211,461 @@ def copy_artifact(source: Path, destination: Path) -> None:
         shutil.copytree(source, destination)
         return
     shutil.copy2(source, destination)
+
+
+def _publicly_compliant_iteration(iteration: Any) -> bool:
+    """Match the frozen public-gate eligibility rules without using F1."""
+    if not isinstance(iteration, dict):
+        return False
+    score = iteration.get("score")
+    return (
+        iteration.get("process_passed") is True
+        and type(iteration.get("iteration")) is int
+        and iteration["iteration"] >= 1
+        and isinstance(iteration.get("git_head"), str)
+        and iteration.get("git_artifact_clean") is True
+        and not iteration.get("touched_denied_files", False)
+        and not iteration.get("changed_outside_allowed", False)
+        and iteration.get("disposition") not in {"discard", "failure"}
+        and type(score) in {int, float}
+        and math.isfinite(float(score))
+    )
+
+
+def _materialize_git_directory(
+    repository: Path,
+    git_head: str,
+    artifact_name: str,
+    destination: Path,
+) -> str:
+    """Materialize a committed direct-file artifact and return its content hash."""
+    if len(git_head) != 40 or any(
+        character not in "0123456789abcdef" for character in git_head
+    ):
+        raise ValueError(f"invalid iteration Git head: {git_head!r}")
+    verified = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "rev-parse",
+            "--verify",
+            f"{git_head}^{{commit}}",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if verified != git_head:
+        raise RuntimeError("iteration Git head did not resolve exactly")
+    tree = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "ls-tree",
+            "-rz",
+            "--full-tree",
+            git_head,
+            "--",
+            artifact_name,
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    destination.mkdir(mode=0o700)
+    digest = hashlib.sha256()
+    digest.update(b"bench-goal-plus-committed-directory-v1\0")
+    seen: set[str] = set()
+    for raw_entry in tree.split(b"\0"):
+        if not raw_entry:
+            continue
+        header, separator, raw_path = raw_entry.partition(b"\t")
+        if not separator:
+            raise RuntimeError("malformed Git tree entry")
+        mode, object_type, object_id = header.decode("ascii").split(" ")
+        path = raw_path.decode("utf-8")
+        relative = Path(path)
+        if (
+            mode not in {"100644", "100755"}
+            or object_type != "blob"
+            or len(relative.parts) != 2
+            or relative.parts[0] != artifact_name
+            or relative.parts[1] in {"", ".", ".."}
+            or relative.parts[1] in seen
+        ):
+            raise RuntimeError(f"unsafe committed artifact entry: {path!r}")
+        name = relative.parts[1]
+        seen.add(name)
+        payload = subprocess.run(
+            ["git", "-C", str(repository), "cat-file", "blob", object_id],
+            capture_output=True,
+            check=True,
+        ).stdout
+        name_bytes = name.encode("utf-8")
+        digest.update(len(name_bytes).to_bytes(8, "big"))
+        digest.update(name_bytes)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+        output = destination / name
+        output.write_bytes(payload)
+        output.chmod(0o600)
+    if not seen:
+        raise RuntimeError("committed artifact directory is empty or missing")
+    return digest.hexdigest()
+
+
+def _posthoc_metric_value(
+    evaluation: dict[str, Any], contract: dict[str, Any]
+) -> float:
+    metric_name = contract["metric_name"]
+    primary = evaluation.get("primary_metric")
+    if (
+        evaluation.get("mode") != "final"
+        or evaluation.get("valid") is not True
+        or evaluation.get("format_valid") is not True
+        or not isinstance(primary, dict)
+        or primary.get("name") != metric_name
+        or primary.get("direction") != contract["metric_direction"]
+    ):
+        raise RuntimeError("official evaluator returned an invalid final result")
+    primary_value = primary.get("value")
+    metric_value = evaluation.get(metric_name)
+    if (
+        type(primary_value) not in {int, float}
+        or type(metric_value) not in {int, float}
+        or not math.isfinite(float(primary_value))
+        or not math.isfinite(float(metric_value))
+        or float(primary_value) != float(metric_value)
+    ):
+        raise RuntimeError("official evaluator returned an invalid primary metric")
+    value = float(metric_value)
+    if metric_name == "f1" and not 0.0 <= value <= 1.0:
+        raise RuntimeError("official evaluator returned an out-of-range F1")
+    score_payload = evaluation.get("zsoft_score")
+    if (
+        metric_name == "f1"
+        and (
+            not isinstance(score_payload, dict)
+            or type(score_payload.get("f1")) not in {int, float}
+            or float(score_payload["f1"]) != value
+        )
+    ):
+        raise RuntimeError("official evaluator F1 payload is inconsistent")
+    return value
+
+
+def finalize_posthoc_official_selection(
+    *,
+    run_dir: Path,
+    workspace: Path,
+    benchmark_root: Path | None,
+    closeout: dict[str, Any],
+    contract: dict[str, Any],
+    worker_shutdown_verified: bool,
+) -> dict[str, Any]:
+    """Score hidden committed snapshots posthoc and publish the best result."""
+    if worker_shutdown_verified is not True:
+        raise RuntimeError("posthoc scoring requires verified worker shutdown")
+    normalized_contract = _normalize_posthoc_selection_contract(
+        contract,
+        primary_metric=PRIMARY_METRIC,
+        direction=DIRECTION,
+        controller_only=True,
+    )
+    if normalized_contract is None:
+        raise RuntimeError("posthoc scoring requires an enabled selection contract")
+    contract = normalized_contract
+    started = time.monotonic()
+    run_dir = Path(run_dir).resolve(strict=True)
+    workspace_input = Path(workspace)
+    if workspace_input.is_symlink():
+        raise RuntimeError("posthoc selection rejects a symlinked workspace")
+    workspace = workspace_input.resolve(strict=True)
+    if workspace == run_dir or run_dir not in workspace.parents:
+        raise RuntimeError("posthoc selection requires a run-owned workspace")
+    if benchmark_root is None:
+        raise RuntimeError("posthoc selection requires a trusted benchmark root")
+    task_path = workspace / "task.json"
+    if task_path.is_symlink() or not task_path.is_file():
+        raise RuntimeError("posthoc selection requires a regular task manifest")
+
+    analysis_parent = run_dir / "controller-runtime/posthoc-selection"
+    analysis_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    attempt_root = Path(
+        tempfile.mkdtemp(prefix="attempt-", dir=str(analysis_parent))
+    )
+    score_record_path = run_dir / "posthoc-candidate-scores.json"
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    cache: dict[str, dict[str, Any]] = {}
+    artifact_paths: dict[tuple[str, str, int], Path] = {}
+    official_calls = 0
+    cache_hits = 0
+    selected: dict[str, Any] | None = None
+
+    try:
+        closeout_runs = closeout.get("runs")
+        if (
+            closeout.get("completed") is not True
+            or not isinstance(closeout_runs, list)
+            or not closeout_runs
+        ):
+            raise RuntimeError("posthoc selection has no closed Search run")
+        run_ids: set[str] = set()
+        for item in closeout_runs:
+            run_id = item.get("run_id") if isinstance(item, dict) else None
+            if (
+                not isinstance(run_id, str)
+                or not run_id
+                or Path(run_id).name != run_id
+                or item.get("final_state") != "promoted"
+            ):
+                raise RuntimeError(
+                    "posthoc selection requires a safely promoted Search run"
+                )
+            run_ids.add(run_id)
+
+        search_runs_root = workspace / ".gp/runs"
+        if search_runs_root.is_symlink() or not search_runs_root.is_dir():
+            raise RuntimeError("posthoc selection requires a real Search runs root")
+        sequence = 0
+        for run_id in sorted(run_ids):
+            search_run = search_runs_root / run_id
+            if search_run.is_symlink() or not search_run.is_dir():
+                raise RuntimeError(f"Search run is unavailable: {run_id}")
+            candidates_root = search_run / "candidates"
+            repositories_root = search_run / "workspace"
+            if (
+                candidates_root.is_symlink()
+                or not candidates_root.is_dir()
+                or repositories_root.is_symlink()
+                or not repositories_root.is_dir()
+            ):
+                raise RuntimeError(f"Search run roots are unavailable: {run_id}")
+            candidate_paths = sorted(
+                candidates_root.glob("*/candidate.json")
+            )
+            if not candidate_paths:
+                raise RuntimeError(f"Search run has no candidates: {run_id}")
+            for candidate_path in candidate_paths:
+                if (
+                    candidate_path.parent.is_symlink()
+                    or candidate_path.is_symlink()
+                    or not candidate_path.is_file()
+                ):
+                    raise RuntimeError("candidate metadata must be a regular file")
+                candidate = load_json(candidate_path)
+                candidate_id = candidate.get("candidate_id")
+                iterations = candidate.get("iterations")
+                if (
+                    not isinstance(candidate_id, str)
+                    or not candidate_id
+                    or candidate_id != candidate_path.parent.name
+                    or not isinstance(iterations, list)
+                ):
+                    raise RuntimeError("candidate iteration metadata is malformed")
+                eligible = [
+                    iteration
+                    for iteration in iterations
+                    if _publicly_compliant_iteration(iteration)
+                ]
+                if not eligible:
+                    continue
+                iteration_numbers = [item["iteration"] for item in eligible]
+                if len(iteration_numbers) != len(set(iteration_numbers)):
+                    raise RuntimeError(
+                        f"candidate {candidate_id} has duplicate eligible iterations"
+                    )
+                repository = repositories_root / candidate_id
+                if repository.is_symlink() or not repository.is_dir():
+                    raise RuntimeError(
+                        f"candidate workspace is unavailable: {candidate_id}"
+                    )
+                for iteration in sorted(
+                    eligible, key=lambda item: item["iteration"]
+                ):
+                    sequence += 1
+                    iteration_number = int(iteration["iteration"])
+                    git_head = str(iteration["git_head"])
+                    row: dict[str, Any] = {
+                        "run_id": run_id,
+                        "candidate_id": candidate_id,
+                        "iteration": iteration_number,
+                        "git_head": git_head,
+                        "public_score": float(iteration["score"]),
+                        "artifact_hash": iteration.get("artifact_hash"),
+                    }
+                    try:
+                        evaluation_workspace = (
+                            attempt_root
+                            / "materialized"
+                            / f"snapshot-{sequence:06d}"
+                            / "workspace"
+                        )
+                        evaluation_workspace.mkdir(mode=0o700, parents=True)
+                        shutil.copy2(task_path, evaluation_workspace / "task.json")
+                        snapshot_sha256 = _materialize_git_directory(
+                            repository,
+                            git_head,
+                            ARTIFACT_NAME,
+                            evaluation_workspace / ARTIFACT_NAME,
+                        )
+                        row["snapshot_sha256"] = snapshot_sha256
+                        artifact_paths[
+                            (run_id, candidate_id, iteration_number)
+                        ] = evaluation_workspace / ARTIFACT_NAME
+                        cached = cache.get(snapshot_sha256)
+                        if cached is None:
+                            official_calls += 1
+                            try:
+                                evaluation = evaluate_with_controller_runtime(
+                                    evaluation_workspace,
+                                    "final",
+                                    attempt_root / "scores" / snapshot_sha256,
+                                    benchmark_root,
+                                )
+                                metric_value = _posthoc_metric_value(
+                                    evaluation, contract
+                                )
+                                cached = {
+                                    "evaluation": evaluation,
+                                    "metric_value": metric_value,
+                                    "error": None,
+                                    "official_evaluator_call": official_calls,
+                                }
+                            except Exception as exc:
+                                cached = {
+                                    "evaluation": None,
+                                    "metric_value": None,
+                                    "error": f"{type(exc).__name__}: {exc}",
+                                    "official_evaluator_call": official_calls,
+                                }
+                            cache[snapshot_sha256] = cached
+                            row["score_source"] = "official_evaluator"
+                        else:
+                            cache_hits += 1
+                            row["score_source"] = "artifact_cache"
+                        row["official_evaluator_call"] = cached[
+                            "official_evaluator_call"
+                        ]
+                        if cached["error"] is not None:
+                            raise RuntimeError(str(cached["error"]))
+                        evaluation = cached["evaluation"]
+                        score_payload = evaluation.get("zsoft_score") or {}
+                        row.update(
+                            {
+                                contract["metric_name"]: cached["metric_value"],
+                                "precision": score_payload.get("precision"),
+                                "recall": score_payload.get("recall"),
+                                "tp": score_payload.get("tp"),
+                                "fp": score_payload.get("fp"),
+                                "fn": score_payload.get("fn"),
+                            }
+                        )
+                    except Exception as exc:
+                        row["error"] = f"{type(exc).__name__}: {exc}"
+                        errors.append(
+                            {
+                                "run_id": run_id,
+                                "candidate_id": candidate_id,
+                                "iteration": iteration_number,
+                                "error": row["error"],
+                            }
+                        )
+                    rows.append(row)
+    except Exception as exc:
+        errors.append(
+            {
+                "scope": "candidate_discovery",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+    if not rows and not errors:
+        errors.append(
+            {
+                "scope": "candidate_selection",
+                "error": "no publicly compliant candidate iteration is available",
+            }
+        )
+
+    if not errors:
+        metric_name = contract["metric_name"]
+        selected_row = min(
+            rows,
+            key=lambda row: (
+                (
+                    float(row[metric_name])
+                    if contract["metric_direction"] == "minimize"
+                    else -float(row[metric_name])
+                ),
+                str(row["candidate_id"]),
+                -int(row["iteration"]),
+                str(row["run_id"]),
+            ),
+        )
+        selected = {
+            "run_id": selected_row["run_id"],
+            "candidate_id": selected_row["candidate_id"],
+            "iteration": selected_row["iteration"],
+            "git_head": selected_row["git_head"],
+            "snapshot_sha256": selected_row["snapshot_sha256"],
+            metric_name: selected_row[metric_name],
+        }
+        snapshot = cache[str(selected_row["snapshot_sha256"])]
+        selected_evaluation = json.loads(json.dumps(snapshot["evaluation"]))
+        selected_evaluation["posthoc_selection"] = {
+            **selected,
+            "candidate_scope": contract["candidate_scope"],
+            "tie_break": contract["tie_break"],
+            "timing": contract["timing"],
+            "visible_to_workers": False,
+            "eligible_iteration_count": len(rows),
+            "unique_artifact_count": len(cache),
+            "official_evaluator_calls": official_calls,
+            "score_record_path": str(score_record_path),
+        }
+        selected_artifact = artifact_paths[
+            (
+                str(selected_row["run_id"]),
+                str(selected_row["candidate_id"]),
+                int(selected_row["iteration"]),
+            )
+        ]
+        try:
+            copy_artifact(selected_artifact, run_dir / ARTIFACT_NAME)
+            write_json_atomic(run_dir / "final-eval.json", selected_evaluation)
+        except Exception as exc:
+            errors.append(
+                {
+                    "scope": "final_publication",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            selected = None
+
+    result = {
+        "schema_version": 1,
+        "completed": not errors and selected is not None,
+        "contract": contract,
+        "timing_scope": "posthoc_after_agent_exit_and_controller_closeout",
+        "visible_to_workers": False,
+        "affects_online_search": False,
+        "worker_shutdown_verified": True,
+        "eligible_iteration_count": len(rows),
+        "unique_artifact_count": len(cache),
+        "official_evaluator_calls": official_calls,
+        "artifact_cache_hits": cache_hits,
+        "selected": selected,
+        "scores": rows,
+        "errors": errors,
+        "attempt_root": str(attempt_root),
+        "score_record_path": str(score_record_path),
+        "duration_seconds": time.monotonic() - started,
+    }
+    write_json_atomic(score_record_path, result)
+    return result
 
 
 def condition_incomplete_reason(
@@ -1292,6 +2030,30 @@ def _goal_plus_agent_wall_time_seconds(
     return agent_wall_time
 
 
+def _pi_pool_cleanup_incomplete_reason(cleanup: Any) -> str | None:
+    if not isinstance(cleanup, list) or not cleanup:
+        return "posthoc selection lacks Pi pool shutdown evidence"
+    for pool in cleanup:
+        if (
+            not isinstance(pool, dict)
+            or pool.get("state") != "closed"
+            or pool.get("active_count") != 0
+            or pool.get("close_timed_out") is not False
+        ):
+            pool_id = pool.get("pool_id") if isinstance(pool, dict) else "unknown"
+            return f"Pi pool {pool_id} was not fully closed before posthoc selection"
+    return None
+
+
+def _posthoc_prerequisite_incomplete_reason(
+    closeout_reason: str | None, pi_pool_cleanup: Any
+) -> str | None:
+    """Preserve an earlier closeout failure before checking pool evidence."""
+    if closeout_reason is not None:
+        return closeout_reason
+    return _pi_pool_cleanup_incomplete_reason(pi_pool_cleanup)
+
+
 def execute_goal_plus(
     manifest: dict[str, Any],
     run_dir: Path,
@@ -1303,6 +2065,17 @@ def execute_goal_plus(
     benchmark_root = Path(benchmark_root_text) if benchmark_root_text else None
     workspace = Path(manifest["workspace"])
     controller_only = controller_only_official_evaluation(manifest)
+    early_stop = goal_plus_early_stop_contract(manifest)
+    posthoc_selection = goal_plus_posthoc_selection_contract(manifest)
+    prepared_goal_config = manifest.get("goal_plus_config") or {}
+    if prepared_goal_config.get("early_stop") != early_stop:
+        raise RuntimeError(
+            "prepared Goal Plus config does not match the task early-stop contract"
+        )
+    if prepared_goal_config.get("posthoc_selection") != posthoc_selection:
+        raise RuntimeError(
+            "prepared Goal Plus config does not match the task posthoc-selection contract"
+        )
     is_pi = manifest.get("method", "goal-plus-codex") == "goal-plus-pi"
     if is_pi and controller_only:
         environment[CONTROLLER_ONLY_CLOSEOUT_ENV] = "1"
@@ -1324,6 +2097,32 @@ def execute_goal_plus(
     )
     write_json(run_dir / "seed-eval.json", seed)
     setup_calls = seed["budget"]["total_claimed"]
+    if seed.get("valid") is not True:
+        return {
+            "returncode": 2,
+            "duration_seconds": seed.get("duration_seconds"),
+            "deadline_reached": False,
+            "hard_killed": False,
+            "controller_interrupted": False,
+            "preflight_failed": True,
+            "result_incomplete_reason": (
+                "seed evaluator did not complete; Agent execution was not started"
+            ),
+            "evaluator_calls": {
+                "total_claimed": setup_calls,
+                "setup_claimed_before_t": setup_calls,
+                "process_verifier_commands": 0,
+                "promotion_verifier_commands": 0,
+                "controller_final_claimed": 0,
+                "coverage": "preflight seed only; Agent and final evaluator not started",
+            },
+            "usage": {
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+                "coverage": "Agent execution was not started after preflight failure",
+            },
+        }
     deadline = datetime.now(timezone.utc) + timedelta(
         seconds=budget["wall_time_seconds"]
     )
@@ -1362,6 +2161,7 @@ def execute_goal_plus(
         worker_runtime_seconds=budget["worker_runtime_seconds"],
         worker_min_runtime_seconds=budget.get("worker_min_runtime_seconds"),
         verifier_timeout_seconds=VERIFIER_TIMEOUT_SECONDS,
+        process_verifier_timeout_seconds=PROCESS_VERIFIER_TIMEOUT_SECONDS,
         coordination_condition=(manifest.get("condition") or {}).get("id"),
         search_space_mode=(manifest.get("condition") or {}).get("search_space_mode"),
         shared_dir_enabled=bool(
@@ -1369,6 +2169,7 @@ def execute_goal_plus(
         ),
         controller_only_official_evaluation=controller_only,
         search_scheduler=search_scheduler,
+        early_stop_contract=early_stop,
     )
     (run_dir / "prompt.md").write_text(prompt)
     reasoning_effort = manifest.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
@@ -1441,6 +2242,11 @@ def execute_goal_plus(
         wall_time_seconds=agent_wall_time_seconds,
         hard_kill_grace_seconds=budget["hard_kill_grace_seconds"],
         recorded_command=recorded_command,
+        stop_predicate=(
+            (lambda: goal_plus_early_stop_reached(workspace, early_stop))
+            if early_stop is not None
+            else None
+        ),
     )
     control["agent_wall_time_seconds"] = agent_wall_time_seconds
     control["controller_closeout_reserve_seconds"] = (
@@ -1456,35 +2262,80 @@ def execute_goal_plus(
             verifier_tmpdir=run_dir / "controller-runtime/goal-plus",
         ):
             closeout = finalize_goal_plus_search(
-                workspace, deterministic_public_gate=controller_only
+                workspace,
+                deterministic_public_gate=controller_only,
+                verify_unsettled_candidates=not control.get(
+                    "early_stop_triggered", False
+                ),
             )
     except Exception as exc:
-        if not controller_only:
-            raise
         closeout = {
             "completed": False,
             "runs": [],
             "error": f"{type(exc).__name__}: {exc}",
         }
     control["goal_plus_controller_closeout"] = closeout
-    controller_only_closeout_reason = (
+    closeout_reason = (
         _controller_only_closeout_incomplete_reason(closeout)
         if controller_only
         else None
     )
-    final: dict[str, Any] | None = None
-    if controller_only_closeout_reason is None:
-        final = evaluate_with_controller_runtime(
-            workspace,
-            "final",
-            run_dir / "controller-runtime/final",
-            benchmark_root,
+    if closeout.get("completed") is not True:
+        closeout_reason = (
+            "Goal Plus controller closeout failed: "
+            + closeout.get("error", "unknown error")
         )
-        write_json(run_dir / "final-eval.json", final)
-        copy_artifact(workspace / ARTIFACT_NAME, run_dir / ARTIFACT_NAME)
+    if is_pi and posthoc_selection is not None:
+        closeout_reason = _posthoc_prerequisite_incomplete_reason(
+            closeout_reason,
+            control.get("pi_pool_cleanup"),
+        )
+    final: dict[str, Any] | None = None
+    posthoc_result: dict[str, Any] | None = None
+    if closeout_reason is None:
+        if posthoc_selection is not None:
+            try:
+                posthoc_result = finalize_posthoc_official_selection(
+                    run_dir=run_dir,
+                    workspace=workspace,
+                    benchmark_root=benchmark_root,
+                    closeout=closeout,
+                    contract=posthoc_selection,
+                    worker_shutdown_verified=True,
+                )
+            except Exception as exc:
+                posthoc_result = {
+                    "completed": False,
+                    "visible_to_workers": False,
+                    "affects_online_search": False,
+                    "official_evaluator_calls": 0,
+                    "errors": [
+                        {
+                            "scope": "posthoc_selection",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    ],
+                }
+            control["posthoc_official_selection"] = posthoc_result
+            if posthoc_result.get("completed") is True:
+                final = load_json(run_dir / "final-eval.json")
+            else:
+                control["official_evaluation_withheld"] = True
+                control["result_incomplete_reason"] = (
+                    "controller posthoc official selection failed"
+                )
+        else:
+            final = evaluate_with_controller_runtime(
+                workspace,
+                "final",
+                run_dir / "controller-runtime/final",
+                benchmark_root,
+            )
+            write_json(run_dir / "final-eval.json", final)
+            copy_artifact(workspace / ARTIFACT_NAME, run_dir / ARTIFACT_NAME)
     else:
         control["official_evaluation_withheld"] = True
-        control["result_incomplete_reason"] = controller_only_closeout_reason
+        control["result_incomplete_reason"] = closeout_reason
     if is_pi:
         control["pi"] = parse_pi_events(run_dir / "events.jsonl")
     else:
@@ -1512,8 +2363,20 @@ def execute_goal_plus(
         "process_verifier_commands": process_calls,
         "promotion_verifier_commands": promotion_calls,
         "controller_final_claimed": final_claims,
-        "coverage": "seed + Goal Plus verifier command logs + controller final ledger",
+        "coverage": (
+            "seed + Goal Plus verifier command logs + controller posthoc scorer ledger"
+            if posthoc_result is not None
+            else "seed + Goal Plus verifier command logs + controller final ledger"
+        ),
     }
+    early_stop_completion_verified = verified_early_stop_completion(
+        control, final, early_stop
+    )
+    control["early_stop_completion_verified"] = early_stop_completion_verified
+    control["minimum_lease_completion_waived"] = bool(
+        early_stop_completion_verified
+        and budget.get("worker_min_runtime_seconds") is not None
+    )
     reason = goal_plus_incomplete_reason(
         control["goal_plus"],
         expected_concurrency=budget["concurrency"],
@@ -1524,6 +2387,7 @@ def execute_goal_plus(
         expected_worker_min_verifier_runs=(
             1 if budget.get("worker_min_runtime_seconds") is not None else None
         ),
+        require_satisfied_pi_minimum_lease=not early_stop_completion_verified,
         codex_events=control.get("codex"),
     )
     if reason:
@@ -1538,8 +2402,8 @@ def execute_goal_plus(
             "Goal Plus controller closeout failed: "
             + control["goal_plus_controller_closeout"].get("error", "unknown error")
         )
-    if controller_only_closeout_reason is not None:
-        control["result_incomplete_reason"] = controller_only_closeout_reason
+    if closeout_reason is not None:
+        control["result_incomplete_reason"] = closeout_reason
     if control["hard_killed"]:
         control["result_incomplete_reason"] = "Goal Plus exceeded hard-kill grace"
     if final is not None and final.get("valid") is not True:
@@ -1738,15 +2602,15 @@ def execute(args: argparse.Namespace) -> int:
     else:
         control = execute_goal_plus(manifest, run_dir, args, environment)
 
-    expected_deadline_stop = (
-        control.get("deadline_reached")
+    expected_controlled_stop = (
+        (control.get("deadline_reached") or control.get("early_stop_triggered"))
         and not control.get("controller_interrupted")
         and not control.get("hard_killed")
         and control.get("returncode") in {0, -signal.SIGTERM, 128 + signal.SIGTERM}
     )
     if (
         control.get("returncode", 0) != 0
-        and not expected_deadline_stop
+        and not expected_controlled_stop
         and not control.get("result_incomplete_reason")
     ):
         control["result_incomplete_reason"] = (
@@ -1827,6 +2691,13 @@ def repair_closeout(args: argparse.Namespace) -> int:
     benchmark_root = Path(benchmark_root_text) if benchmark_root_text else None
     workspace = Path(manifest["workspace"])
     controller_only = controller_only_official_evaluation(manifest)
+    early_stop = goal_plus_early_stop_contract(manifest)
+    posthoc_selection = goal_plus_posthoc_selection_contract(manifest)
+    prepared_goal_config = manifest.get("goal_plus_config") or {}
+    if prepared_goal_config.get("posthoc_selection") != posthoc_selection:
+        raise RuntimeError(
+            "prepared Goal Plus config does not match the task posthoc-selection contract"
+        )
     control = dict(manifest.get("execution") or {})
     if manifest["method"] == "goal-plus-pi":
         control["pi_pool_cleanup_repair"] = close_pi_pools(
@@ -1854,16 +2725,52 @@ def repair_closeout(args: argparse.Namespace) -> int:
         if controller_only
         else None
     )
-    final: dict[str, Any] | None = None
-    if controller_only_closeout_reason is None:
-        final = evaluate_with_controller_runtime(
-            workspace,
-            "final",
-            run_dir / "controller-runtime/final",
-            benchmark_root,
+    if manifest["method"] == "goal-plus-pi" and posthoc_selection is not None:
+        controller_only_closeout_reason = _posthoc_prerequisite_incomplete_reason(
+            controller_only_closeout_reason,
+            control.get("pi_pool_cleanup_repair"),
         )
-        write_json(run_dir / "final-eval.json", final)
-        copy_artifact(workspace / ARTIFACT_NAME, run_dir / ARTIFACT_NAME)
+    final: dict[str, Any] | None = None
+    posthoc_result: dict[str, Any] | None = None
+    if controller_only_closeout_reason is None:
+        if posthoc_selection is not None:
+            try:
+                posthoc_result = finalize_posthoc_official_selection(
+                    run_dir=run_dir,
+                    workspace=workspace,
+                    benchmark_root=benchmark_root,
+                    closeout=closeout,
+                    contract=posthoc_selection,
+                    worker_shutdown_verified=True,
+                )
+            except Exception as exc:
+                posthoc_result = {
+                    "completed": False,
+                    "visible_to_workers": False,
+                    "affects_online_search": False,
+                    "official_evaluator_calls": 0,
+                    "errors": [
+                        {
+                            "scope": "posthoc_selection",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    ],
+                }
+            control["posthoc_official_selection"] = posthoc_result
+            if posthoc_result.get("completed") is True:
+                final = load_json(run_dir / "final-eval.json")
+                control.pop("official_evaluation_withheld", None)
+            else:
+                control["official_evaluation_withheld"] = True
+        else:
+            final = evaluate_with_controller_runtime(
+                workspace,
+                "final",
+                run_dir / "controller-runtime/final",
+                benchmark_root,
+            )
+            write_json(run_dir / "final-eval.json", final)
+            copy_artifact(workspace / ARTIFACT_NAME, run_dir / ARTIFACT_NAME)
     else:
         control["official_evaluation_withheld"] = True
     control["goal_plus"] = collect_goal_plus_state(workspace)
@@ -1892,9 +2799,21 @@ def repair_closeout(args: argparse.Namespace) -> int:
         "process_verifier_commands": process_calls,
         "promotion_verifier_commands": promotion_calls,
         "controller_final_claimed": final_claims,
-        "coverage": "seed + Goal Plus verifier command logs + controller final ledger",
+        "coverage": (
+            "seed + Goal Plus verifier command logs + controller posthoc scorer ledger"
+            if posthoc_result is not None
+            else "seed + Goal Plus verifier command logs + controller final ledger"
+        ),
     }
     budget = manifest["budget"]
+    early_stop_completion_verified = verified_early_stop_completion(
+        control, final, early_stop
+    )
+    control["early_stop_completion_verified"] = early_stop_completion_verified
+    control["minimum_lease_completion_waived"] = bool(
+        early_stop_completion_verified
+        and budget.get("worker_min_runtime_seconds") is not None
+    )
     reason = goal_plus_incomplete_reason(
         control["goal_plus"],
         expected_concurrency=budget["concurrency"],
@@ -1905,6 +2824,7 @@ def repair_closeout(args: argparse.Namespace) -> int:
         expected_worker_min_verifier_runs=(
             1 if budget.get("worker_min_runtime_seconds") is not None else None
         ),
+        require_satisfied_pi_minimum_lease=not early_stop_completion_verified,
         codex_events=control.get("codex"),
     )
     if not control["goal_plus_controller_closeout_repair"].get("completed"):
@@ -1916,6 +2836,8 @@ def repair_closeout(args: argparse.Namespace) -> int:
         )
     if controller_only_closeout_reason is not None:
         reason = controller_only_closeout_reason
+    if posthoc_result is not None and posthoc_result.get("completed") is not True:
+        reason = "controller posthoc official selection failed"
     if final is not None and final.get("valid") is not True:
         reason = "official final evaluator rejected the artifact"
     if control.get("hard_killed"):
