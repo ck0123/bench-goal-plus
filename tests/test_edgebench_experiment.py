@@ -4170,6 +4170,23 @@ class EdgeBenchExperimentTest(unittest.TestCase):
             {"expected": 2, "actual": 3},
         )
 
+    def test_goal_plus_recovery_counts_generations_separately_from_live_k(self) -> None:
+        cell = {"method": "goal-plus-pi", "outer_replicas": 1, "inner_search_concurrency": 2}
+        archived = {
+            "candidates": 2, "agent_sessions": 3, "recovery_agent_sessions": 1,
+            "confirmed_initial_worker_launches": 2,
+            "worker_verifier_runs": 3, "verifier_candidate_ids": ["c001", "c002"],
+            "selected_candidate_ids": ["c001"], "promoted_candidate_ids": ["c001"],
+            "worker_concurrency": {"invalid_interval_count": 0, "max_live_workers": 2, "candidate_ids": ["c001", "c002"]},
+        }
+        result = EDGE.goal_plus_completion_evidence(cell, [{"goal_plus": archived}], valid_trajectories=1)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["actual_subagent_count"], 2)
+        self.assertEqual(result["cumulative_agent_session_count"], 3)
+        for concurrency in ({}, {**archived["worker_concurrency"], "max_live_workers": 3}):
+            result = EDGE.goal_plus_completion_evidence(cell, [{"goal_plus": {**archived, "worker_concurrency": concurrency}}], valid_trajectories=1)
+            self.assertFalse(result["passed"])
+
     def test_goal_plus_pi_completion_uses_persisted_session_evidence(self) -> None:
         cell = {
             "method": "goal-plus-pi",

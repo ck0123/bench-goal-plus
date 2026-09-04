@@ -64,10 +64,10 @@ class EdgeBenchUpstreamGoalPlusContractTest(unittest.TestCase):
 
         self.assertIn("sforge-goal-plus-submit --details --if-new", command)
         self.assertIn("edgebench-resume-sync.log", command)
-        self.assertNotIn('"/goal-plus resume"', command)
+        self.assertIn("'/goal-plus resume'", command)
         self.assertIn('--session "$SFORGE_PI_GOAL_PLUS_SESSION_ID"', command)
         self.assertNotIn("--goal-plus-headless-continue", command)
-        self.assertIn("Continue the active Goal Plus task", command)
+        self.assertIn("GOAL_PLUS_RESUME_EXPECTATION", command)
         self.assertNotIn("Continue working", command)
 
 

@@ -34,7 +34,8 @@ benchmark 使用相同 lifecycle 或支持相同并发。
 1. 冻结 task/evaluator、model、reasoning、`T/K/C/R`、seed、method 和 resolved commit。
    方法会把外部或受管运行时源码复制进执行环境时，还必须冻结并展示该源码的
    source kind、ref/branch 和完整 commit SHA；tracking branch 不能代替实际 commit。
-2. 在 `benchmarks/runners.json` 解析 target/runner；使用 native controller、common matrix 或 OpenEvolve batch 的 `prepare`，确认 prepare 不调用模型且不预建 Goal Plus state。
+2. 在 `benchmarks/runners.json` 解析 target/runner；使用 native controller、common matrix
+   或 OpenEvolve batch 的 `prepare`，确认 prepare 不调用模型且不预建 Goal Plus state。
    Common matrix 的普通方法运行使用 `--method plain-codex` 或 `--method goal-plus-codex`；只有做 B0-B4 消融实验时才使用 `--condition`。两者不能混用。
 3. 对 Agent 容器执行网络门禁：doctor 必须证明 effective `internet=false`、每个模型调用角色的
    API endpoint 完整、Judge + LLM API 精确 allowlist 可实施，prepare 生成的命令必须包含
@@ -43,8 +44,10 @@ benchmark 使用相同 lifecycle 或支持相同并发。
 4. 完成下面的 K/C 启动确认门禁；未确认前只能执行只读的 `catalog`、`doctor` 和 `plan`，
    不得执行 `launch` 或 `e2e`。
 5. 用 `launch` 启动 runner。长运行使用已有 detach/controller，不自行拼后台 shell。
-6. 用统一 `status --campaign <path>` 读取 `agent-run.json` 和 native manifest。不要因为终端断开就重建 campaign。后台 campaign 的进展查询还必须按下文的“进展查询与终态归档”处理。
-7. 只在 capability 允许时调用 `stop` 或 `resume`。EdgeBench stop 后归档 partial，不伪称原 trajectory 可恢复；common/OpenEvolve batch 只补跑未完成 cell。
+6. 用统一 `status --campaign <path>` 读取 `agent-run.json` 和 native manifest。
+   不要因为终端断开就重建 campaign。后台 campaign 的进展查询还必须按下文的“进展查询与终态归档”处理。
+7. 只在 capability 允许时调用 `stop` 或 `resume`。EdgeBench stop 后归档 partial，
+   不伪称原 trajectory 可恢复；common/OpenEvolve batch 只补跑未完成 cell。
 8. native final artifact 存在后再 `finalize`/`summarize`，再用 `$benchmark-report` 导出。后台 campaign 在进展查询中到达终态时，不得停在“可以归档”的提示；满足条件就完成归档。
 
 ## 进展查询与终态归档
@@ -136,15 +139,17 @@ Common/OpenEvolve 和 SWE-bench Verified 使用 run-local source，配置
 `promotion_mode=apply`。EdgeBench 由 `sforge-goal-plus-submit` 拥有回写和 Judge，配置
 `promotion_mode=artifact_only`，避免 runtime apply 与 benchmark bridge 双重回写。具体
 strategy 仍由对应 runner reference 冻结。Skill、MCP 或普通自然语言都不能代替精确宿主
-命令创建 Goal Plus 记录。恢复使用宿主原生 session resume，不存在 Goal Plus resume
-子命令。EdgeBench 的 Codex 使用 `codex exec resume --last`，Pi 使用独立 session
-目录中的稳定 `--session ID`，并提供普通 continuation prompt；不得重新创建 Goal。
-只有 unfinished 且 attached 的原 session 可以被 harness 自动继续；用户主动暂停、
-needs-user、detached、stale、身份缺失及终态均不得自动继续。
+命令创建 Goal Plus 记录。恢复使用宿主原生 session resume 加显式 Goal Plus resume：
+Codex `codex exec resume ID '$goal-plus resume'`，Pi `--session ID '/goal-plus resume'`。
+普通聊天或仅恢复 session 不解除任务停止；不得重新创建 Goal。
+控制器只重试明确的 execution_lost/harness_interruption，并传递预期 Goal/session/revision/
+control version，在实际命令入口再次校验。用户主动暂停、中断、needs-user、blocked、detached、
+stale、身份或原因缺失及终态均不得自动继续。原 deadline、Search 身份和累计用量不变。
 
 ## 交付
 
-返回 campaign id/path、profile、实际 `T/K/C/R`、controller PID/状态、监控命令、停止命令和报告命令。凭据只从继承环境或 Codex auth store 读取。
+返回 campaign id/path、profile、实际 `T/K/C/R`、controller PID/状态、监控命令、停止命令和报告命令。
+凭据只从继承环境或 Codex auth store 读取。
 
 ## Gotchas
 

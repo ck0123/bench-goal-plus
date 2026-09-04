@@ -112,6 +112,11 @@ Goal Plus 结束后必须统计实际 subagent 数量并与 `K` 核对：
   保留已有分数和原始证据，
   但 cell/campaign 必须标记为 `partial`，不得进入 matched comparison。
 
+EdgeBench 的同 trajectory 受控 recovery 单独统计 generation 0 的初始实际 worker，
+并用它与 `K` 核对；replacement generation 增加累计 worker/session 数，不增加初始 `K`。
+恢复后必须额外证明所有 generation 的真实峰值并行数不超过 `K`；缺少完整执行区间或
+实际 launch 证据仍为 `partial`。这不授予其他 runner 自动恢复或重解释 `K` 的能力。
+
 ## 目录职责
 
 | 路径 | 负责内容 | 必须包含 | 不得包含 |

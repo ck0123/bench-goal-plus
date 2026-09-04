@@ -11,7 +11,7 @@ artifact 汇总成同口径表；campaign manifest 记录实际 source commit。
 负责转发历史公开符号和 CLI，不再承载实现。实际代码位于 `controller/`：
 
 | 模块 | 单一职责 |
-|---|---|
+| --- | --- |
 | `context.py` | 仓库、上游、task、run 等路径上下文；测试通过显式 context 隔离 |
 | `profiles.py` | profile 加载、协议归一化及官方协议 diff |
 | `environment.py` | host/API/Docker 检查、资源探测、provision 与 doctor |
@@ -29,7 +29,7 @@ EdgeBench 特例加入通用 dispatcher。
 ## 方法与 K 的映射
 
 | 方法 | SForge outer run | live concurrency `K` | 含义 |
-|---|---:|---:|---|
+| --- | ---: | ---: | --- |
 | Plain Codex | `K` replicas | `replica-concurrency=K` | K 条互相独立的 trajectory，等价于 independent parallel baseline |
 | Goal Plus + Codex | 1 replica | `parallel-num=K` | 一个共享搜索状态中的 K 个 candidate workers |
 | Plain Pi | `K` replicas | `replica-concurrency=K` | K 条互相独立的 Pi trajectory |
@@ -296,7 +296,13 @@ controller 向所有 active cells 转发 `SIGINT`，让每个 SForge run 执行�
 closeout；停止请求后不再启动新 cell。超出等待时间只报告仍在运行，不会自动
 hard-kill 或清理容器/目录。
 
-恢复边界是 campaign/cell，不伪造同一 trajectory：
+同一运行中的 Work container 内，SForge 可显式恢复自己管理且已确认可重试的 Goal Plus
+停止：Pi `--session ID '/goal-plus resume'`；Codex `exec resume ID '$goal-plus resume'`。
+固定 ticket 在 Goal Plus 实际入口再次检查 Goal/session/revision/control version；用户
+pause/clear、中断、needs_user、原因不明或身份变化均禁止自动恢复。恢复保留原 Main/Search、
+累计用量和 deadline，T 截止后的 segment 仅收尾。此路径不等于重新启动已停止 campaign。
+
+外层 campaign/cell 的恢复边界仍然是：
 
 - controller 仍活着：只用 `status` 重新观察；
 - SForge 已写 `final_result.json`：运行 `finalize`，不再调用模型；

@@ -286,11 +286,11 @@ model 和 credential source；它不会把 Pi provider 错配为 `openai-codex`�
 `codex-goal-plus`、`pi-goal-plus` 与 `pi-goal-plus-provider` 已由 SForge
 原生支持，不需要 Skill 在容器里手工拼安装命令，也不允许 Skill 启动 Goal Plus。
 Codex 的启动链固定为精确 `$goal-plus ...` UserPromptSubmit、project-local hooks
-授权、显式 Goal Plus MCP；恢复使用 `codex exec resume --last` 加普通 continuation
-prompt。普通自然语言、Skill、plugin 和 MCP create/update 工具没有创建新 Goal 的权限。
+授权、显式 Goal Plus MCP；恢复使用 `codex exec resume ID '$goal-plus resume'`。
+普通自然语言、Skill、plugin 和 MCP create/update 工具没有创建新 Goal 的权限。
 Pi 的启动链同样固定为精确 `/goal-plus ...` extension command；新进程使用独立 session
-目录中的稳定 `--session ID` 加普通 continuation prompt。不存在 Goal Plus resume
-子命令；自动继续只允许 unfinished 且 attached 的原 session，不得绕过用户暂停。
+目录中的稳定 `--session ID '/goal-plus resume'`。自动恢复只允许已记录的控制器可重试停止，
+必须在命令入口再次核对预期 Goal/session/revision/control version，不得绕过用户暂停或 clear。
 当前真实路径是：
 
 - 默认情况下 controller 使用 registry 声明的官方 Muyuan `master` checkout。临时实验分支

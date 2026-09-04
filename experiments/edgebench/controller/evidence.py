@@ -303,6 +303,8 @@ def goal_plus_stats(task_run: Path) -> dict[str, Any] | None:
                                         "run_id": payload.get("run_id"),
                                         "candidate_id": candidate_id,
                                         "host": payload.get("host"),
+                                        "execution_generation": payload.get("execution_generation", 0),
+                                        "launch_confirmed": bool(session_verifier_runs or (payload.get("host_handle") or {}).get("metadata", {}).get("bound_at")),
                                         "verifier_runs": session_verifier_runs,
                                         "updated_at": payload.get("updated_at"),
                                     }.items()
@@ -326,6 +328,7 @@ def goal_plus_stats(task_run: Path) -> dict[str, Any] | None:
                                             "agent_session_id": session_id,
                                             "run_id": payload.get("run_id"),
                                             "candidate_id": candidate_id,
+                                            "execution_generation": payload.get("execution_generation", 0),
                                             **compact_handle,
                                         }
                                     )
@@ -466,13 +469,18 @@ def goal_plus_stats(task_run: Path) -> dict[str, Any] | None:
         "initial_agent_sessions": sum(
             (str(item.get("run_id")), str(item.get("candidate_id")))
             in initial_candidates
+            and item.get("execution_generation", 0) == 0
             for item in worker_sessions
         ),
         "initial_bound_worker_handles": sum(
             (str(item.get("run_id")), str(item.get("candidate_id")))
             in initial_candidates
+            and item.get("execution_generation", 0) == 0
             for item in bound_worker_handles
         ),
+        "recovery_agent_sessions": sum(item.get("execution_generation", 0) > 0 for item in worker_sessions),
+        "confirmed_initial_worker_launches": sum(item.get("execution_generation", 0) == 0 and item.get("launch_confirmed", False) for item in worker_sessions),
+        "confirmed_cumulative_worker_launches": sum(item.get("launch_confirmed", False) for item in worker_sessions),
         "worker_verifier_runs": verifier_runs,
         "verifier_candidate_ids": sorted(verifier_candidates),
         "verifier_candidate_count": len(verifier_candidates),
@@ -722,6 +730,9 @@ def live_goal_plus_status(
                 int((archived or {}).get("agent_sessions") or 0),
             )
         ),
+        "worker_launches_by_generation": (live or {}).get("worker_launches_by_generation"),
+        "confirmed_worker_launch_count": (live or {}).get("confirmed_worker_launch_count"),
+        "pi_live_worker_count": (live or {}).get("pi_live_worker_count"),
         "verifier_ledger": verifier_ledger,
         "worker_verifier_runs": max(
             len(verifier_ledger),
@@ -853,6 +864,9 @@ def goal_plus_completion_evidence(
     initial_candidates = 0
     agent_sessions = 0
     initial_agent_sessions = 0
+    recovery_agent_sessions = 0
+    confirmed_initial_worker_launches = 0
+    recovery_concurrency: list[dict[str, Any]] = []
     verifier_candidates: set[str] = set()
     verifier_runs = 0
     spawned_worker_threads = 0
@@ -884,6 +898,11 @@ def goal_plus_completion_evidence(
             initial_agent_sessions,
             int(archived.get("initial_agent_sessions") or 0),
         )
+        recovered = int(archived.get("recovery_agent_sessions") or 0)
+        recovery_agent_sessions = max(recovery_agent_sessions, recovered)
+        confirmed_initial_worker_launches = max(confirmed_initial_worker_launches, int(archived.get("confirmed_initial_worker_launches") or 0))
+        if recovered:
+            recovery_concurrency.append(archived.get("worker_concurrency") or {})
         spawned_worker_threads = max(
             spawned_worker_threads,
             int(events.get("spawned_agent_thread_count") or 0),
@@ -1087,12 +1106,30 @@ def goal_plus_completion_evidence(
         else checks["agent_sessions"]
     )
     actual_subagent_count = (
+        confirmed_initial_worker_launches
+        if recovery_agent_sessions
+        else
         initial_agent_sessions
         if scheduler_enabled and cell["method"] != "goal-plus-codex"
         else int(actual_subagent_check["actual"])
     )
     actual_subagent_count_matches_k = actual_subagent_count == expected_workers
-    passed = required_evidence_present and actual_subagent_count_matches_k
+    recovery_parallelism_passed = not recovery_agent_sessions or bool(
+        recovery_concurrency and all(
+            item.get("invalid_interval_count") == 0
+            and isinstance(item.get("max_live_workers"), int)
+            and item["max_live_workers"] <= expected_workers
+            and set(item.get("candidate_ids") or []) >= verifier_candidates
+            for item in recovery_concurrency
+        )
+    )
+    if recovery_agent_sessions:
+        checks["recovery_workers"] = {
+            "expected": {"initial_actual_workers": expected_workers, "maximum_live": expected_workers},
+            "actual": {"initial_actual_workers": confirmed_initial_worker_launches,
+                       "recovery_sessions": recovery_agent_sessions, "concurrency": recovery_concurrency},
+        }
+    passed = required_evidence_present and actual_subagent_count_matches_k and recovery_parallelism_passed
     return {
         "required": True,
         "passed": passed,
@@ -1108,6 +1145,8 @@ def goal_plus_completion_evidence(
         "actual_subagent_count": actual_subagent_count,
         "cumulative_candidate_count": candidates,
         "cumulative_agent_session_count": agent_sessions,
+        "recovery_agent_session_count": recovery_agent_sessions,
+        "recovery_parallelism_passed": recovery_parallelism_passed,
     }
 
 

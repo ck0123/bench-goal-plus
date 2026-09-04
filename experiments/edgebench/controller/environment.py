@@ -225,9 +225,9 @@ def active_sforge_codex_runtime_contract() -> dict[str, Any]:
         )
         native_resume = (
             "exec codex exec " in CodexGoalPlusAgent.resume_cmd
-            and "resume --last" in CodexGoalPlusAgent.resume_cmd
-            and "$goal-plus" not in CodexGoalPlusAgent.resume_cmd
-            and "Continue the active Goal Plus task"
+            and "SFORGE_GOAL_PLUS_RESUME_SESSION_ID" in CodexGoalPlusAgent.resume_cmd
+            and "GOAL_PLUS_RESUME_EXPECTATION" in CodexGoalPlusAgent.resume_cmd
+            and "$goal-plus resume"
             in CodexGoalPlusAgent.resume_cmd
         )
         valid = bool(
@@ -257,7 +257,7 @@ def active_sforge_codex_runtime_contract() -> dict[str, Any]:
                 else (
                     "SForge Goal Plus Codex adapter does not require exact host "
                     "start commands with typed config through project hooks "
-                    "and native session resume with an ordinary continuation prompt"
+                    "and native session resume with a guarded explicit Goal Plus resume"
                 )
             ),
         }
@@ -315,9 +315,9 @@ def active_sforge_pi_runtime_contract() -> dict[str, Any]:
                 "--session-dir /home/agent/.goal-plus/pi-sessions" in template
                 for template in (PiGoalPlusAgent.run_cmd, PiGoalPlusAgent.resume_cmd)
             )
-            and "/goal-plus resume" not in PiGoalPlusAgent.resume_cmd
+            and "/goal-plus resume" in PiGoalPlusAgent.resume_cmd
             and "--goal-plus-headless-continue" not in PiGoalPlusAgent.resume_cmd
-            and "Continue the active Goal Plus task" in PiGoalPlusAgent.resume_cmd
+            and "GOAL_PLUS_RESUME_EXPECTATION" in PiGoalPlusAgent.resume_cmd
         )
         valid = bool(
             exact_start

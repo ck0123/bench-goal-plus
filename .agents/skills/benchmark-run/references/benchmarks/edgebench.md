@@ -61,10 +61,11 @@ registration/resource，或通过手写 stdio client 调 server 都不能通过�
 `promotion_mode=artifact_only`、`strategy=agent_guided`、`workers=MODEL*K`，以及 profile
 显式配置时的 `annotator=MODEL`。其中
 `artifact_only` 表示 benchmark-native `sforge-goal-plus-submit` 独占回写和 Judge，不能再由
-Goal Plus runtime apply 一次。Codex 使用 `codex exec resume --last`，Pi 使用独立
-session 目录中的稳定 `--session ID`；两者均传普通 continuation prompt，不存在
-Goal Plus resume 子命令。只有 unfinished 且 attached 的原 session 才允许 harness
-自动继续；paused、needs-user、detached、stale、缺失身份或终态均失败关闭。
+Goal Plus runtime apply 一次。Codex 使用 `codex exec resume ID '$goal-plus resume'`，Pi
+使用独立 session 目录中的 `--session ID '/goal-plus resume'`。不能用普通消息恢复任务。
+只有原 session 的可恢复 execution_lost/harness_interruption 才允许控制器重试；恢复 ticket
+绑定 Goal、revision、session 和 control version，实际入口 CAS 再检查。用户暂停/中断、
+needs-user、blocked、detached、stale、原因或身份缺失及终态均失败关闭。
 resume 前的 promotion/Judge bridge 输出独立持久化，不拼进用户输入。
 
 当前十五分钟 VLIW preset：
@@ -188,9 +189,13 @@ workspace 自行分析或优化。
 
 `T` 截止必须是 SForge 的真实 agent segment boundary，不能把同一个 Codex 进程直接允许运行
 到 `T + finalization_grace`。若 Goal Plus 在 `T` 时仍未终态，SForge 终止探索 segment，并用
-原生 session resume 加普通 continuation prompt 启动 finalization-only segment；该 segment
-的第一个原生工具调用必须是
-`goal_plus_monitor_snapshot`，且只能恢复 evidence、选优、提升、Judge、结果记录和终态报告。
+控制器先 CAS 记录 harness_interruption，确认停止自己拥有的 Main，再以原生 session 加
+显式 Goal Plus resume 启动 finalization-only segment。恢复资格被用户 pause/clear/edit 改变时
+不得重启。Main 首先重新读取 runtime/monitor 状态，只能整理已有 Evidence、选优、提升、
+Judge、结果记录和终态报告；不能重置 deadline 或启动新的优化 worker。
+
+恢复后的累计 worker/session 数可以超过 K，但必须另列 generation 0 的初始实际 worker
+和跨 generation 的实时/峰值并行数。仅分配 session 不算 launch，缺少区间证据记为 unknown/partial。
 
 Goal Plus + Pi 不使用 Codex collaboration events，必须持久化至少 `K` 个 candidate-bound
 Pi sessions 和 verifier records，并同样保留 promotion 与 official trajectory。
