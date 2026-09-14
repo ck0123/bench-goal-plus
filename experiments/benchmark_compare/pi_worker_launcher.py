@@ -37,6 +37,8 @@ _RESERVED_ENV_NAMES = {
     "HOME",
     "PATH",
     "TMPDIR",
+    "GOAL_PLUS_PI_DEV_ROOT",
+    "GOAL_PLUS_PYTHON",
     LEGACY_GOAL_PLUS_WORKER_LAUNCHER_ENV,
     SANDBOX_POLICY_ENV,
     TOOL_SOCKET_ENV,
@@ -57,6 +59,7 @@ _HOST_TOOL_BIN = (
     Path(__file__).resolve().parent / "main-bin" / "goal-plus-pi-tool"
 )
 _SANDBOX_TOOL_BIN = Path("/opt/bench-goal-plus/bin")
+_SANDBOX_TOOL_PROXY = _SANDBOX_TOOL_BIN / _TOOL_PROXY_BIN.name
 _SANDBOX_GIT_DIR = Path("/opt/bench-goal-plus/git-admin")
 _BLIND_PUBLIC_METRIC = "format_valid"
 _BLIND_RESPONSE_REJECTED = {
@@ -436,6 +439,7 @@ class SandboxPolicy:
     read_only_workspace_paths: tuple[str, ...]
     writable_workspace_paths: tuple[str, ...]
     pass_env: tuple[str, ...]
+    read_only_host_paths: tuple[str, ...] = ()
     # The launcher historically served only blind ZSoft workers. Keep missing
     # policy fields fail-closed; L1 opts into live binary feedback explicitly.
     evaluation_mode: str = "blind"
@@ -455,6 +459,7 @@ class SandboxPolicy:
             "engine",
             "evaluation_mode",
             "workspace_access",
+            "read_only_host_paths",
             "read_only_workspace_paths",
             "writable_workspace_paths",
             "pass_env",
@@ -488,6 +493,9 @@ class SandboxPolicy:
         writable_paths = _workspace_path_list(
             payload.get("writable_workspace_paths", []),
             field="writable_workspace_paths",
+        )
+        read_only_host_paths = _host_path_list(
+            payload.get("read_only_host_paths", []), field="read_only_host_paths"
         )
         for read_only in read_only_paths:
             for writable in writable_paths:
@@ -524,6 +532,7 @@ class SandboxPolicy:
             read_only_workspace_paths=tuple(read_only_paths),
             writable_workspace_paths=tuple(writable_paths),
             pass_env=tuple(pass_env),
+            read_only_host_paths=tuple(read_only_host_paths),
             evaluation_mode=evaluation_mode,
         )
 
@@ -550,6 +559,21 @@ def _workspace_path_list(value: Any, *, field: str) -> list[str]:
             raise ValueError(
                 f"{field} entries must be non-empty relative paths without '..': "
                 f"{item!r}"
+            )
+    return paths
+
+
+def _host_path_list(value: Any, *, field: str) -> list[str]:
+    paths = _string_list(value, field=field)
+    for item in paths:
+        candidate = Path(item)
+        if (
+            not candidate.is_absolute()
+            or candidate == Path("/")
+            or ".." in candidate.parts
+        ):
+            raise ValueError(
+                f"{field} entries must be absolute non-root paths without '..': {item!r}"
             )
     return paths
 
@@ -962,7 +986,10 @@ def _run_host_tool(
         check=False,
     )
     if completed.returncode != 0:
-        raise RuntimeError("host tool call failed")
+        detail = completed.stderr.strip()
+        if len(detail) > 500:
+            detail = detail[:500] + "..."
+        raise RuntimeError(detail or "host tool call failed")
     return json.loads(completed.stdout)
 
 
@@ -1053,8 +1080,10 @@ class WorkerToolProxy:
                 args,
                 self.host_environment,
             )
-        except Exception:  # workers must not receive raw host exceptions
-            return dict(_BLIND_RESPONSE_REJECTED)
+        except Exception:
+            if self.evaluation_mode == "blind":
+                return dict(_BLIND_RESPONSE_REJECTED)
+            raise
         if self.evaluation_mode == "blind":
             result = _blind_tool_response(str(tool), result, self.context)
             if result is _INVALID_BLIND_RESPONSE:
@@ -1102,6 +1131,25 @@ class WorkerToolProxy:
             pass
 
 
+def _bwrap_supports_option(
+    executable: str,
+    option: str,
+    environment: Mapping[str, str],
+) -> bool:
+    completed = subprocess.run(
+        [executable, "--help"],
+        env=dict(environment),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"failed to inspect Bubblewrap options: {completed.stderr.strip()}"
+        )
+    return option in f"{completed.stdout}\n{completed.stderr}".split()
+
+
 class BubblewrapWorker:
     def __init__(
         self,
@@ -1144,7 +1192,16 @@ class BubblewrapWorker:
         if executable is None:
             raise FileNotFoundError(f"Pi executable not found: {self.command[0]}")
         executable_path = Path(executable).absolute()
-        pi_runtime = _executable_runtime_root(executable_path)
+        executable_entrypoint = _executable_entrypoint(executable_path)
+        pi_runtime_roots = tuple(
+            dict.fromkeys(
+                (
+                    _executable_runtime_root(executable_path),
+                    _executable_runtime_root(executable_entrypoint),
+                )
+            )
+        )
+        pi_runtime = pi_runtime_roots[0]
         extension = _command_path_argument(self.command, "-e")
         extension_bundle = extension.parent
         session_root = _command_path_argument(self.command, "--session-dir")
@@ -1185,29 +1242,60 @@ class BubblewrapWorker:
             "--unshare-all",
             "--share-net",
             "--unshare-user",
-            "--disable-userns",
-            "--cap-drop",
-            "ALL",
-            "--hostname",
-            "zsoft-goal-plus-worker",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-            "--dir",
-            "/run",
-            "--dir",
-            "/home",
-            "--dir",
-            "/home/pi",
         ]
+        if _bwrap_supports_option(bwrap, "--disable-userns", self.environment):
+            args.append("--disable-userns")
+        args.extend(
+            [
+                "--cap-drop",
+                "ALL",
+                "--hostname",
+                "zsoft-goal-plus-worker",
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/tmp",
+                "--dir",
+                "/run",
+                "--dir",
+                "/home",
+                "--dir",
+                "/home/pi",
+            ]
+        )
         created = {"/proc", "/dev", "/tmp", "/run", "/home", "/home/pi"}
         _mount_system(args)
-        if not _is_system_path(pi_runtime):
-            _add_bind(args, pi_runtime, pi_runtime, readonly=True, created=created)
+        for value in self.policy.read_only_host_paths:
+            path = Path(value)
+            if path.is_symlink() or not path.exists():
+                raise RuntimeError(
+                    f"sandbox read-only host path is unavailable: {path}"
+                )
+            _add_bind(args, path, path, readonly=True, created=created)
+        for runtime in pi_runtime_roots:
+            if not _is_system_path(runtime):
+                _add_bind(args, runtime, runtime, readonly=True, created=created)
         _add_tmpfs(args, self.root, created)
+        candidate_state = (
+            self.root
+            / "runs"
+            / self.context.run_id
+            / "candidates"
+            / self.context.candidate_id
+        )
+        candidate_record = candidate_state / "candidate.json"
+        if candidate_record.is_file():
+            if candidate_state.is_symlink() or candidate_record.is_symlink():
+                raise RuntimeError("Pi worker candidate state must not be a symlink")
+            _add_bind(
+                args,
+                candidate_state,
+                candidate_state,
+                readonly=True,
+                created=created,
+            )
         protected_paths = _validated_workspace_paths(
             self.context.workspace,
             self.policy.read_only_workspace_paths,
@@ -1311,6 +1399,7 @@ class BubblewrapWorker:
             self.environment,
             policy=self.policy,
             pi_runtime=pi_runtime,
+            runtime_root=self.root,
             socket_path=self.proxy.socket_path,
             private_git_admin=self.private_git_admin,
         )
@@ -1319,7 +1408,7 @@ class BubblewrapWorker:
                 "--chdir",
                 str(self.context.workspace),
                 "--",
-                str(executable_path),
+                str(executable_entrypoint),
                 *command[1:],
             ]
         )
@@ -1430,7 +1519,23 @@ def _safe_name(value: str) -> str:
 def _executable_runtime_root(executable: Path) -> Path:
     if executable.parent.name == "bin":
         return executable.parent.parent.resolve()
-    return executable.resolve()
+    if (
+        executable.parent.name == ".bin"
+        and executable.parent.parent.name == "node_modules"
+    ):
+        return executable.parent.parent.parent.resolve()
+    resolved = executable.resolve()
+    for parent in resolved.parents:
+        if parent.name == "node_modules":
+            return parent.parent
+    if resolved.parent.name == "bin":
+        return resolved.parent.parent
+    return resolved
+
+
+def _executable_entrypoint(executable: Path) -> Path:
+    """Return the mounted target instead of a sandbox-invisible symlink alias."""
+    return executable.resolve(strict=True)
 
 
 def _is_system_path(path: Path) -> bool:
@@ -1820,6 +1925,7 @@ def _sandbox_environment(
     *,
     policy: SandboxPolicy,
     pi_runtime: Path,
+    runtime_root: Path,
     socket_path: Path,
     private_git_admin: PrivateGitAdmin | None,
 ) -> dict[str, str]:
@@ -1842,6 +1948,7 @@ def _sandbox_environment(
                 "/bin",
             )
         ),
+        "GOAL_PLUS_ROOT": str(runtime_root),
         TOOL_SOCKET_ENV: str(socket_path),
     }
     if private_git_admin is not None:
@@ -1854,14 +1961,18 @@ def _sandbox_environment(
         )
     inherited_names = {
         "PI_CODING_AGENT_DIR",
+        "GOAL_PLUS_PI_DEV_ROOT",
         "GOAL_PLUS_PI_ROLE",
         "GOAL_PLUS_PI_MODEL",
+        "GOAL_PLUS_PYTHON",
         "GOAL_PLUS_PI_WORKER_CONTINUE_UNTIL_MS",
         *policy.pass_env,
     }
     for name in sorted(inherited_names):
         if name in environment:
             result[name] = environment[name]
+    if "GOAL_PLUS_PYTHON" in result:
+        result["GOAL_PLUS_PYTHON"] = str(_SANDBOX_TOOL_PROXY)
     return result
 
 

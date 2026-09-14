@@ -1114,7 +1114,8 @@ def build_goal_plus_prompt(task: dict[str, Any], profile: dict[str, Any]) -> str
         "Freeze exactly one SearchSpec discovered from the public issue and repository. "
         "Honor every leading typed command field. Use source_path=/testbed, "
         "metric_name=visible_test_score, direction=maximize, "
-        f"strategy.worker_host={worker_host}. "
+        "and let the exact Goal Plus entrypoint determine the native host; do not put a "
+        "worker host field in SearchSpec. "
         + render_search_scheduler_instructions(
             search_scheduler_from_json(profile.get("search_scheduler"))
         )
@@ -1123,8 +1124,7 @@ def build_goal_plus_prompt(task: dict[str, Any], profile: dict[str, Any]) -> str
         f"{minimum_budget_instruction}"
         "Set "
         "strategy.config.closeout_reserve_seconds="
-        f"{goal_plus['closeout_reserve_seconds']} and strategy.config.seed="
-        f"{profile.get('seed', 1)}. {candidate_instruction}"
+        f"{goal_plus['closeout_reserve_seconds']}. {candidate_instruction}"
         "Set strategy.evidence_annotator.host=codex and "
         "strategy.evidence_annotator.timeout_seconds="
         f"{annotator_timeout}; "

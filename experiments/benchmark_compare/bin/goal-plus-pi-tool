@@ -15,12 +15,31 @@ MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("-I", action="store_true", dest="isolated")
+    parser.add_argument("-c", dest="python_code")
     parser.add_argument("--root")
+    parser.add_argument("--host-entrypoint", action="store_true")
+    parser.add_argument("--host-capability")
     parser.add_argument("--args-json", required=True)
     parser.add_argument("--pretty", action="store_true")
     parser.add_argument("tool")
     args = parser.parse_args(argv)
     try:
+        if (
+            args.python_code is not None
+            and "goal_plus.pi_tool" not in args.python_code
+        ):
+            raise RuntimeError("unsupported Goal Plus Python transport")
+        if args.host_entrypoint:
+            if (
+                not args.host_capability
+                or args.tool != "goal_plus_host_kick_internal_agents"
+            ):
+                raise RuntimeError("worker proxy rejected host entrypoint")
+            print(json.dumps({"ok": True, "disposition": "worker_noop"}))
+            return 0
+        if args.host_capability:
+            raise RuntimeError("worker proxy rejected host capability")
         tool_args = json.loads(args.args_json)
         if not isinstance(tool_args, dict):
             raise TypeError("tool arguments must be a JSON object")

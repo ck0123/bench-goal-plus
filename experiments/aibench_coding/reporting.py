@@ -78,7 +78,8 @@ def _record(campaign: dict[str, Any], cell: dict[str, Any]) -> dict[str, Any]:
     sandbox = cell.get("sandbox") if isinstance(cell.get("sandbox"), dict) else {}
     outer_isolation_valid = (
         sandbox.get("kind") == "bubblewrap"
-        and sandbox.get("hidden_checkout_masked") is True
+        and sandbox.get("host_filesystem_allowlisted") is True
+        and sandbox.get("hidden_checkout_visible") is False
     )
     worker_sandbox = (
         manifest.get("pi_worker_sandbox")
@@ -102,7 +103,7 @@ def _record(campaign: dict[str, Any], cell: dict[str, Any]) -> dict[str, Any]:
             None if topology["matches_k"] else "observed agent topology does not match K",
             None
             if outer_isolation_valid
-            else "Bubblewrap hidden-checkout isolation is unproven",
+            else "Bubblewrap host-filesystem allowlist is unproven",
             None
             if worker_isolation_valid
             else "Goal Plus Pi worker Bubblewrap isolation is unproven",

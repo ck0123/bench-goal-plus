@@ -14,6 +14,7 @@ __pycache__/
 /artifacts/raw/
 /secrets/
 .codebase-memory/
+experiments/aibench-coding/profiles/*-local.json
 third_party/zsoft-bench/benchmarks/vulnerability/zsoft-l1/.cache/
 third_party/zsoft-bench/benchmarks/vulnerability/zsoft-l1/.task-state/
 third_party/zsoft-bench/benchmarks/vulnerability/zsoft-l1/.runs/

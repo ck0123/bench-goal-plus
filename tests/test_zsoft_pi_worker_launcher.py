@@ -16,6 +16,7 @@ except ModuleNotFoundError as exc:
         "pytest is required for Bubblewrap integration tests"
     ) from exc
 
+from experiments.benchmark_compare import pi_worker_launcher
 from experiments.benchmark_compare.pi_worker_launcher import (
     REAL_PI_BIN_ENV,
     SANDBOX_POLICY_ENV,
@@ -26,6 +27,7 @@ from experiments.benchmark_compare.pi_worker_launcher import (
     WorkerToolProxy,
     _OPAQUE_RESULTS_LEDGER,
     _runtime_root,
+    _sandbox_environment,
     _shim_worker_launch,
     run_pi_shim,
 )
@@ -44,6 +46,7 @@ def _policy(
     *paths: str,
     writable: tuple[str, ...] = (),
     pass_env: tuple[str, ...] = (),
+    read_only_host: tuple[str, ...] = (),
     evaluation_mode: str = "visible",
 ) -> SandboxPolicy:
     return SandboxPolicy(
@@ -52,6 +55,7 @@ def _policy(
         read_only_workspace_paths=paths,
         writable_workspace_paths=writable,
         pass_env=pass_env,
+        read_only_host_paths=read_only_host,
         evaluation_mode=evaluation_mode,
     )
 
@@ -112,6 +116,27 @@ def _fixture_extension(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return extension
+
+
+def test_worker_sandbox_routes_goal_plus_tools_through_host_proxy(
+    tmp_path: Path,
+) -> None:
+    environment = {
+        "GOAL_PLUS_PI_DEV_ROOT": str(tmp_path / "goal-plus"),
+        "GOAL_PLUS_PYTHON": sys.executable,
+    }
+
+    sandbox = _sandbox_environment(
+        environment,
+        policy=_policy(),
+        pi_runtime=Path("/usr"),
+        runtime_root=tmp_path / ".gp",
+        socket_path=tmp_path / "proxy.sock",
+        private_git_admin=None,
+    )
+
+    assert sandbox["GOAL_PLUS_PI_DEV_ROOT"] == environment["GOAL_PLUS_PI_DEV_ROOT"]
+    assert sandbox["GOAL_PLUS_PYTHON"] == "/opt/bench-goal-plus/bin/goal-plus-pi-tool"
 
 
 def _write_session_record(
@@ -176,6 +201,7 @@ def test_launch_context_and_policy_are_strict() -> None:
                     "engine": "bubblewrap",
                     "workspace_access": "read_only",
                     "read_only_workspace_paths": ["source"],
+                    "read_only_host_paths": ["/public-tests"],
                     "writable_workspace_paths": ["submission"],
                     "pass_env": ["OPENAI_API_KEY"],
                 }
@@ -183,7 +209,23 @@ def test_launch_context_and_policy_are_strict() -> None:
         }
     )
     assert policy.read_only_workspace_paths == ("source",)
+    assert policy.read_only_host_paths == ("/public-tests",)
     assert policy.writable_workspace_paths == ("submission",)
+
+    with pytest.raises(ValueError, match="absolute non-root"):
+        SandboxPolicy.from_environment(
+            {
+                SANDBOX_POLICY_ENV: json.dumps(
+                    {
+                        "engine": "bubblewrap",
+                        "workspace_access": "read_only",
+                        "read_only_host_paths": ["public-tests"],
+                        "read_only_workspace_paths": [],
+                        "writable_workspace_paths": [],
+                    }
+                )
+            }
+        )
 
     with pytest.raises(ValueError, match="without '..'"):
         SandboxPolicy.from_environment(
@@ -248,6 +290,30 @@ def test_runtime_root_is_bound_to_run_candidate_and_workspace(tmp_path: Path) ->
         )
 
 
+def test_main_tool_shim_reserves_host_closeout() -> None:
+    shim = (
+        Path(__file__).resolve().parents[1]
+        / "experiments/benchmark_compare/main-bin/goal-plus-pi-tool"
+    )
+    environment = {**os.environ, "BENCH_GOAL_PLUS_CONTROLLER_ONLY_CLOSEOUT": "1"}
+    for tool in (
+        "goal_plus_record_search_result",
+        "goal_plus_set_status",
+        "search_promote",
+        "search_report",
+        "search_select",
+    ):
+        completed = subprocess.run(
+            [sys.executable, str(shim), "--root", ".gp", "--args-json", "{}", tool],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 1
+        assert json.loads(completed.stderr)["tool"] == tool
+
+
 def test_bench_pi_shim_derives_a_trusted_worker_context(tmp_path: Path) -> None:
     root, workspace = _candidate_paths(tmp_path)
     workspace.mkdir()
@@ -256,6 +322,16 @@ def test_bench_pi_shim_derives_a_trusted_worker_context(tmp_path: Path) -> None:
         "GOAL_PLUS_PI_ROLE": "worker",
         "GOAL_PLUS_ROOT": str(root),
         REAL_PI_BIN_ENV: str(Path(sys.executable).resolve()),
+        SANDBOX_POLICY_ENV: json.dumps(
+            {
+                "engine": "bubblewrap",
+                "evaluation_mode": "blind",
+                "workspace_access": "read_only",
+                "read_only_workspace_paths": [],
+                "writable_workspace_paths": [],
+                "pass_env": [],
+            }
+        ),
     }
     command = [
         "--model",
@@ -274,7 +350,7 @@ def test_bench_pi_shim_derives_a_trusted_worker_context(tmp_path: Path) -> None:
     assert wrapped[:1] == [str(Path(sys.executable).resolve())]
     assert wrapped[1 : 1 + len(command)] == command
     assert wrapped[-2] == "--append-system-prompt"
-    assert "official metric are unavailable" in wrapped[-1]
+    assert "official metric never enter" in wrapped[-1]
     assert "GOAL_PLUS_PI_WORKER_LAUNCHER" not in environment
 
 
@@ -418,15 +494,21 @@ def test_host_tool_proxy_enforces_worker_identity(
 ) -> None:
     calls: list[tuple[Path, str, dict[str, Any]]] = []
 
-    def fake_call(root: Path, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    def fake_call(
+        root: Path,
+        tool: str,
+        args: dict[str, Any],
+        _environment: dict[str, str],
+    ) -> dict[str, Any]:
         calls.append((root, tool, args))
         return {"workspace": "/candidate"}
 
-    monkeypatch.setattr("goal_plus.pi_tool.call_pi_tool", fake_call)
+    monkeypatch.setattr(pi_worker_launcher, "_run_host_tool", fake_call)
     proxy = WorkerToolProxy(
         root=tmp_path / ".gp",
         context=_context(tmp_path),
         socket_dir=tmp_path / "proxy",
+        evaluation_mode="visible",
     )
 
     response = proxy.dispatch(
@@ -495,7 +577,7 @@ def test_blind_tool_proxy_exposes_only_frozen_context_and_receipt_contracts(
         "resume": {"latest_handoff": {"summary": "private handoff"}},
     }
     monkeypatch.setattr(
-        "goal_plus.pi_tool.call_pi_tool", lambda *_args: context_result
+        pi_worker_launcher, "_run_host_tool", lambda *_args: context_result
     )
     response = proxy.dispatch(context_request)
     assert response["ok"] is True
@@ -520,7 +602,7 @@ def test_blind_tool_proxy_exposes_only_frozen_context_and_receipt_contracts(
         "latest_result",
         "recent_iterations",
         "results.tsv",
-        "private",
+        "private annotation",
         "independent audit",
         "Commit the artifact",
     ):
@@ -549,30 +631,34 @@ def test_blind_tool_proxy_exposes_only_frozen_context_and_receipt_contracts(
             _root: Path,
             _tool: str,
             _args: dict[str, Any],
+            _environment: dict[str, str],
             *,
             response_key: str = key,
             response_value: str = sentinel,
         ) -> dict[str, Any]:
             return {**context_result, response_key: response_value}
 
-        monkeypatch.setattr("goal_plus.pi_tool.call_pi_tool", forbidden_result)
+        monkeypatch.setattr(pi_worker_launcher, "_run_host_tool", forbidden_result)
         response = proxy.dispatch(context_request)
         assert response == {
             "ok": False,
-            "error": "blind worker tool response is unavailable",
+            "error": "worker tool response is unavailable",
         }
         assert sentinel not in json.dumps(response)
 
     def raises_raw_error(
-        _root: Path, _tool: str, _args: dict[str, Any]
+        _root: Path,
+        _tool: str,
+        _args: dict[str, Any],
+        _environment: dict[str, str],
     ) -> dict[str, Any]:
         raise RuntimeError("secret-host-exception")
 
-    monkeypatch.setattr("goal_plus.pi_tool.call_pi_tool", raises_raw_error)
+    monkeypatch.setattr(pi_worker_launcher, "_run_host_tool", raises_raw_error)
     response = proxy.dispatch(context_request)
     assert response == {
         "ok": False,
-        "error": "blind worker tool response is unavailable",
+        "error": "worker tool response is unavailable",
     }
     assert "secret-host-exception" not in json.dumps(response)
 
@@ -598,7 +684,8 @@ def test_blind_tool_proxy_reduces_verifier_and_iteration_results_to_receipts(
         },
     }
     monkeypatch.setattr(
-        "goal_plus.pi_tool.call_pi_tool",
+        pi_worker_launcher,
+        "_run_host_tool",
         lambda *_args: {
             "run_id": "run_1",
             "candidate_id": "c001",
@@ -623,7 +710,8 @@ def test_blind_tool_proxy_reduces_verifier_and_iteration_results_to_receipts(
     assert "passed" not in json.dumps(verified)
     assert "score" not in json.dumps(verified)
     monkeypatch.setattr(
-        "goal_plus.pi_tool.call_pi_tool",
+        pi_worker_launcher,
+        "_run_host_tool",
         lambda *_args: {
             "run_id": "run_1",
             "candidate_id": "c001",
@@ -635,12 +723,13 @@ def test_blind_tool_proxy_reduces_verifier_and_iteration_results_to_receipts(
     )
     assert proxy.dispatch(verifier_request) == {
         "ok": False,
-        "error": "blind worker tool response is unavailable",
+        "error": "worker tool response is unavailable",
     }
 
     legacy_private_marker = "legacy-private-score-and-summary"
     monkeypatch.setattr(
-        "goal_plus.pi_tool.call_pi_tool",
+        pi_worker_launcher,
+        "_run_host_tool",
         lambda *_args: {
             "run_id": "run_1",
             "candidate_id": "c001",
@@ -672,12 +761,12 @@ def test_blind_tool_proxy_reduces_verifier_and_iteration_results_to_receipts(
         raise RuntimeError("private-verifier-exception")
 
     monkeypatch.setattr(
-        "goal_plus.pi_tool.call_pi_tool", raises_private_verifier_error
+        pi_worker_launcher, "_run_host_tool", raises_private_verifier_error
     )
     verifier_error = proxy.dispatch(verifier_request)
     assert verifier_error == {
         "ok": False,
-        "error": "blind worker tool response is unavailable",
+        "error": "worker tool response is unavailable",
     }
     assert "private-verifier-exception" not in json.dumps(verifier_error)
 
@@ -690,7 +779,8 @@ def test_blind_tool_proxy_reduces_verifier_and_iteration_results_to_receipts(
         },
     }
     monkeypatch.setattr(
-        "goal_plus.pi_tool.call_pi_tool",
+        pi_worker_launcher,
+        "_run_host_tool",
         lambda *_args: [
             {
                 "run_id": "run_1",
@@ -719,7 +809,8 @@ def test_blind_tool_proxy_reduces_verifier_and_iteration_results_to_receipts(
     assert "summary" not in json.dumps(iterations)
 
     monkeypatch.setattr(
-        "goal_plus.pi_tool.call_pi_tool",
+        pi_worker_launcher,
+        "_run_host_tool",
         lambda *_args: [
             {
                 "run_id": "run_1",
@@ -733,12 +824,13 @@ def test_blind_tool_proxy_reduces_verifier_and_iteration_results_to_receipts(
     )
     assert proxy.dispatch(iteration_request) == {
         "ok": False,
-        "error": "blind worker tool response is unavailable",
+        "error": "worker tool response is unavailable",
     }
 
     legacy_iteration_marker = "legacy-private-iteration"
     monkeypatch.setattr(
-        "goal_plus.pi_tool.call_pi_tool",
+        pi_worker_launcher,
+        "_run_host_tool",
         lambda *_args: [
             {
                 "iteration": 2,
@@ -780,14 +872,15 @@ def test_blind_tool_proxy_reduces_verifier_and_iteration_results_to_receipts(
         called = True
         return {}
 
-    monkeypatch.setattr("goal_plus.pi_tool.call_pi_tool", must_not_call)
+    monkeypatch.setattr(pi_worker_launcher, "_run_host_tool", must_not_call)
     assert proxy.dispatch(evidence_request) == {
         "ok": False,
-        "error": "blind worker tool response is unavailable",
+        "error": "worker tool response is unavailable",
     }
-    assert called is False
+    assert called is True
 
-    monkeypatch.setattr("goal_plus.pi_tool.call_pi_tool", must_not_call)
+    called = False
+    monkeypatch.setattr(pi_worker_launcher, "_run_host_tool", must_not_call)
     blocked = proxy.dispatch(
         {
             "tool": "search_get_evidence_detail",
@@ -800,7 +893,7 @@ def test_blind_tool_proxy_reduces_verifier_and_iteration_results_to_receipts(
     )
     assert blocked == {
         "ok": False,
-        "error": "blind worker tool response is unavailable",
+        "error": "worker tool response is unavailable",
     }
     assert called is False
 
@@ -822,9 +915,24 @@ def test_bubblewrap_hides_runtime_and_ground_truth_but_keeps_host_tools(
     (source / "input.c").write_text("/* public source */\n", encoding="utf-8")
     runtime_secret = root / "runs" / "all-candidates.json"
     runtime_secret.write_text('{"secret": true}\n', encoding="utf-8")
+    candidate_state = root / "runs" / "run_1" / "candidates" / "c001"
+    candidate_state.mkdir(parents=True)
+    candidate_record = candidate_state / "candidate.json"
+    candidate_record.write_text(
+        '{"candidate_id": "c001", "execution_generation": 1}\n',
+        encoding="utf-8",
+    )
+    peer_record = (
+        root / "runs" / "run_1" / "candidates" / "c002" / "candidate.json"
+    )
+    peer_record.parent.mkdir()
+    peer_record.write_text('{"secret": true}\n', encoding="utf-8")
     ground_truth = tmp_path / "cases" / "ground-truth.json"
     ground_truth.parent.mkdir()
     ground_truth.write_text('{"answer": true}\n', encoding="utf-8")
+    public_tests = tmp_path / "public-tests"
+    public_tests.mkdir()
+    (public_tests / "test.txt").write_text("public\n", encoding="utf-8")
     session_root = root / "host-sessions" / "pi"
     session_root.mkdir(parents=True)
     extension = _fixture_extension(tmp_path)
@@ -834,7 +942,12 @@ def test_bubblewrap_hides_runtime_and_ground_truth_but_keeps_host_tools(
     (pi_home / "auth.json").write_text("{}\n", encoding="utf-8")
     (pi_home / "models-store.json").write_text("{}\n", encoding="utf-8")
 
-    def fake_call(_root: Path, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    def fake_call(
+        _root: Path,
+        tool: str,
+        args: dict[str, Any],
+        _environment: dict[str, str],
+    ) -> dict[str, Any]:
         assert tool == "search_get_agent_context"
         assert args == {"agent_session_id": "agent_1"}
         return {
@@ -851,15 +964,34 @@ def test_bubblewrap_hides_runtime_and_ground_truth_but_keeps_host_tools(
             },
         }
 
-    monkeypatch.setattr("goal_plus.pi_tool.call_pi_tool", fake_call)
+    monkeypatch.setattr(
+        "experiments.benchmark_compare.pi_worker_launcher._run_host_tool",
+        fake_call,
+    )
     script = "\n".join(
         (
             "import json, os, pathlib, subprocess, sys",
             f"assert not pathlib.Path({str(ground_truth)!r}).exists()",
             f"assert not pathlib.Path({str(runtime_secret)!r}).exists()",
+            "runtime_root = pathlib.Path(os.environ['GOAL_PLUS_ROOT'])",
+            "candidate_record = runtime_root / 'runs' / 'run_1' / 'candidates' / 'c001' / 'candidate.json'",
+            "assert json.loads(candidate_record.read_text())['execution_generation'] == 1",
+            f"assert not pathlib.Path({str(peer_record)!r}).exists()",
+            f"public_test = pathlib.Path({str(public_tests / 'test.txt')!r})",
+            "assert public_test.read_text() == 'public\\n'",
+            "try:",
+            " public_test.write_text('changed')",
+            " raise AssertionError('public test was writable')",
+            "except OSError:",
+            " pass",
+            "try:",
+            " candidate_record.write_text('{}')",
+            " raise AssertionError('candidate fencing state was writable')",
+            "except OSError:",
+            " pass",
             "assert os.environ['TEST_ALLOWED'] == 'yes'",
             "assert 'TEST_HIDDEN' not in os.environ",
-            "assert 'GOAL_PLUS_ROOT' not in os.environ",
+            f"assert os.environ['GOAL_PLUS_ROOT'] == {str(root)!r}",
             "assert 'GOAL_PLUS_SOURCE_PATH' not in os.environ",
             f"assert pathlib.Path(os.environ[{TOOL_SOCKET_ENV!r}]).exists()",
             "pi_home = pathlib.Path(os.environ['PI_CODING_AGENT_DIR'])",
@@ -913,19 +1045,22 @@ def test_bubblewrap_hides_runtime_and_ground_truth_but_keeps_host_tools(
         "TEST_ALLOWED": "yes",
         "TEST_HIDDEN": "no",
     }
+    worker_command = _worker_command(
+        script,
+        session_root=session_root,
+        extension=extension,
+    )
+    worker_command[0] = "/usr/bin/python3"
     worker = BubblewrapWorker(
         context=_context(workspace),
         policy=_policy(
             "source",
             writable=("submission",),
             pass_env=("TEST_ALLOWED",),
+            read_only_host=(str(public_tests),),
             evaluation_mode="blind",
         ),
-        command=_worker_command(
-            script,
-            session_root=session_root,
-            extension=extension,
-        ),
+        command=worker_command,
         environment=environment,
     )
     private_runtime = worker.proxy.socket_dir

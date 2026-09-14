@@ -7,9 +7,17 @@ from typing import Literal
 
 
 GoalPlusWorkerHost = Literal["codex", "pi-rpc"]
+GoalPlusObservedWorkerHost = Literal["codex", "pi-rpc", "thinkthread"]
 GoalPlusWorkspaceBackend = Literal["git_worktree", "thinkthread"]
 GoalPlusPromotionMode = Literal["apply", "artifact_only"]
 GOAL_PLUS_MODEL_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*\Z")
+GOAL_PLUS_CONTROLLER_OWNED_CLOSEOUT_TOOLS = (
+    "goal_plus_record_search_result",
+    "goal_plus_set_status",
+    "search_promote",
+    "search_report",
+    "search_select",
+)
 
 
 def goal_plus_entrypoint(worker_host: GoalPlusWorkerHost) -> str:
@@ -18,6 +26,21 @@ def goal_plus_entrypoint(worker_host: GoalPlusWorkerHost) -> str:
     if worker_host == "pi-rpc":
         return "/goal-plus"
     raise ValueError(f"unsupported Goal Plus worker host: {worker_host}")
+
+
+def goal_plus_worker_host(
+    native_host: str,
+    workspace_backend: str,
+) -> GoalPlusObservedWorkerHost:
+    """Derive the worker host persisted by current Goal Plus frozen specs."""
+
+    if native_host == "codex":
+        if workspace_backend == "thinkthread":
+            raise ValueError("Codex does not support ThinkThread Search")
+        return "codex"
+    if native_host == "pi":
+        return "thinkthread" if workspace_backend == "thinkthread" else "pi-rpc"
+    raise ValueError(f"unsupported Goal Plus native host: {native_host}")
 
 
 def _config_token(name: str, value: str) -> str:

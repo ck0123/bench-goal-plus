@@ -33,8 +33,10 @@ from bench_goal_plus.codex_provider import (  # noqa: E402
     codex_responses_provider_args,
 )
 from bench_goal_plus.goal_plus_command import (  # noqa: E402
+    GOAL_PLUS_CONTROLLER_OWNED_CLOSEOUT_TOOLS,
     goal_plus_command_config,
     goal_plus_entrypoint,
+    goal_plus_worker_host,
     render_goal_plus_command,
 )
 from bench_goal_plus.search_scheduler import (  # noqa: E402
@@ -161,8 +163,16 @@ def canonical_method(method: str) -> str:
     return METHOD_ALIASES.get(method, method)
 
 
+def goal_plus_host_assets(goal_plus_root: Path, host: str) -> Path:
+    for relative in (Path("assets") / host, Path(f".{host}")):
+        source = goal_plus_root / relative
+        if source.is_dir():
+            return source
+    raise FileNotFoundError(goal_plus_root / "assets" / host)
+
+
 def copy_goal_plus_assets(goal_plus_root: Path, workspace: Path) -> None:
-    source = goal_plus_root / ".codex"
+    source = goal_plus_host_assets(goal_plus_root, "codex")
     required = (source / "skills", source / "config.example.toml")
     for path in required:
         if not path.exists():
@@ -187,22 +197,25 @@ def copy_goal_plus_assets(goal_plus_root: Path, workspace: Path) -> None:
     shutil.copy2(source / "config.example.toml", target / "config.toml")
 
 
-def copy_goal_plus_pi_assets(goal_plus_root: Path, workspace: Path) -> None:
-    source = goal_plus_root / ".pi"
-    required = (
-        source / "extensions" / "goal-plus.ts",
-        source / "skills" / "goal-plus" / "SKILL.md",
-        source / "prompts",
-    )
+def goal_plus_pi_asset_paths(goal_plus_root: Path) -> tuple[Path, Path]:
+    source = goal_plus_root.expanduser().resolve() / "assets" / "pi"
+    extension = source / "extensions" / "goal-plus.ts"
+    skill = source / "skills" / "goal-plus" / "SKILL.md"
+    required = (extension, skill, source / "prompts")
     for path in required:
         if not path.exists():
             raise FileNotFoundError(path)
+    return extension, skill
 
-    target = workspace / ".pi"
-    target.mkdir()
-    shutil.copytree(source / "extensions", target / "extensions")
-    shutil.copytree(source / "skills", target / "skills")
-    shutil.copytree(source / "prompts", target / "prompts")
+
+def configure_goal_plus_pi_runtime(
+    environment: dict[str, str], goal_plus_root: Path
+) -> tuple[Path, Path]:
+    root = goal_plus_root.expanduser().resolve()
+    extension, skill = goal_plus_pi_asset_paths(root)
+    environment["GOAL_PLUS_PI_DEV_ROOT"] = str(root)
+    environment["GOAL_PLUS_PYTHON"] = str(Path(sys.executable).absolute())
+    return extension, skill
 
 
 def append_unique_lines(path: Path, lines: list[str]) -> None:
@@ -300,10 +313,6 @@ def render_goal(
         )
     if evaluation_mode not in {"visible", "blind"}:
         raise ValueError(f"unsupported evaluation mode: {evaluation_mode}")
-    if controller_only_official_evaluation and evaluation_mode != "blind":
-        raise ValueError(
-            "controller-only official evaluation requires blind worker feedback"
-        )
     if evaluation_mode == "blind":
         controller_only_official_evaluation = True
     exploration_seconds = max(1, wall_seconds - closeout_seconds)
@@ -388,7 +397,7 @@ def render_goal(
         render_controller_only_task_prompt(
             task_text, wall_seconds, closeout_seconds
         )
-        if controller_only_official_evaluation
+        if evaluation_mode == "blind"
         else render_common_task_prompt(task_text, wall_seconds, closeout_seconds)
     )
     edit_surface_limit = (
@@ -417,7 +426,16 @@ def render_goal(
             f"process iteration records `{target_metric}={target_score:g}`. Treat that stop "
             "as expected; selection, promotion, and final verification still run afterward.\n"
         )
-    if controller_only_official_evaluation:
+    controller_closeout_text = (
+        "- This fixed-budget benchmark uses host-owned closeout. Leave the Goal active and "
+        "the linked Search unsettled after worker coordination; do not call `search_select`, "
+        "`search_promote`, `goal_plus_record_search_result`, `goal_plus_set_status`, or "
+        "`search_report`. The host controller drains workers and performs those steps after "
+        "the exploration budget.\n"
+        if controller_only_official_evaluation
+        else ""
+    )
+    if evaluation_mode == "blind":
         return (
             f"{goal_plus_command}\n\n"
             f"{common_prompt.rstrip()}\n\n"
@@ -425,23 +443,15 @@ def render_goal(
             "Use the current workspace and construct a public-format-only Goal Plus search "
             "from the configuration below. The benchmark-owned Pi boundary keeps the "
             "official evaluator and official metric outside every worker trajectory; Goal "
-            "Plus receives only the public verifier and its safe shared Evidence.\n\n"
+            "Plus never receives the official evaluator or official metric.\n\n"
             "- Honor every leading typed command field in the SearchSpec.\n"
             + render_search_scheduler_instructions(search_scheduler)
-            + "- After triage and before freezing the SearchSpec, call "
-            "`goal_plus_upsert_work_items` with one required `route=\"search\"` item "
-            "for this benchmark Search. After linking the run, record "
-            "`search_routed` for that item and leave its result acceptance to the host "
-            "controller closeout.\n"
-            f"- Set `strategy.worker_host=\"{worker_host}\"`.\n"
-            + "- Set `strategy.config.global_evidence_mode=\"manual\"` so every worker can "
-            "read settled public-verifier Evidence from the other candidates as reference.\n"
-            + (
-                "- Set top-level `shared_dir.enabled=true` so verified shared tools can be "
-                "published and copied through the runtime's bounded shared-tool contract.\n"
-                if shared_dir_enabled
-                else ""
-            )
+            + "- Represent Search only through the linked Search run and "
+            "`goal_plus_record_search_result`; do not create a Goal Plus WorkItem for it.\n"
+            "- The exact Goal Plus entrypoint determines the native host; do not put a "
+            "worker host field in SearchSpec.\n"
+            "- Set `strategy.config.global_evidence_mode=\"independent\"` and top-level "
+            "`shared_dir.enabled=false` so blind candidates remain isolated.\n"
             + f"- `strategy.worker_budget.max_runtime_seconds={dispatch_seconds}` and "
             "`strategy.worker_budget.on_exceed=\"interrupt\"`; continue the same candidate "
             "lineages while useful work and outer time remain.\n"
@@ -465,11 +475,7 @@ def render_goal(
             "- Promotion verifier: the same command, role `promotion_gate`, feedback policy "
             f"`final_only`, timeout {verifier_timeout_seconds} seconds.\n"
             "- The benchmark-owned Pi shim keeps full verifier responses, worker histories, "
-            "`results.tsv`, Git administration, and official results opaque. It exposes a "
-            "schema-filtered Global Evidence view containing only public `format_valid` "
-            "Evidence, objective Views, and verified shared-tool metadata. Read it before "
-            "the first material change and periodically thereafter; treat peer information "
-            "as reference and independently verify it against the public task.\n"
+            "`results.tsv`, Git administration, and official results opaque.\n"
             "- Each worker must commit its latest artifact and submit its own final process "
             "verifier result. Do not run duplicate parent-side process verification when "
             "matching durable evidence already exists.\n"
@@ -504,17 +510,16 @@ def render_goal(
         "- Honor every leading typed command field in the SearchSpec and omit "
         "deprecated `budget.max_candidates`.\n"
         + render_search_scheduler_instructions(search_scheduler)
-        + "- After triage and before freezing the SearchSpec, call "
-        "`goal_plus_upsert_work_items` with one required `route=\"search\"` item "
-        "for this benchmark Search. After linking the run, record "
-        "`search_routed` for that item and leave its result acceptance to the host "
-        "controller closeout.\n"
-        + f"- Set `strategy.worker_host=\"{worker_host}\"` and "
+        + "- Represent Search only through the linked Search run and "
+        "`goal_plus_record_search_result`; do not create a Goal Plus WorkItem for it.\n"
+        "- The exact Goal Plus entrypoint determines the native host; do not put a "
+        "worker host field in SearchSpec. Set "
         "`strategy.orchestration_mode=\"parallel_loops\"`.\n"
         + (
             "- Set top-level `shared_dir.enabled=true`.\n"
             if shared_dir_enabled
-            else ""
+            else "- Keep top-level `shared_dir.enabled=false`; do not call shared-tool "
+            "APIs or send `toolization_decision` in verifier submissions.\n"
         )
         + f"- `strategy.worker_budget.max_runtime_seconds={dispatch_seconds}` and "
         "`strategy.worker_budget.on_exceed=\"interrupt\"`; continue the same candidate "
@@ -549,6 +554,7 @@ def render_goal(
         f"{early_stop_text}"
         f"- `strategy.config.closeout_reserve_seconds={closeout_seconds}` so host "
         "supervisors stop worker continuation before final completion work.\n"
+        f"{controller_closeout_text}"
         f"- Outer budget: {wall_seconds} seconds total, with about {exploration_seconds} "
         f"seconds for exploration and {closeout_seconds} seconds reserved for completion. "
         "Treat `GOAL_PLUS_OUTER_DEADLINE_AT` as the authoritative upper deadline.\n"
@@ -563,8 +569,15 @@ def render_plain_prompt(
     wall_seconds: int,
     closeout_seconds: int,
     controller_only_official_evaluation: bool = False,
+    evaluation_mode: str | None = None,
 ) -> str:
-    if controller_only_official_evaluation:
+    if evaluation_mode is None:
+        evaluation_mode = (
+            "blind" if controller_only_official_evaluation else "visible"
+        )
+    if evaluation_mode not in {"visible", "blind"}:
+        raise ValueError(f"unsupported evaluation mode: {evaluation_mode}")
+    if evaluation_mode == "blind":
         return render_controller_only_task_prompt(
             task_text, wall_seconds, closeout_seconds
         )
@@ -601,7 +614,9 @@ def codex_execution_args() -> list[str]:
     ]
 
 
-def codex_goal_plus_mcp_args(extra_env_vars: tuple[str, ...] = ()) -> list[str]:
+def codex_goal_plus_mcp_args(
+    extra_env_vars: tuple[str, ...] = (), *, controller_only_closeout: bool = False
+) -> list[str]:
     """Register and non-interactively approve Goal Plus for `codex exec`."""
     default_env_vars = (
         "CODEX_HOME",
@@ -617,7 +632,7 @@ def codex_goal_plus_mcp_args(extra_env_vars: tuple[str, ...] = ()) -> list[str]:
         "GOAL_PLUS_EVIDENCE_ANNOTATOR_WIRE_API",
     )
     env_vars = list(dict.fromkeys((*default_env_vars, *extra_env_vars)))
-    return [
+    args = [
         "--config",
         'mcp_servers.goal-plus.command="goal-plus"',
         "--config",
@@ -633,6 +648,15 @@ def codex_goal_plus_mcp_args(extra_env_vars: tuple[str, ...] = ()) -> list[str]:
         "--config",
         "mcp_servers.goal-plus.enabled=true",
     ]
+    if controller_only_closeout:
+        args.extend(
+            [
+                "--config",
+                "mcp_servers.goal-plus.disabled_tools="
+                + json.dumps(GOAL_PLUS_CONTROLLER_OWNED_CLOSEOUT_TOOLS),
+            ]
+        )
+    return args
 
 
 def configure_isolated_codex_home(
@@ -865,7 +889,7 @@ def prepare(args: argparse.Namespace) -> int:
             worker_host = "codex"
             worker_model = args.model
         else:
-            copy_goal_plus_pi_assets(goal_plus_root, workspace)
+            goal_plus_pi_asset_paths(goal_plus_root)
             append_unique_lines(workspace / ".gitignore", [".gp/", ".pi-log/"])
             worker_host = "pi-rpc"
             worker_model = f"{PI_PROVIDER_ID}/{args.model}"
@@ -1507,6 +1531,8 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
         payload = load_json(path)
         run_dir = path.parent
         metric_direction = None
+        native_host = None
+        workspace_backend = None
         worker_host = None
         worker_budget = None
         search_scheduler_enabled = False
@@ -1518,10 +1544,22 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
         if isinstance(frozen_spec_id, str):
             frozen_spec_path = root / "specs" / frozen_spec_id / "frozen_spec.json"
             if frozen_spec_path.is_file():
-                spec = load_json(frozen_spec_path).get("spec") or {}
+                frozen = load_json(frozen_spec_path)
+                spec = frozen.get("spec") or {}
                 metric_direction = spec.get("metric_direction")
                 strategy = spec.get("strategy") or {}
-                worker_host = strategy.get("worker_host")
+                workspace = spec.get("workspace") or {}
+                native_host = frozen.get("native_host")
+                workspace_backend = workspace.get("backend")
+                if isinstance(native_host, str) and isinstance(
+                    workspace_backend, str
+                ):
+                    try:
+                        worker_host = goal_plus_worker_host(
+                            native_host, workspace_backend
+                        )
+                    except ValueError:
+                        worker_host = None
                 worker_budget = strategy.get("worker_budget")
                 search_scheduler_spec = strategy.get("search_scheduler")
                 search_scheduler_enabled = search_scheduler_spec is not None
@@ -1676,6 +1714,8 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
                 "process_verifier_command_count": len(process_verifier_logs),
                 "promotion_verifier_command_count": len(promotion_verifier_logs),
                 "metric_direction": metric_direction,
+                "native_host": native_host,
+                "workspace_backend": workspace_backend,
                 "worker_host": worker_host,
                 "worker_budget": worker_budget,
                 "pi_pool_jobs": pi_pool_jobs_by_run.get(str(payload.get("run_id")), []),
@@ -2101,254 +2141,38 @@ def _goal_plus_runtime_types() -> tuple[type[Any], type[Any], type[Any]]:
     return FileGoalPlusRuntime, FileSearchRuntime, SearchTools
 
 
-def _ensure_controller_search_work_item(
-    goal_runtime: Any, goal_plus_id: str, run_id: str
-) -> str:
-    """Return the auditable work item that controller closeout will resolve."""
-    goal = goal_runtime.status(goal_plus_id)
-    current_items = [
-        item
-        for item in goal.work_items
-        if item.goal_revision == goal.goal_revision
+def _public_gate_compliant_iterations(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        iteration
+        for iteration in candidate.get("iterations", [])
+        if isinstance(iteration, dict)
+        and iteration.get("process_passed") is True
+        and type(iteration.get("iteration")) is int
+        and isinstance(iteration.get("git_head"), str)
+        and iteration.get("git_artifact_clean") is True
+        and not iteration.get("touched_denied_files", False)
+        and not iteration.get("changed_outside_allowed", False)
+        and iteration.get("disposition") not in {"discard", "failure"}
+        and type(iteration.get("score")) in {int, float}
     ]
-    linked_items = [
-        item
-        for item in current_items
-        if item.route == "search" and item.search_run_id == run_id
-    ]
-    if len(linked_items) > 1:
-        raise RuntimeError(
-            f"Goal Plus {goal_plus_id} has multiple work items for Search run {run_id}"
-        )
-    if linked_items:
-        linked_item = linked_items[0]
-        if linked_item.status in {"planned", "blocked", "failed"}:
-            goal_runtime.record_work_event(
-                goal_plus_id,
-                linked_item.work_item_id,
-                "search_routed",
-                "Controller closeout resumed the linked fixed-budget Search run.",
-                search_run_id=run_id,
-                evidence=[{"type": "search_run", "run_id": run_id}],
-            )
-        return linked_item.work_item_id
-
-    unbound_search_items = [
-        item
-        for item in current_items
-        if item.route == "search"
-        and item.status in {"planned", "blocked", "failed"}
-        and item.search_run_id is None
-    ]
-    if len(unbound_search_items) > 1:
-        raise RuntimeError(
-            f"Goal Plus {goal_plus_id} has ambiguous unbound Search work items"
-        )
-    if unbound_search_items:
-        work_item_id = unbound_search_items[0].work_item_id
-    else:
-        # A goal-plus agent can drive the fixed-budget Search run through an
-        # ordinary "main" work item whose scope names the run, then complete the
-        # goal on its own before controller closeout runs. In that terminal state
-        # the goal is no longer active, so the controller cannot upsert a search
-        # item or record a search_routed event (both require status=="active").
-        # Reuse that accepted main work item as the auditable item instead.
-        scope_matched = [
-            item
-            for item in current_items
-            if item.status == "accepted"
-            and run_id in item.scope
-        ]
-        if len(scope_matched) > 1:
-            raise RuntimeError(
-                f"Goal Plus {goal_plus_id} has multiple accepted work items "
-                f"scoping Search run {run_id}"
-            )
-        if len(scope_matched) == 1:
-            return scope_matched[0].work_item_id
-        # The host may interrupt the agent before it drafts any work item plan,
-        # leaving an active goal with an empty current-revision work list (the
-        # common early-stop-on-live-pass shape). The controller is authoritative
-        # for the drained Search run, so a dedicated auditable item is created
-        # now. The goal is active in this shape, so upsert is legal here.
-        work_item_id = "benchmark_search"
-        goal_runtime.upsert_work_items(
-            goal_plus_id,
-            [
-                {
-                    "work_item_id": work_item_id,
-                    "title": "Run benchmark Search",
-                    "objective": (
-                        "Run the fixed-budget candidate search and let controller closeout "
-                        "apply the frozen selection and promotion contract."
-                    ),
-                    "route": "search",
-                    "depends_on": [],
-                    "scope": [run_id],
-                    "acceptance": [
-                        "The linked Search run is selected and promoted",
-                        "The controller promotion verifier passes",
-                        "The Goal Plus Search result is recorded",
-                    ],
-                    "required": True,
-                }
-            ],
-        )
-
-    goal_runtime.record_work_event(
-        goal_plus_id,
-        work_item_id,
-        "search_routed",
-        "Controller closeout adopted the linked fixed-budget Search run.",
-        search_run_id=run_id,
-        evidence=[{"type": "search_run", "run_id": run_id}],
-    )
-    return work_item_id
 
 
-def _accept_controller_search_work_item(
-    goal_runtime: Any,
-    goal_plus_id: str,
-    work_item_id: str,
-    *,
-    run_id: str,
-    candidate_id: str,
-    selected_score: Any,
-) -> None:
-    evidence = [
-        {
-            "type": "controller_closeout",
-            "run_id": run_id,
-            "selected_candidate_id": candidate_id,
-            "selected_score": selected_score,
-        }
-    ]
-    goal = goal_runtime.status(goal_plus_id)
-    item = next(
-        item
-        for item in goal.work_items
-        if item.goal_revision == goal.goal_revision
-        and item.work_item_id == work_item_id
-    )
-    if item.status == "active":
-        goal_runtime.record_work_event(
-            goal_plus_id,
-            work_item_id,
-            "result",
-            "Controller selected and promoted the verifier-backed Search result.",
-            search_run_id=run_id,
-            evidence=evidence,
+def _verify_unsettled_public_gate_candidates(
+    tools: Any, run_id: str, candidate_paths: list[Path]
+) -> list[str]:
+    candidates = [load_json(path) for path in candidate_paths]
+    if any(_public_gate_compliant_iterations(candidate) for candidate in candidates):
+        return []
+    candidate_ids = [candidate.get("candidate_id") for candidate in candidates]
+    if any(not isinstance(candidate_id, str) for candidate_id in candidate_ids):
+        raise RuntimeError("public-gate candidate evidence is malformed")
+    for candidate_id in candidate_ids:
+        tools.search_run_verifier(
+            run_id,
+            candidate_id,
+            hypothesis="controller post-deadline public verification",
         )
-        goal = goal_runtime.status(goal_plus_id)
-        item = next(
-            item
-            for item in goal.work_items
-            if item.goal_revision == goal.goal_revision
-            and item.work_item_id == work_item_id
-        )
-    if item.status == "result_ready":
-        goal_runtime.record_work_event(
-            goal_plus_id,
-            work_item_id,
-            "accepted",
-            "Controller verified the Search selection, promotion, and recorded result.",
-            search_run_id=run_id,
-            evidence=evidence,
-        )
-    elif item.status != "accepted":
-        raise RuntimeError(
-            f"Goal Plus work item {work_item_id} cannot be accepted from {item.status}"
-        )
-
-
-def _accept_controller_closeout_items(
-    goal_runtime: Any,
-    goal_plus_id: str,
-    *,
-    run_id: str,
-    selected_candidate_id: str,
-    selected_score: Any,
-) -> None:
-    """Resolve leftover orchestration items before the goal completes.
-
-    A goal-plus agent may draft a terminal "closeout" (or similar) main-route
-    work item that it never executes -- it depends on the Search run that the
-    controller owns.  The controller is authoritative for that item after the
-    frozen budget ends, so it drives the placeholder to accepted, which lets the
-    evaluation gate produce a real PASS / NOT_PASS instead of refusing to
-    complete.  Subagent route items are left untouched: they represent live
-    concurrent work that must not be swallowed.
-    """
-    goal = goal_runtime.status(goal_plus_id)
-    current_items = [
-        item
-        for item in goal.work_items
-        if item.goal_revision == goal.goal_revision
-    ]
-    unresolved = [
-        item
-        for item in current_items
-        if item.route != "search"
-        and item.route != "subagent"
-        and item.status != "accepted"
-        and not (not item.required and item.status in {"cancelled", "superseded"})
-    ]
-    for item in unresolved:
-        work_item_id = item.work_item_id
-        evidence = [
-            {
-                "type": "controller_closeout",
-                "run_id": run_id,
-                "selected_candidate_id": selected_candidate_id,
-                "selected_score": selected_score,
-            }
-        ]
-        if item.status in {"planned", "blocked", "failed"}:
-            goal_runtime.record_work_event(
-                goal_plus_id,
-                work_item_id,
-                "dispatch",
-                "Controller closeout adopted the orchestration placeholder.",
-                search_run_id=run_id,
-                evidence=evidence,
-            )
-            goal = goal_runtime.status(goal_plus_id)
-            item = next(
-                item
-                for item in goal.work_items
-                if item.goal_revision == goal.goal_revision
-                and item.work_item_id == work_item_id
-            )
-        if item.status == "active":
-            goal_runtime.record_work_event(
-                goal_plus_id,
-                work_item_id,
-                "result",
-                "Controller closeout resolved the orchestration placeholder.",
-                search_run_id=run_id,
-                evidence=evidence,
-            )
-            goal = goal_runtime.status(goal_plus_id)
-            item = next(
-                item
-                for item in goal.work_items
-                if item.goal_revision == goal.goal_revision
-                and item.work_item_id == work_item_id
-            )
-        if item.status == "result_ready":
-            goal_runtime.record_work_event(
-                goal_plus_id,
-                work_item_id,
-                "accepted",
-                "Controller closeout accepted the orchestration placeholder.",
-                search_run_id=run_id,
-                evidence=evidence,
-            )
-        elif item.status != "accepted":
-            raise RuntimeError(
-                f"Goal Plus work item {work_item_id} cannot be accepted "
-                f"from {item.status}"
-            )
+    return candidate_ids
 
 
 def _expected_public_gate_selection(run_path: Path) -> dict[str, Any]:
@@ -2368,19 +2192,7 @@ def _expected_public_gate_selection(run_path: Path) -> dict[str, Any]:
     ):
         raise RuntimeError("public-gate candidate evidence is malformed")
     for candidate in sorted(candidates, key=lambda item: item["candidate_id"]):
-        compliant = [
-            iteration
-            for iteration in candidate.get("iterations", [])
-            if isinstance(iteration, dict)
-            and iteration.get("process_passed") is True
-            and type(iteration.get("iteration")) is int
-            and isinstance(iteration.get("git_head"), str)
-            and iteration.get("git_artifact_clean") is True
-            and not iteration.get("touched_denied_files", False)
-            and not iteration.get("changed_outside_allowed", False)
-            and iteration.get("disposition") not in {"discard", "failure"}
-            and type(iteration.get("score")) in {int, float}
-        ]
+        compliant = _public_gate_compliant_iterations(candidate)
         if compliant:
             latest = max(compliant, key=lambda item: item["iteration"])
             compliant_scores.update(float(item["score"]) for item in compliant)
@@ -2426,6 +2238,7 @@ def finalize_goal_plus_search(
     workspace: Path,
     deterministic_public_gate: bool = False,
     verify_unsettled_candidates: bool = True,
+    require_unsettled_at_entry: bool = False,
 ) -> dict[str, Any]:
     """Controller-owned drain, selection, and promotion after agent execution."""
     FileGoalPlusRuntime, FileSearchRuntime, SearchTools = _goal_plus_runtime_types()
@@ -2447,6 +2260,16 @@ def finalize_goal_plus_search(
         goals_by_run: dict[str, list[str]] = {}
         for goal_path in goal_paths:
             goal = goal_runtime.status(goal_path.parent.name)
+            if require_unsettled_at_entry and (
+                goal.status != "active"
+                or (
+                    goal.linked_search is not None
+                    and goal.linked_search.selected_candidate_id is not None
+                )
+            ):
+                raise RuntimeError(
+                    "controller-owned closeout found an Agent-finalized Goal"
+                )
             if goal.linked_search is not None and goal.linked_search.run_id:
                 goals_by_run.setdefault(goal.linked_search.run_id, []).append(
                     goal.goal_plus_id
@@ -2455,6 +2278,13 @@ def finalize_goal_plus_search(
             run_path = root / "runs" / run_id / "run.json"
             run_data = load_json(run_path)
             initial_state = run_data.get("state")
+            if require_unsettled_at_entry and (
+                initial_state in {"ready_to_promote", "promoted"}
+                or run_data.get("selected_candidate_id") is not None
+            ):
+                raise RuntimeError(
+                    "controller-owned closeout found an Agent-selected Search run"
+                )
             candidate_paths = sorted(
                 (run_path.parent / "candidates").glob("*/candidate.json")
             )
@@ -2471,6 +2301,12 @@ def finalize_goal_plus_search(
             else:
                 try:
                     if deterministic_public_gate:
+                        if verify_unsettled_candidates:
+                            verified_in_closeout.extend(
+                                _verify_unsettled_public_gate_candidates(
+                                    tools, run_id, candidate_paths
+                                )
+                            )
                         # Selection may append a controller-verifier iteration. The
                         # deadline snapshot, not that closeout side effect, is authoritative.
                         public_gate_expected = _prepare_public_gate_selection(run_path)
@@ -2539,54 +2375,15 @@ def finalize_goal_plus_search(
                     )
                 goal = goal_runtime.status(goal_plus_id)
                 if goal.status != "complete":
-                    # Reactivate a terminal-but-incomplete goal so the closeout
-                    # can resolve its outstanding Search work item. An agent that
-                    # promotes a Search run but then sets the goal "blocked"
-                    # (e.g. it gives up during final_audit) leaves the drained
-                    # run's route=search work item unaccepted. Work events --
-                    # which are the ONLY way to accept a work item -- require an
-                    # active goal record, and set_status("complete") in turn
-                    # requires every work item "accepted". So on a blocked goal
-                    # the item can neither be accepted (needs active) nor skipped
-                    # (unresolved), and closeout dead-locks into INFRA_ERROR. The
-                    # controller is authoritative for the drained Search run, so
-                    # it reactivates the goal (blocked -> active is an unguarded,
-                    # side-effect-free transition) to drive that item to accepted.
                     if goal.status != "active":
                         goal_runtime.set_status(
                             goal_plus_id,
                             status="active",
                             reason=(
                                 "controller closeout reactivating terminal goal to "
-                                "resolve the drained fixed-budget Search work item"
+                                "record the drained fixed-budget Search result"
                             ),
                         )
-                    # Drive the controller-owned Search work item to "accepted".
-                    # The "stop search on live pass" early-stop path leaves the
-                    # route=search work item "active" (result acceptance is
-                    # deliberately deferred to this closeout), and
-                    # _accept_controller_closeout_items skips route=search items,
-                    # so without this the item stays unresolved and set_status
-                    # ("complete") raises "unresolved work items: ...=active",
-                    # misclassifying a verified live pass as INFRA_ERROR.
-                    search_work_item_id = _ensure_controller_search_work_item(
-                        goal_runtime, goal_plus_id, run_id
-                    )
-                    _accept_controller_search_work_item(
-                        goal_runtime,
-                        goal_plus_id,
-                        search_work_item_id,
-                        run_id=run_id,
-                        candidate_id=candidate_id,
-                        selected_score=selection.get("selected_score"),
-                    )
-                    _accept_controller_closeout_items(
-                        goal_runtime,
-                        goal_plus_id,
-                        run_id=run_id,
-                        selected_candidate_id=candidate_id,
-                        selected_score=selection.get("selected_score"),
-                    )
                     goal_runtime.set_status(
                         goal_plus_id,
                         status="complete",
@@ -3281,6 +3078,10 @@ def execute(args: argparse.Namespace) -> int:
             recorded_command = None
         else:
             qualified_model = f"{PI_PROVIDER_ID}/{args.model}"
+            goal_plus_root = Path(manifest["environment"]["goal_plus_root"])
+            extension, skill = configure_goal_plus_pi_runtime(
+                environment, goal_plus_root
+            )
             prompt = render_goal(
                 task_text=(workspace / "TASK.md").read_text(),
                 artifact_name=manifest["task"]["artifact_name"],
@@ -3323,9 +3124,9 @@ def execute(args: argparse.Namespace) -> int:
                 "--no-prompt-templates",
                 "--no-context-files",
                 "--extension",
-                str(workspace / ".pi/extensions/goal-plus.ts"),
+                str(extension),
                 "--skill",
-                str(workspace / ".pi/skills/goal-plus/SKILL.md"),
+                str(skill),
                 prompt,
             ]
             stdout_path = run_dir / "events.jsonl"

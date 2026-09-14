@@ -94,6 +94,7 @@ class PortableBenchmarkAdapterTest(unittest.TestCase):
                 "method": "plain-pi",
                 "reasoning_effort": "medium",
                 "workspaces": [str(workspace)],
+                "task": {"controller_only_official_evaluation": False},
                 "budget": {
                     "wall_time_seconds": 300,
                     "soft_closeout_seconds": 60,
@@ -207,12 +208,18 @@ class PortableBenchmarkAdapterTest(unittest.TestCase):
                 "ephemeral": False,
             }
             goal_plus = experiment.codex_command(goal_plus=True, **common)
+            controller_owned = experiment.codex_command(
+                goal_plus=True, controller_only_closeout=True, **common
+            )
             plain = experiment.codex_command(goal_plus=False, **common)
             self.assertNotIn("--ignore-user-config", goal_plus)
             self.assertIn("--ignore-user-config", plain)
             self.assertIn('model_reasoning_effort="medium"', goal_plus)
             self.assertIn("features.multi_agent=true", goal_plus)
             self.assertIn("agents.enabled=true", goal_plus)
+            self.assertTrue(
+                any("disabled_tools=" in value for value in controller_owned)
+            )
             self.assertIn(
                 "agents.max_concurrent_threads_per_session=5",
                 goal_plus,
@@ -231,6 +238,7 @@ class PortableBenchmarkAdapterTest(unittest.TestCase):
                 workspace = run_dir / "workspace"
                 workspace.mkdir(parents=True)
                 (workspace / "TASK.md").write_text("optimize\n", encoding="utf-8")
+                (workspace / "GOAL.md").write_text("prompt", encoding="utf-8")
                 (workspace / experiment.ARTIFACT_NAME).write_text(
                     "# candidate\n", encoding="utf-8"
                 )
@@ -238,6 +246,7 @@ class PortableBenchmarkAdapterTest(unittest.TestCase):
                     "workspace": str(workspace),
                     "reasoning_effort": "medium",
                     "environment": {"runtime_bin": str(root / "bin")},
+                    "task": {"controller_only_official_evaluation": False},
                     "budget": {
                         "wall_time_seconds": 300,
                         "soft_closeout_seconds": 30,
@@ -251,7 +260,7 @@ class PortableBenchmarkAdapterTest(unittest.TestCase):
                     api_base="http://proxy.example/v1",
                     codex_bin="codex",
                 )
-                seed = {"budget": {"total_claimed": 1}}
+                seed = {"valid": True, "budget": {"total_claimed": 1}}
                 final = {"valid": True, "budget": {"total_claimed": 1}}
                 annotator_usage = {
                     "input_tokens": 9,
@@ -324,6 +333,9 @@ class PortableBenchmarkAdapterTest(unittest.TestCase):
                         "max_concurrent_threads_per_session"
                     ],
                     2,
+                )
+                self.assertFalse(
+                    codex_command.call_args.kwargs["controller_only_closeout"]
                 )
                 self.assertEqual(
                     control["evidence_annotator_usage"], annotator_usage
@@ -577,10 +589,11 @@ class PortableBenchmarkAdapterTest(unittest.TestCase):
             (spec_dir / "frozen_spec.json").write_text(
                 json.dumps(
                     {
+                        "native_host": "pi",
                         "spec": {
                             "metric_direction": "minimize",
+                            "workspace": {"backend": "git_worktree"},
                             "strategy": {
-                                "worker_host": "pi-rpc",
                                 "worker_budget": {
                                     "min_runtime_seconds": 150,
                                     "min_verifier_runs": 1,
@@ -714,7 +727,11 @@ class PortableBenchmarkAdapterTest(unittest.TestCase):
     def test_controller_closeout_uses_pinned_runtime_and_restores_environment(self) -> None:
         with patch.dict(
             os.environ,
-            {"PATH": "/outer/bin", "GOAL_PLUS_VERIFIER_TMPDIR": "outer-runtime"},
+            {
+                "PATH": "/outer/bin",
+                "GOAL_PLUS_VERIFIER_TMPDIR": "outer-runtime",
+                "GOAL_PLUS_OUTER_DEADLINE_AT": "outer-deadline",
+            },
             clear=False,
         ):
             runtime_bin = ROOT / ".tmp/tests/pinned-bin"
@@ -722,6 +739,7 @@ class PortableBenchmarkAdapterTest(unittest.TestCase):
             with experiment.controller_subprocess_environment(
                 runtime_bin_dir=runtime_bin,
                 verifier_tmpdir=verifier_runtime,
+                outer_deadline_at="controller-closeout",
             ):
                 self.assertEqual(
                     os.environ["PATH"],
@@ -731,8 +749,15 @@ class PortableBenchmarkAdapterTest(unittest.TestCase):
                     os.environ["GOAL_PLUS_VERIFIER_TMPDIR"],
                     str(verifier_runtime),
                 )
+                self.assertEqual(
+                    os.environ["GOAL_PLUS_OUTER_DEADLINE_AT"],
+                    "controller-closeout",
+                )
             self.assertEqual(os.environ["PATH"], "/outer/bin")
             self.assertEqual(os.environ["GOAL_PLUS_VERIFIER_TMPDIR"], "outer-runtime")
+            self.assertEqual(
+                os.environ["GOAL_PLUS_OUTER_DEADLINE_AT"], "outer-deadline"
+            )
 
 
 if __name__ == "__main__":

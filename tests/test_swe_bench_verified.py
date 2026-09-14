@@ -231,8 +231,9 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
                 "strategy=random workers=gpt-5.6-sol*1"
             )
         )
-        self.assertIn("strategy.worker_host=codex", prompt)
-        self.assertIn("strategy.config.seed=1", prompt)
+        self.assertNotIn("strategy.worker_host", prompt)
+        self.assertNotIn("strategy.config.seed", prompt)
+        self.assertIn("entrypoint determine the native host", prompt)
         self.assertIn("GOAL_PLUS_SUPPLEMENTAL_EVALUATION_REQUIRED=0", command)
         self.assertIn("gpt-5.6-sol", command)
         self.assertNotIn("OPENAI_API_KEY", joined)
@@ -293,8 +294,8 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         )
         spec = {
             "budget": {"max_parallel": max_parallel},
+            "workspace": {"backend": "git_worktree"},
             "strategy": {
-                "worker_host": worker_host,
                 "orchestration_mode": "parallel_loops",
                 "worker_budget": {
                     "max_runtime_seconds": 1500,
@@ -360,6 +361,7 @@ class SweBenchVerifiedContractTest(unittest.TestCase):
         write_json(
             root / "specs/spec_test/frozen_spec.json",
             {
+                "native_host": "codex" if worker_host == "codex" else "pi",
                 "spec": spec,
                 "verifier_hashes": {
                     ".goal-plus-verifiers/visible_test_verifier.py": (

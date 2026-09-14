@@ -8,11 +8,11 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -73,10 +73,11 @@ from experiments.openevolve_compare.experiment import (  # noqa: E402
     collect_goal_plus_state,
     commit_workspace,
     configure_evidence_annotator_environment,
+    configure_goal_plus_pi_runtime,
     configure_isolated_codex_home,
     copy_goal_plus_assets,
-    copy_goal_plus_pi_assets,
     finalize_goal_plus_search,
+    goal_plus_pi_asset_paths,
     goal_plus_incomplete_reason,
     parse_codex_events,
     parse_pi_events,
@@ -662,7 +663,7 @@ def prepare(args: argparse.Namespace) -> int:
             controller_only_official_evaluation=(
                 CONTROLLER_ONLY_OFFICIAL_EVALUATION
             ),
-            search_scheduler=search_scheduler,
+            evaluation_mode=EVALUATION_MODE,
         )
         prompt_contract = {
             "mode": f"{args.method.replace('-', '_')}_common_prompt",
@@ -683,7 +684,7 @@ def prepare(args: argparse.Namespace) -> int:
             worker_host = "codex"
             worker_model = args.model
         else:
-            copy_goal_plus_pi_assets(goal_plus_root, workspace)
+            goal_plus_pi_asset_paths(goal_plus_root)
             append_unique_lines(workspace / ".gitignore", [".gp/", ".pi-log/"])
             worker_host = "pi-rpc"
             worker_model = f"{args.pi_provider_id}/{args.model}"
@@ -711,6 +712,7 @@ def prepare(args: argparse.Namespace) -> int:
                 CONTROLLER_ONLY_OFFICIAL_EVALUATION
             ),
             evaluation_mode=EVALUATION_MODE,
+            search_scheduler=search_scheduler,
             early_stop_contract=GOAL_PLUS_EARLY_STOP_CONTRACT,
         )
         (workspace / "GOAL.md").write_text(goal_prompt)
@@ -725,6 +727,7 @@ def prepare(args: argparse.Namespace) -> int:
             controller_only_official_evaluation=(
                 CONTROLLER_ONLY_OFFICIAL_EVALUATION
             ),
+            evaluation_mode=EVALUATION_MODE,
         )
         prompt_contract = {
             "mode": "natural_goal_plus_entry",
@@ -1177,13 +1180,18 @@ def verified_early_stop_completion(
 
 @contextmanager
 def controller_subprocess_environment(
-    *, runtime_bin_dir: Path, verifier_tmpdir: Path
+    *,
+    runtime_bin_dir: Path,
+    verifier_tmpdir: Path,
+    outer_deadline_at: str | None = None,
 ):
     """Give controller-owned Goal Plus verifiers the resolved benchmark runtime."""
     updates = {
         "PATH": str(runtime_bin_dir) + os.pathsep + os.environ.get("PATH", ""),
         "GOAL_PLUS_VERIFIER_TMPDIR": str(verifier_tmpdir),
     }
+    if outer_deadline_at is not None:
+        updates["GOAL_PLUS_OUTER_DEADLINE_AT"] = outer_deadline_at
     previous = {key: os.environ.get(key) for key in updates}
     os.environ.update(updates)
     try:
@@ -1392,9 +1400,13 @@ def finalize_posthoc_official_selection(
 
     analysis_parent = run_dir / "controller-runtime/posthoc-selection"
     analysis_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    attempt_root = Path(
-        tempfile.mkdtemp(prefix="attempt-", dir=str(analysis_parent))
-    )
+    while True:
+        attempt_root = analysis_parent / f"attempt-{secrets.token_hex(8)}"
+        try:
+            attempt_root.mkdir(mode=0o700)
+            break
+        except FileExistsError:
+            continue
     score_record_path = run_dir / "posthoc-candidate-scores.json"
     rows: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -1714,6 +1726,7 @@ def codex_command(
     goal_plus: bool,
     ephemeral: bool,
     max_concurrent_threads_per_session: int = 5,
+    controller_only_closeout: bool = False,
 ) -> list[str]:
     command = [
         codex_bin,
@@ -1755,7 +1768,10 @@ def codex_command(
                 "agents.max_concurrent_threads_per_session="
                 f"{max_concurrent_threads_per_session}",
                 "--dangerously-bypass-hook-trust",
-                *codex_goal_plus_mcp_args(GOAL_PLUS_MCP_ENV_VARS),
+                *codex_goal_plus_mcp_args(
+                    GOAL_PLUS_MCP_ENV_VARS,
+                    controller_only_closeout=controller_only_closeout,
+                ),
             ]
         )
     command.extend(["--model", model, "-"])
@@ -1808,6 +1824,7 @@ def execute_plain(
             budget["wall_time_seconds"],
             budget["soft_closeout_seconds"],
             controller_only_official_evaluation=controller_only,
+            evaluation_mode=EVALUATION_MODE,
         )
         (lane_dir / "prompt.md").write_text(prompt)
         lane_environment = environment.copy()
@@ -1915,7 +1932,7 @@ def execute_plain(
     selection_pool = valid_lane_results or lane_results
     selected = (
         min(selection_pool, key=lambda item: item["lane"])
-        if controller_only
+        if controller_only and EVALUATION_MODE == "blind"
         else min(
             selection_pool,
             key=lambda item: score_order_key(item["evaluation"]),
@@ -1972,7 +1989,9 @@ def execute_plain(
     return control
 
 
-def _controller_only_closeout_incomplete_reason(closeout: Any) -> str | None:
+def _controller_only_closeout_incomplete_reason(
+    closeout: Any, *, require_deterministic_selection: bool = True
+) -> str | None:
     if not isinstance(closeout, dict) or closeout.get("completed") is not True:
         error = closeout.get("error") if isinstance(closeout, dict) else None
         return (
@@ -1992,11 +2011,13 @@ def _controller_only_closeout_incomplete_reason(closeout: Any) -> str | None:
             not isinstance(selection, dict)
             or not isinstance(selection.get("selected_candidate_id"), str)
             or not selection["selected_candidate_id"]
-            or selection.get("selection_rule") != PUBLIC_GATE_SELECTION_RULE
         ):
-            return (
-                "controller-only Goal Plus closeout lacks deterministic selection evidence"
-            )
+            return "controller-only Goal Plus closeout lacks selection evidence"
+        if (
+            require_deterministic_selection
+            and selection.get("selection_rule") != PUBLIC_GATE_SELECTION_RULE
+        ):
+            return "controller-only Goal Plus closeout lacks deterministic selection evidence"
         if (
             not isinstance(promotion, dict)
             or not isinstance(promotion.get("artifact_path"), str)
@@ -2077,7 +2098,7 @@ def execute_goal_plus(
             "prepared Goal Plus config does not match the task posthoc-selection contract"
         )
     is_pi = manifest.get("method", "goal-plus-codex") == "goal-plus-pi"
-    if is_pi and controller_only:
+    if controller_only:
         environment[CONTROLLER_ONLY_CLOSEOUT_ENV] = "1"
     else:
         environment.pop(CONTROLLER_ONLY_CLOSEOUT_ENV, None)
@@ -2168,13 +2189,20 @@ def execute_goal_plus(
             (manifest.get("goal_plus_config") or {}).get("shared_dir_enabled")
         ),
         controller_only_official_evaluation=controller_only,
+        evaluation_mode=EVALUATION_MODE,
         search_scheduler=search_scheduler,
         early_stop_contract=early_stop,
     )
+    if prompt != (workspace / "GOAL.md").read_text():
+        raise RuntimeError("runtime Goal Plus prompt differs from prepared GOAL.md")
     (run_dir / "prompt.md").write_text(prompt)
     reasoning_effort = manifest.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
     if is_pi:
         qualified_model = f"{pi_provider_id}/{args.model}"
+        goal_plus_root = Path(manifest["environment"]["goal_plus_root"])
+        pi_extension, pi_skill = configure_goal_plus_pi_runtime(
+            environment, goal_plus_root
+        )
         pi_home = run_dir / "pi-home"
         write_pi_models_config(
             pi_home,
@@ -2207,9 +2235,9 @@ def execute_goal_plus(
             "--no-prompt-templates",
             "--no-context-files",
             "--extension",
-            str(workspace / ".pi/extensions/goal-plus.ts"),
+            str(pi_extension),
             "--skill",
-            str(workspace / ".pi/skills/goal-plus/SKILL.md"),
+            str(pi_skill),
             prompt,
         ]
         stdin_text = None
@@ -2226,6 +2254,7 @@ def execute_goal_plus(
             goal_plus=True,
             ephemeral=False,
             max_concurrent_threads_per_session=budget["concurrency"] + 1,
+            controller_only_closeout=controller_only,
         )
         stdin_text = prompt
         recorded_command = command_for_manifest(command, args.api_base)
@@ -2260,13 +2289,19 @@ def execute_goal_plus(
         with controller_subprocess_environment(
             runtime_bin_dir=Path(manifest["environment"]["runtime_bin"]),
             verifier_tmpdir=run_dir / "controller-runtime/goal-plus",
+            # The outer Agent and Pi pools are already stopped. Reuse the trusted
+            # deadline boundary to allow recovery of settled evidence immediately.
+            outer_deadline_at=datetime.now(timezone.utc).isoformat(),
         ):
             closeout = finalize_goal_plus_search(
                 workspace,
-                deterministic_public_gate=controller_only,
+                deterministic_public_gate=(
+                    controller_only and EVALUATION_MODE == "blind"
+                ),
                 verify_unsettled_candidates=not control.get(
                     "early_stop_triggered", False
                 ),
+                require_unsettled_at_entry=controller_only,
             )
     except Exception as exc:
         closeout = {
@@ -2276,7 +2311,10 @@ def execute_goal_plus(
         }
     control["goal_plus_controller_closeout"] = closeout
     closeout_reason = (
-        _controller_only_closeout_incomplete_reason(closeout)
+        _controller_only_closeout_incomplete_reason(
+            closeout,
+            require_deterministic_selection=EVALUATION_MODE == "blind",
+        )
         if controller_only
         else None
     )
@@ -2292,7 +2330,18 @@ def execute_goal_plus(
         )
     final: dict[str, Any] | None = None
     posthoc_result: dict[str, Any] | None = None
-    if closeout_reason is None:
+    if posthoc_selection is None and (closeout_reason is None or controller_only):
+        final = evaluate_with_controller_runtime(
+            workspace,
+            "final",
+            run_dir / "controller-runtime/final",
+            benchmark_root,
+        )
+        write_json(run_dir / "final-eval.json", final)
+        copy_artifact(workspace / ARTIFACT_NAME, run_dir / ARTIFACT_NAME)
+        if closeout_reason is not None:
+            control["result_incomplete_reason"] = closeout_reason
+    elif closeout_reason is None:
         if posthoc_selection is not None:
             try:
                 posthoc_result = finalize_posthoc_official_selection(
@@ -2324,15 +2373,6 @@ def execute_goal_plus(
                 control["result_incomplete_reason"] = (
                     "controller posthoc official selection failed"
                 )
-        else:
-            final = evaluate_with_controller_runtime(
-                workspace,
-                "final",
-                run_dir / "controller-runtime/final",
-                benchmark_root,
-            )
-            write_json(run_dir / "final-eval.json", final)
-            copy_artifact(workspace / ARTIFACT_NAME, run_dir / ARTIFACT_NAME)
     else:
         control["official_evaluation_withheld"] = True
         control["result_incomplete_reason"] = closeout_reason
@@ -2707,9 +2747,14 @@ def repair_closeout(args: argparse.Namespace) -> int:
         with controller_subprocess_environment(
             runtime_bin_dir=Path(manifest["environment"]["runtime_bin"]),
             verifier_tmpdir=run_dir / "controller-runtime/goal-plus",
+            outer_deadline_at=datetime.now(timezone.utc).isoformat(),
         ):
             closeout = finalize_goal_plus_search(
-                workspace, deterministic_public_gate=controller_only
+                workspace,
+                deterministic_public_gate=(
+                    controller_only and EVALUATION_MODE == "blind"
+                ),
+                require_unsettled_at_entry=controller_only,
             )
     except Exception as exc:
         if not controller_only:
@@ -2721,7 +2766,10 @@ def repair_closeout(args: argparse.Namespace) -> int:
         }
     control["goal_plus_controller_closeout_repair"] = closeout
     controller_only_closeout_reason = (
-        _controller_only_closeout_incomplete_reason(closeout)
+        _controller_only_closeout_incomplete_reason(
+            closeout,
+            require_deterministic_selection=EVALUATION_MODE == "blind",
+        )
         if controller_only
         else None
     )
@@ -2732,7 +2780,23 @@ def repair_closeout(args: argparse.Namespace) -> int:
         )
     final: dict[str, Any] | None = None
     posthoc_result: dict[str, Any] | None = None
-    if controller_only_closeout_reason is None:
+    if posthoc_selection is None and (
+        controller_only_closeout_reason is None or controller_only
+    ):
+        final_path = run_dir / "final-eval.json"
+        if final_path.is_file():
+            final = load_json(final_path)
+        else:
+            final = evaluate_with_controller_runtime(
+                workspace,
+                "final",
+                run_dir / "controller-runtime/final",
+                benchmark_root,
+            )
+            write_json(final_path, final)
+            copy_artifact(workspace / ARTIFACT_NAME, run_dir / ARTIFACT_NAME)
+        control.pop("official_evaluation_withheld", None)
+    elif controller_only_closeout_reason is None:
         if posthoc_selection is not None:
             try:
                 posthoc_result = finalize_posthoc_official_selection(
@@ -2762,15 +2826,6 @@ def repair_closeout(args: argparse.Namespace) -> int:
                 control.pop("official_evaluation_withheld", None)
             else:
                 control["official_evaluation_withheld"] = True
-        else:
-            final = evaluate_with_controller_runtime(
-                workspace,
-                "final",
-                run_dir / "controller-runtime/final",
-                benchmark_root,
-            )
-            write_json(run_dir / "final-eval.json", final)
-            copy_artifact(workspace / ARTIFACT_NAME, run_dir / ARTIFACT_NAME)
     else:
         control["official_evaluation_withheld"] = True
     control["goal_plus"] = collect_goal_plus_state(workspace)

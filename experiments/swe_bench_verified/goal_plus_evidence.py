@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from bench_goal_plus.goal_plus_command import goal_plus_worker_host
 from bench_goal_plus.search_scheduler import (
     GoalPlusSearchScheduler,
     summarize_worker_concurrency,
@@ -642,6 +643,17 @@ def collect_goal_plus_state(
         strategy_config = (
             strategy.get("config") if isinstance(strategy.get("config"), dict) else {}
         )
+        workspace = (
+            spec.get("workspace") if isinstance(spec.get("workspace"), dict) else {}
+        )
+        native_host = frozen.get("native_host")
+        workspace_backend = workspace.get("backend")
+        worker_host = None
+        if isinstance(native_host, str) and isinstance(workspace_backend, str):
+            try:
+                worker_host = goal_plus_worker_host(native_host, workspace_backend)
+            except ValueError:
+                pass
         process_verifiers = _visible_verifier_contract(
             spec.get("process_verifiers"),
             expected_role="ranking_signal",
@@ -765,7 +777,9 @@ def collect_goal_plus_state(
                 "search_scheduler_enabled": (
                     strategy.get("search_scheduler") is not None
                 ),
-                "worker_host": strategy.get("worker_host"),
+                "native_host": native_host,
+                "workspace_backend": workspace_backend,
+                "worker_host": worker_host,
                 "orchestration_mode": strategy.get("orchestration_mode"),
                 "worker_budget": worker_budget,
                 "strategy_config": strategy_config,

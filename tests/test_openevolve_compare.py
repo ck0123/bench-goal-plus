@@ -18,6 +18,61 @@ from experiments.openevolve_compare import experiment  # noqa: E402
 
 
 class OpenEvolveComparisonTest(unittest.TestCase):
+    @staticmethod
+    def _write_public_gate_candidate(
+        root: Path, candidate_id: str, iterations: list[dict[str, object]]
+    ) -> Path:
+        path = root / "candidates" / candidate_id / "candidate.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"candidate_id": candidate_id, "iterations": iterations})
+            + "\n"
+        )
+        return path
+
+    @staticmethod
+    def _public_gate_iteration(iteration: int, score: float) -> dict[str, object]:
+        return {
+            "iteration": iteration,
+            "score": score,
+            "process_passed": True,
+            "git_head": f"{iteration:040x}",
+            "git_artifact_clean": True,
+            "touched_denied_files": False,
+            "changed_outside_allowed": False,
+            "disposition": "keep",
+        }
+
+    def test_closeout_verifies_candidates_only_when_public_gate_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "run_test"
+            run_dir.mkdir()
+            paths = [
+                self._write_public_gate_candidate(run_dir, candidate_id, [])
+                for candidate_id in ("c001", "c002")
+            ]
+            tools = mock.Mock()
+
+            verified = experiment._verify_unsettled_public_gate_candidates(
+                tools, "run_test", paths
+            )
+
+            self.assertEqual(verified, ["c001", "c002"])
+            self.assertEqual(tools.search_run_verifier.call_count, 2)
+            tools.reset_mock()
+            self._write_public_gate_candidate(
+                run_dir,
+                "c002",
+                [self._public_gate_iteration(1, 0.5)],
+            )
+            self.assertEqual(
+                experiment._verify_unsettled_public_gate_candidates(
+                    tools, "run_test", paths
+                ),
+                [],
+            )
+            tools.search_run_verifier.assert_not_called()
+
     def test_canonical_methods_and_experiment_defaults(self) -> None:
         self.assertEqual(
             experiment.METHODS,
@@ -193,6 +248,27 @@ class OpenEvolveComparisonTest(unittest.TestCase):
                 "[mcp_servers.goal-plus]\n",
             )
 
+    def test_goal_plus_assets_materialize_installed_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            goal_plus = temp / "goal-plus"
+            codex = goal_plus / "assets/codex"
+            (codex / "skills/demo").mkdir(parents=True)
+            (codex / "skills/demo/SKILL.md").write_text("# demo\n")
+            (codex / "hooks.json").write_text('{"version": 1}\n')
+            (codex / "config.example.toml").write_text(
+                "[mcp_servers.goal-plus]\n"
+            )
+            workspace = temp / "workspace"
+            workspace.mkdir()
+
+            experiment.copy_goal_plus_assets(goal_plus, workspace)
+
+            self.assertTrue((workspace / ".codex/skills/demo/SKILL.md").is_file())
+            self.assertEqual(
+                (workspace / ".codex/hooks.json").read_text(), '{"version": 1}\n'
+            )
+
     def test_goal_plus_entrypoint_matches_worker_host(self) -> None:
         self.assertEqual(
             experiment.goal_plus_entrypoint("codex"),
@@ -205,26 +281,31 @@ class OpenEvolveComparisonTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported Goal Plus worker host"):
             experiment.goal_plus_entrypoint("unknown")
 
-    def test_goal_plus_pi_assets_copy_only_project_runtime(self) -> None:
+    def test_goal_plus_pi_assets_use_upstream_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             goal_plus = temp / "goal-plus"
-            pi = goal_plus / ".pi"
+            pi = goal_plus / "assets/pi"
             (pi / "extensions").mkdir(parents=True)
             (pi / "skills/goal-plus").mkdir(parents=True)
             (pi / "prompts").mkdir(parents=True)
             (pi / "extensions/goal-plus.ts").write_text("export default {}\n")
             (pi / "skills/goal-plus/SKILL.md").write_text("# Goal Plus\n")
             (pi / "prompts/search-candidate-worker.md").write_text("worker\n")
-            workspace = temp / "workspace"
-            workspace.mkdir()
+            alias = temp / "goal-plus-link"
+            alias.symlink_to(goal_plus, target_is_directory=True)
+            environment: dict[str, str] = {}
 
-            experiment.copy_goal_plus_pi_assets(goal_plus, workspace)
+            extension, skill = experiment.configure_goal_plus_pi_runtime(
+                environment, alias
+            )
 
-            self.assertTrue((workspace / ".pi/extensions/goal-plus.ts").is_file())
-            self.assertTrue((workspace / ".pi/skills/goal-plus/SKILL.md").is_file())
-            self.assertTrue(
-                (workspace / ".pi/prompts/search-candidate-worker.md").is_file()
+            self.assertEqual(extension, pi / "extensions/goal-plus.ts")
+            self.assertEqual(skill, pi / "skills/goal-plus/SKILL.md")
+            self.assertEqual(environment["GOAL_PLUS_PI_DEV_ROOT"], str(goal_plus))
+            self.assertEqual(
+                environment["GOAL_PLUS_PYTHON"],
+                str(Path(sys.executable).absolute()),
             )
 
     def test_goal_prompt_uses_natural_entry_and_complete_configuration(self) -> None:
@@ -255,7 +336,8 @@ class OpenEvolveComparisonTest(unittest.TestCase):
         self.assertIn("240 seconds", prompt)
         self.assertIn("not hard-capped", prompt)
         self.assertIn("GOAL_PLUS_OUTER_DEADLINE_AT", prompt)
-        self.assertIn('strategy.worker_host="pi-rpc"', prompt)
+        self.assertNotIn("strategy.worker_host", prompt)
+        self.assertIn("entrypoint determines the native host", prompt)
         self.assertNotIn('strategy.name="agent_guided"', prompt)
         self.assertIn("aligned with `command_config.workers`", prompt)
         self.assertIn('strategy.worker_launch.reasoning_effort="high"', prompt)
@@ -293,7 +375,35 @@ class OpenEvolveComparisonTest(unittest.TestCase):
         self.assertIn("`shared_dir.enabled=false`", prompt)
         self.assertNotIn("`shared_dir.enabled=true`", prompt)
         self.assertIn('`strategy.config.global_evidence_mode="independent"`', prompt)
+        self.assertNotIn("strategy.worker_host", prompt)
         self.assertIn("never receives the official evaluator or official metric", prompt)
+
+    def test_controller_only_visible_goal_uses_public_ranking_signal(self) -> None:
+        prompt = experiment.render_goal(
+            task_text="# Objective\nImprove it.",
+            artifact_name="submission",
+            artifact_is_directory=True,
+            metric_name="visible_test_score",
+            metric_direction="maximize",
+            wall_seconds=300,
+            closeout_seconds=60,
+            concurrency=2,
+            worker_host="pi-rpc",
+            worker_model="vendor/example-model",
+            controller_only_official_evaluation=True,
+            evaluation_mode="visible",
+        )
+
+        self.assertIn("promotion_mode=artifact_only", prompt)
+        self.assertIn("Metric: `visible_test_score`", prompt)
+        self.assertIn("role `ranking_signal`", prompt)
+        self.assertNotIn("public format gate only", prompt)
+        self.assertIn("This fixed-budget benchmark uses host-owned closeout", prompt)
+        self.assertIn("do not call `search_select`", prompt)
+        self.assertIn("`goal_plus_set_status`", prompt)
+        self.assertIn("`shared_dir.enabled=false`", prompt)
+        self.assertIn("do not call shared-tool APIs", prompt)
+        self.assertIn("or send `toolization_decision`", prompt)
 
     def test_pi_goal_prompt_names_pool_supervisor_minimum_lease(self) -> None:
         prompt = experiment.render_goal(
@@ -886,6 +996,53 @@ class OpenEvolveComparisonTest(unittest.TestCase):
             tools.search_run_verifier.assert_not_called()
             tools.search_promote.assert_called_once_with("run_test", "c001")
 
+    def test_controller_owned_closeout_rejects_agent_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            goal_dir = workspace / ".gp/goal-plus/gp_0001"
+            run_dir = workspace / ".gp/runs/run_test"
+            candidate_dir = run_dir / "candidates/c001"
+            goal_dir.mkdir(parents=True)
+            candidate_dir.mkdir(parents=True)
+            (goal_dir / "goal.json").write_text("{}\n")
+            (run_dir / "run.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "run_test",
+                        "state": "ready_to_promote",
+                        "selected_candidate_id": "c001",
+                    }
+                )
+                + "\n"
+            )
+            (candidate_dir / "candidate.json").write_text(
+                json.dumps({"candidate_id": "c001", "iterations": [{}]}) + "\n"
+            )
+
+            goal = mock.Mock()
+            goal.status = "active"
+            goal.linked_search.run_id = "run_test"
+            goal.linked_search.selected_candidate_id = None
+            goal_runtime = mock.Mock()
+            goal_runtime.status.return_value = goal
+            tools = mock.Mock()
+            with mock.patch.object(
+                experiment,
+                "_goal_plus_runtime_types",
+                return_value=(
+                    mock.Mock(return_value=goal_runtime),
+                    mock.Mock(),
+                    mock.Mock(return_value=tools),
+                ),
+            ):
+                result = experiment.finalize_goal_plus_search(
+                    workspace, require_unsettled_at_entry=True
+                )
+
+            self.assertFalse(result["completed"])
+            self.assertIn("Agent-selected Search run", result["error"])
+            tools.search_promote.assert_not_called()
+
     def test_evaluator_budget_snapshot_uses_controller_runtime_at_t0(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -1058,6 +1215,24 @@ class OpenEvolveComparisonTest(unittest.TestCase):
             "GOAL_PLUS_EVIDENCE_ANNOTATOR_BASE_URL",
         ):
             self.assertIn(variable, joined)
+
+    def test_codex_goal_plus_mcp_disables_agent_closeout_when_controller_owned(
+        self,
+    ) -> None:
+        unrestricted = experiment.codex_goal_plus_mcp_args()
+        restricted = experiment.codex_goal_plus_mcp_args(
+            controller_only_closeout=True
+        )
+        self.assertFalse(any("disabled_tools=" in value for value in unrestricted))
+        encoded = next(
+            value.split("=", 1)[1]
+            for value in restricted
+            if "disabled_tools=" in value
+        )
+        self.assertEqual(
+            json.loads(encoded),
+            list(experiment.GOAL_PLUS_CONTROLLER_OWNED_CLOSEOUT_TOOLS),
+        )
 
     def test_codex_goal_plus_mcp_args_merge_adapter_environment(self) -> None:
         joined = "\n".join(

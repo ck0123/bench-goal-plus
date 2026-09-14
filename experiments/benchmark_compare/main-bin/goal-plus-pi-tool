@@ -11,7 +11,9 @@ import sys
 CONTROLLER_ONLY_CLOSEOUT_ENV = "BENCH_GOAL_PLUS_CONTROLLER_ONLY_CLOSEOUT"
 CONTROLLER_ONLY_TOOLS = {
     "goal_plus_record_search_result",
+    "goal_plus_set_status",
     "search_promote",
+    "search_report",
     "search_select",
 }
 
