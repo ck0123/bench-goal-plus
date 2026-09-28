@@ -206,7 +206,15 @@ def render_goal_plus_verifier(
     controller_path: Path,
     upstream_root: Path,
     metric_name: str,
+    *,
+    include_controller_evidence: bool = False,
 ) -> str:
+    payload_code = (
+        f"payload = {{{metric_name!r}: float(value), 'valid': True}}\n"
+        "payload['controller_evidence'] = report.get('controller_evidence')\n"
+        if include_controller_evidence
+        else f"payload = {{{metric_name!r}: float(value), 'valid': True}}\n"
+    )
     return (
         "#!/usr/bin/env python3\n"
         '"""Controller-owned Goal Plus verifier; do not edit."""\n'
@@ -229,5 +237,6 @@ def render_goal_plus_verifier(
         "value = metric.get('value')\n"
         "if report.get('valid') is not True or not isinstance(value, (int, float)):\n"
         "    raise SystemExit('official evaluator rejected the candidate')\n"
-        f"print(json.dumps({{{metric_name!r}: float(value), 'valid': True}}))\n"
+        + payload_code
+        + "print(json.dumps(payload))\n"
     )

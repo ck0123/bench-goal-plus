@@ -178,6 +178,10 @@ def materialize_workspace(source_root: Path, workspace: Path) -> dict[str, Any]:
             "validity_ok",
         )
     }
+    # These audit fields were added after the original local fixtures. Keep
+    # them when supplied without breaking older fixture contracts.
+    public_metadata["review_status"] = metadata.get("review_status")
+    public_metadata["validity_issues"] = metadata.get("validity_issues") or []
     write_json(workspace / "task.json", public_metadata)
     (workspace / "TASK.md").write_text(_task_text(public_metadata), encoding="utf-8")
     (workspace / "AGENTS.md").write_text(
@@ -192,7 +196,10 @@ def materialize_workspace(source_root: Path, workspace: Path) -> dict[str, Any]:
         render_evaluate_wrapper(CONTROLLER, source_root), encoding="utf-8"
     )
     goal_plus_verifier = render_goal_plus_verifier(
-        CONTROLLER, source_root, GOAL_PLUS_PROCESS_METRIC
+        CONTROLLER,
+        source_root,
+        GOAL_PLUS_PROCESS_METRIC,
+        include_controller_evidence=True,
     )
     (workspace / "public_check.py").write_text(
         goal_plus_verifier, encoding="utf-8"
@@ -217,16 +224,27 @@ def materialize_workspace(source_root: Path, workspace: Path) -> dict[str, Any]:
     }
 
 
-def _visible_ratio(output: str, language: str, returncode: int) -> float:
+def _visible_counts(output: str, language: str) -> dict[str, int]:
     if language == "javascript":
-        counts = {match["kind"]: int(match["count"]) for match in _NODE_COUNT.finditer(output)}
-        total = counts.get("pass", 0) + counts.get("fail", 0)
-        return counts.get("pass", 0) / total if total else float(returncode == 0)
+        return {
+            match["kind"]: int(match["count"])
+            for match in _NODE_COUNT.finditer(output)
+        }
     counts: dict[str, int] = {}
     for match in _PYTEST_COUNTS.finditer(output):
         counts[match["kind"]] = counts.get(match["kind"], 0) + int(match["count"])
-    total = sum(counts.values())
-    return counts.get("passed", 0) / total if total else float(returncode == 0)
+    return counts
+
+
+def _visible_ratio(output: str, language: str, returncode: int) -> float:
+    counts = _visible_counts(output, language)
+    if language == "javascript":
+        passed = counts.get("pass", 0)
+        total = passed + counts.get("fail", 0)
+    else:
+        passed = counts.get("passed", 0)
+        total = sum(counts.values())
+    return passed / total if total else float(returncode == 0)
 
 
 def _public_evaluation(workspace: Path, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -248,11 +266,13 @@ def _public_evaluation(workspace: Path, metadata: dict[str, Any]) -> dict[str, A
     )
     output = completed.stdout + "\n" + completed.stderr
     ratio = _visible_ratio(output, str(metadata["language"]), completed.returncode)
+    counts = _visible_counts(output, str(metadata["language"]))
     valid = completed.returncode in {0, 1} and math.isfinite(ratio)
     return {
         "valid": valid,
         "value": ratio if valid else None,
         "returncode": completed.returncode,
+        "test_counts": counts,
         "diagnostics": output[-4000:],
     }
 
@@ -324,6 +344,15 @@ def evaluate_workspace(workspace: Path, source_root: Path, mode: str) -> dict[st
         },
         "grade": result.get("grade"),
         "diagnostics": result.get("diagnostics"),
+        "controller_evidence": (
+            {
+                "mode": mode,
+                "returncode": result.get("returncode"),
+                "test_counts": result.get("test_counts"),
+            }
+            if mode == "public"
+            else None
+        ),
         "unauthorized_changes": unauthorized,
         "runtime_seconds": time.monotonic() - started,
         "evaluated_at": utc_now(),

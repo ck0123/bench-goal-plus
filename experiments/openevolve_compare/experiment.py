@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -17,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -32,6 +33,13 @@ from bench_artifacts import (  # noqa: E402
 )
 from bench_goal_plus.codex_provider import (  # noqa: E402
     codex_responses_provider_args,
+)
+from bench_goal_plus.candidate_judge import (  # noqa: E402
+    MAX_CANDIDATE_DIFF_BYTES,
+    MAX_TOTAL_DIFF_BYTES,
+    MODE_OFF,
+    judge_input_sha256,
+    normalize_mode,
 )
 from bench_goal_plus.goal_plus_command import (  # noqa: E402
     goal_plus_command_config,
@@ -170,6 +178,633 @@ def canonical_method(method: str) -> str:
     return METHOD_ALIASES.get(method, method)
 
 
+def _publicly_compliant_iteration(iteration: Any) -> bool:
+    """Keep the optional judge behind the same hard/process gate as native selection."""
+    if not isinstance(iteration, dict):
+        return False
+    score = iteration.get("score")
+    artifact_clean = iteration.get("artifact_clean")
+    if artifact_clean is None:
+        artifact_clean = iteration.get("git_artifact_clean")
+    return (
+        iteration.get("process_passed") is True
+        and type(iteration.get("iteration")) is int
+        and iteration["iteration"] >= 1
+        and isinstance(iteration.get("git_head"), str)
+        and isinstance(iteration.get("settlement_id"), str)
+        and bool(iteration.get("settlement_id"))
+        and isinstance(iteration.get("artifact_hash"), str)
+        and bool(iteration.get("artifact_hash"))
+        and artifact_clean is True
+        and not iteration.get("touched_denied_files", False)
+        and not iteration.get("changed_outside_allowed", False)
+        and iteration.get("disposition") not in {"discard", "failure"}
+        and type(score) in {int, float}
+        and math.isfinite(float(score))
+    )
+
+
+def _run_owned_path(path: Path, expected: Path, boundary: Path) -> bool:
+    path = path.absolute()
+    expected = expected.absolute()
+    boundary = boundary.absolute()
+    if path != expected or boundary.is_symlink():
+        return False
+    try:
+        parts = expected.relative_to(boundary).parts
+    except ValueError:
+        return False
+    current = boundary
+    for part in parts:
+        current /= part
+        if current.is_symlink():
+            return False
+    return True
+
+
+def _git_output(
+    workspace: Path, arguments: list[str], *, max_bytes: int
+) -> bytes:
+    """Read bounded immutable Git output without replace refs or diff drivers."""
+
+    process = subprocess.Popen(
+        [
+            "git",
+            "--no-replace-objects",
+            "-c",
+            "core.quotepath=false",
+            "-C",
+            str(workspace),
+            *arguments,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    assert process.stdout is not None
+    output = process.stdout.read(max_bytes + 1)
+    if len(output) > max_bytes:
+        process.kill()
+        process.wait()
+        raise RuntimeError(f"candidate artifact diff exceeds {max_bytes} bytes")
+    returncode = process.wait()
+    if returncode != 0:
+        raise RuntimeError("failed to read immutable candidate artifact")
+    return output
+
+
+def _candidate_artifact_diff(
+    run_path: Path,
+    run_data: dict[str, Any],
+    candidate_path: Path,
+    candidate: dict[str, Any],
+    iteration: dict[str, Any],
+) -> dict[str, Any]:
+    """Read one bounded cumulative diff from a run-owned immutable artifact."""
+
+    run_dir = run_path.parent
+    run_id = run_data.get("run_id")
+    candidate_id = candidate.get("candidate_id")
+    if (
+        run_path.name != "run.json"
+        or not isinstance(run_id, str)
+        or run_dir.name != run_id
+        or not isinstance(candidate_id, str)
+    ):
+        raise RuntimeError("candidate judge has inconsistent Search-run identity")
+    expected_candidate_path = run_dir / "candidates" / candidate_id / "candidate.json"
+    if not _run_owned_path(
+        candidate_path, expected_candidate_path, run_dir / "candidates"
+    ) or not candidate_path.is_file():
+        raise RuntimeError(f"candidate {candidate_id} record is not run-owned")
+
+    task = candidate.get("task")
+    if (
+        not isinstance(task, dict)
+        or task.get("run_id") != run_id
+        or task.get("candidate_id") != candidate_id
+        or task.get("workspace_provider") != "git_worktree"
+    ):
+        raise RuntimeError(f"candidate {candidate_id} has no Git worktree task")
+    source_subdir = str(task.get("workspace_source_subdir") or ".")
+    source_path = PurePosixPath(source_subdir)
+    if source_path.is_absolute() or ".." in source_path.parts or "\x00" in source_subdir:
+        raise RuntimeError(f"candidate {candidate_id} has an unsafe source subdirectory")
+    expected_root = run_dir / "workspace" / candidate_id
+    expected_workspace = expected_root if source_subdir == "." else expected_root / source_path
+    if (
+        not _run_owned_path(
+            Path(str(task.get("workspace_managed_root") or "")),
+            expected_root,
+            run_dir / "workspace",
+        )
+        or not _run_owned_path(
+            Path(str(task.get("workspace") or "")), expected_workspace, expected_root
+        )
+        or not expected_root.is_dir()
+        or not expected_workspace.is_dir()
+    ):
+        raise RuntimeError(f"candidate {candidate_id} workspace is not run-owned")
+    top_level = _git_output(
+        expected_root, ["rev-parse", "--show-toplevel"], max_bytes=4096
+    ).decode("utf-8", errors="strict").strip()
+    if Path(top_level).absolute() != expected_root.absolute():
+        raise RuntimeError(f"candidate {candidate_id} workspace has no owned Git root")
+
+    base_data = run_data.get("source_artifact_ref")
+    head_data = iteration.get("artifact_ref")
+    if not isinstance(base_data, dict) or not isinstance(head_data, dict):
+        raise RuntimeError(f"candidate {candidate_id} has incomplete artifact refs")
+    base = base_data.get("id")
+    head = head_data.get("id")
+    if (
+        base_data.get("kind") != "git_commit"
+        or base_data.get("provider") != "git_worktree"
+        or head_data.get("kind") != "git_commit"
+        or head_data.get("provider") != "git_worktree"
+        or head != iteration.get("git_head")
+        or not isinstance(base, str)
+        or not isinstance(head, str)
+        or re.fullmatch(r"[0-9a-f]{40,64}", base) is None
+        or re.fullmatch(r"[0-9a-f]{40,64}", head) is None
+    ):
+        raise RuntimeError(f"candidate {candidate_id} has inconsistent artifact refs")
+    for artifact in (base, head):
+        _git_output(
+            expected_root, ["cat-file", "-e", f"{artifact}^{{commit}}"], max_bytes=1
+        )
+    _git_output(
+        expected_root,
+        ["merge-base", "--is-ancestor", base, head],
+        max_bytes=1,
+    )
+
+    changed_output = _git_output(
+        expected_root,
+        ["diff", "--name-only", "-z", "--no-renames", base, head, "--"],
+        max_bytes=64 * 1024,
+    )
+    repository_changed_files = sorted(
+        item.decode("utf-8", errors="strict")
+        for item in changed_output.split(b"\x00")
+        if item
+    )
+    if source_subdir == ".":
+        changed_files = repository_changed_files
+    else:
+        prefix = f"{source_subdir.rstrip('/')}/"
+        outside = [
+            path for path in repository_changed_files if not path.startswith(prefix)
+        ]
+        if outside:
+            raise RuntimeError(
+                f"candidate {candidate_id} changed files outside its source workspace"
+            )
+        changed_files = [path.removeprefix(prefix) for path in repository_changed_files]
+    recorded = iteration.get("changed_files")
+    if (
+        not isinstance(recorded, list)
+        or not all(
+            isinstance(path, str)
+            and path
+            and not PurePosixPath(path).is_absolute()
+            and ".." not in PurePosixPath(path).parts
+            and "\x00" not in path
+            for path in recorded
+        )
+        or len(recorded) != len(set(recorded))
+        or sorted(recorded) != sorted(changed_files)
+    ):
+        raise RuntimeError(
+            f"candidate {candidate_id} changed-file evidence disagrees with Git"
+        )
+    pathspecs = [f":(literal,top){path}" for path in repository_changed_files]
+    artifact_diff = (
+        _git_output(
+            expected_root,
+            [
+                "diff",
+                "--full-index",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--text",
+                "--function-context",
+                "--unified=10",
+                base,
+                head,
+                "--",
+                *pathspecs,
+            ],
+            max_bytes=MAX_CANDIDATE_DIFF_BYTES,
+        ).decode("utf-8", errors="strict")
+        if pathspecs
+        else ""
+    )
+    return {
+        "artifact_diff": artifact_diff,
+        "artifact_diff_sha256": sha256_text(artifact_diff),
+        "base_artifact_id": base,
+        "changed_files": changed_files,
+    }
+
+
+def _public_verification_evidence(
+    iteration: dict[str, Any], hard_score: float
+) -> dict[str, Any]:
+    metrics = iteration.get("metrics")
+    public_metrics = (
+        {key: value for key, value in metrics.items() if not str(key).startswith("_")}
+        if isinstance(metrics, dict)
+        else {}
+    )
+    return {
+        "process_passed": iteration.get("process_passed") is True,
+        "hard_score": hard_score,
+        "metrics": public_metrics,
+    }
+
+
+def _candidate_judge_inputs(
+    run_path: Path,
+    candidate_paths: list[Path],
+    *,
+    metric_direction: str = "maximize",
+    pinned_candidates: list[dict[str, Any]] | None = None,
+    baseline_public_score: float | None = None,
+) -> list[dict[str, Any]]:
+    """Build canonical immutable evidence for hard-best candidate ties only."""
+
+    run_data = load_json(run_path)
+    pinned_by_id: dict[str, dict[str, Any]] | None = None
+    if pinned_candidates is not None:
+        pinned_by_id = {}
+        for identity in pinned_candidates:
+            candidate_id = identity.get("candidate_id")
+            if not isinstance(candidate_id, str) or candidate_id in pinned_by_id:
+                raise RuntimeError("candidate judge receipt has invalid candidate identities")
+            pinned_by_id[candidate_id] = identity
+    inputs: list[dict[str, Any]] = []
+    current_best: dict[str, tuple[float, dict[str, Any]]] = {}
+    for candidate_path in candidate_paths:
+        candidate = load_json(candidate_path)
+        candidate_id = candidate.get("candidate_id")
+        iterations = candidate.get("iterations")
+        if (
+            not isinstance(candidate_id, str)
+            or candidate_path.parent.name != candidate_id
+            or not isinstance(iterations, list)
+        ):
+            continue
+        eligible = [item for item in iterations if _publicly_compliant_iteration(item)]
+        if not eligible:
+            continue
+        current_score = (
+            min(float(item["score"]) for item in eligible)
+            if metric_direction == "minimize"
+            else max(float(item["score"]) for item in eligible)
+        )
+        current_latest = max(
+            (item for item in eligible if float(item["score"]) == current_score),
+            key=lambda item: item["iteration"],
+        )
+        current_best[candidate_id] = (current_score, current_latest)
+        if pinned_by_id is not None and candidate_id not in pinned_by_id:
+            continue
+        score, latest = current_score, current_latest
+        if pinned_by_id is not None:
+            identity = pinned_by_id[candidate_id]
+            pinned_score = identity.get("hard_score")
+            if type(pinned_score) not in {int, float} or not math.isfinite(
+                float(pinned_score)
+            ):
+                raise RuntimeError("candidate judge receipt has invalid hard scores")
+            matching = [
+                item
+                for item in eligible
+                if item.get("iteration") == identity.get("iteration")
+                and item.get("settlement_id") == identity.get("settlement_id")
+                and item.get("git_head") == identity.get("git_head")
+                and item.get("artifact_hash") == identity.get("artifact_hash")
+                and float(item["score"]) == float(pinned_score)
+            ]
+            if len(matching) != 1:
+                raise RuntimeError(
+                    f"candidate judge receipt artifact is unavailable: {candidate_id}"
+                )
+            latest = matching[0]
+            score = float(pinned_score)
+        summaries: list[str] = []
+        for key in ("summary", "hypothesis", "description"):
+            value = latest.get(key) or candidate.get(key)
+            if isinstance(value, str) and value.strip() and value.strip() not in summaries:
+                summaries.append(value.strip()[:2000])
+        inputs.append(
+            {
+                "candidate_id": candidate_id,
+                "hard_valid": True,
+                "hard_score": score,
+                "process_passed": True,
+                "public_verification": _public_verification_evidence(latest, score),
+                "baseline_public_score": baseline_public_score,
+                "summary": "\n".join(summaries),
+                "iteration": int(latest["iteration"]),
+                "settlement_id": latest.get("settlement_id"),
+                "git_head": latest.get("git_head"),
+                "artifact_hash": latest.get("artifact_hash"),
+                "_candidate_path": candidate_path,
+                "_candidate": candidate,
+                "_iteration": latest,
+            }
+        )
+    if not inputs:
+        return []
+    hard_best = (
+        min(item["hard_score"] for item in inputs)
+        if metric_direction == "minimize"
+        else max(item["hard_score"] for item in inputs)
+    )
+    selected = [item for item in inputs if item["hard_score"] == hard_best]
+    if pinned_by_id is not None:
+        by_id = {item["candidate_id"]: item for item in selected}
+        if set(by_id) != set(pinned_by_id):
+            raise RuntimeError("candidate judge receipt hard-best pool changed")
+        selected = [by_id[item["candidate_id"]] for item in pinned_candidates]
+    if len(selected) == 1:
+        for key in ("_candidate_path", "_candidate", "_iteration"):
+            selected[0].pop(key, None)
+        return selected
+    total_diff_bytes = 0
+    for item in selected:
+        evidence = _candidate_artifact_diff(
+            run_path,
+            run_data,
+            item.pop("_candidate_path"),
+            item.pop("_candidate"),
+            item.pop("_iteration"),
+        )
+        total_diff_bytes += len(evidence["artifact_diff"].encode("utf-8"))
+        if total_diff_bytes > MAX_TOTAL_DIFF_BYTES:
+            raise RuntimeError(
+                f"candidate artifact diffs exceed {MAX_TOTAL_DIFF_BYTES} bytes in total"
+            )
+        item.update(evidence)
+    return selected
+
+
+def _run_problem_text(run_data: dict[str, Any]) -> str:
+    source_path = run_data.get("source_path")
+    if isinstance(source_path, str):
+        try:
+            return (Path(source_path) / "TASK.md").read_text(
+                encoding="utf-8", errors="replace"
+            )[:8000]
+        except OSError:
+            pass
+    return "Public benchmark task; choose the strongest hard-verified candidate."
+
+
+def _run_metric_direction(run_path: Path, run_data: dict[str, Any]) -> str:
+    value = run_data.get("metric_direction")
+    if value in {"maximize", "minimize"}:
+        return value
+    frozen_spec_id = run_data.get("frozen_spec_id")
+    if isinstance(frozen_spec_id, str):
+        try:
+            frozen = load_json(
+                run_path.parent.parent.parent
+                / "specs"
+                / frozen_spec_id
+                / "frozen_spec.json"
+            )
+            value = (frozen.get("spec") or {}).get("metric_direction")
+            if value in {"maximize", "minimize"}:
+                return value
+        except (OSError, ValueError, TypeError):
+            pass
+    return "maximize"
+
+
+def _search_select(tools: Any, run_id: str) -> dict[str, Any]:
+    for name in ("search_select", "goal_plus_search_select"):
+        method = getattr(tools, name, None)
+        if callable(method):
+            return method(run_id)
+    raise RuntimeError("Goal Plus tools have no search selection method")
+
+
+def _search_promote(tools: Any, run_id: str, candidate_id: str) -> dict[str, Any]:
+    for name in ("search_promote", "goal_plus_search_promote"):
+        method = getattr(tools, name, None)
+        if callable(method):
+            return method(run_id, candidate_id)
+    raise RuntimeError("Goal Plus tools have no search promotion method")
+
+
+def _search_run_verifier(
+    tools: Any, run_id: str, candidate_id: str, *, hypothesis: str
+) -> Any:
+    for name in ("search_run_verifier", "goal_plus_search_run_verifier"):
+        method = getattr(tools, name, None)
+        if callable(method):
+            return method(run_id, candidate_id, hypothesis=hypothesis)
+    raise RuntimeError("Goal Plus tools have no verifier method")
+
+
+def _search_apply_promotion(tools: Any, run_id: str) -> dict[str, Any] | None:
+    for name in ("search_apply_promotion", "goal_plus_search_apply_promotion"):
+        method = getattr(tools, name, None)
+        if callable(method):
+            return method(run_id)
+    return None
+
+
+def _search_report(tools: Any, run_id: str) -> dict[str, Any]:
+    for name in ("search_report", "goal_plus_search_report"):
+        method = getattr(tools, name, None)
+        if callable(method):
+            return method(run_id)
+    raise RuntimeError("Goal Plus tools have no search report method")
+
+
+def _select_with_candidate(
+    tools: Any,
+    run_id: str,
+    candidate_id: str,
+    *,
+    iteration: int,
+    settlement_id: str,
+    git_head: str,
+    artifact_hash: str,
+    receipt_sha256: str,
+) -> dict[str, Any]:
+    """Use the Goal Plus controller-only exact selection contract."""
+
+    runtime = getattr(tools, "runtime", None)
+    select_for_controller = getattr(runtime, "select_for_controller", None)
+    if not callable(select_for_controller):
+        raise RuntimeError(
+            "Goal Plus lacks goal_plus.controller_exact_selection.v1; "
+            "update the managed Goal Plus checkout"
+        )
+    from goal_plus.domain.selection import ControllerSelectionDirective
+
+    directive = ControllerSelectionDirective.model_validate(
+        {
+            "target": {
+                "candidate_id": candidate_id,
+                "iteration": iteration,
+                "settlement_id": settlement_id,
+                "artifact_ref": {
+                    "kind": "git_commit",
+                    "provider": "git_worktree",
+                    "id": git_head,
+                },
+                "artifact_hash": artifact_hash,
+            },
+            "receipt_sha256": receipt_sha256,
+        }
+    )
+    return select_for_controller(run_id, directive)
+
+
+def _validated_judge_item(
+    receipt: dict[str, Any],
+    judge_inputs: list[dict[str, Any]],
+    mode: str,
+    input_sha256: str,
+) -> dict[str, Any]:
+    """Validate a persisted receipt against the current hard-valid pool."""
+    if receipt.get("mode") != mode or receipt.get("status") != "selected":
+        raise RuntimeError("persisted candidate judge receipt is not a selection")
+    candidate_ids = [item["candidate_id"] for item in judge_inputs]
+    if receipt.get("candidate_ids") != candidate_ids or receipt.get("candidate_count") != len(candidate_ids):
+        raise RuntimeError("persisted candidate judge receipt does not match the candidate pool")
+    if receipt.get("selection_scope") != "hard-best-ties-only":
+        raise RuntimeError("persisted candidate judge receipt has an unsupported selection scope")
+    if receipt.get("judge_input_sha256") != input_sha256:
+        raise RuntimeError("persisted candidate judge receipt has stale input evidence")
+    identities = [
+        {
+            "candidate_id": item["candidate_id"],
+            "hard_score": item["hard_score"],
+            "iteration": item.get("iteration"),
+            "settlement_id": item.get("settlement_id"),
+            "git_head": item.get("git_head"),
+            "artifact_hash": item.get("artifact_hash"),
+            "base_artifact_id": item.get("base_artifact_id"),
+            "artifact_diff_sha256": item.get("artifact_diff_sha256"),
+        }
+        for item in judge_inputs
+    ]
+    if receipt.get("candidate_artifacts") != identities:
+        raise RuntimeError("persisted candidate judge receipt has stale candidate artifacts")
+    expected_invocations = 1 if len(candidate_ids) > 1 else 0
+    if receipt.get("selector_invocations") != expected_invocations:
+        raise RuntimeError("candidate judge has an invalid selector invocation count")
+    receipt_payload = {
+        key: value for key, value in receipt.items() if key != "receipt_sha256"
+    }
+    expected_receipt_sha256 = sha256_text(
+        json.dumps(
+            receipt_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    if receipt.get("receipt_sha256") != expected_receipt_sha256:
+        raise RuntimeError("persisted candidate judge receipt digest is invalid")
+    selected_id = receipt.get("selected_candidate_id")
+    selected = next((item for item in judge_inputs if item["candidate_id"] == selected_id), None)
+    if selected is None:
+        raise RuntimeError("persisted candidate judge selected an ineligible candidate")
+    if receipt.get("selected_iteration") != selected.get("iteration"):
+        raise RuntimeError("persisted candidate judge iteration is stale")
+    if receipt.get("selected_git_head") != selected.get("git_head"):
+        raise RuntimeError("persisted candidate judge git head is stale")
+    if receipt.get("selected_settlement_id") != selected.get("settlement_id"):
+        raise RuntimeError("persisted candidate judge settlement is stale")
+    if receipt.get("selected_artifact_hash") != selected.get("artifact_hash"):
+        raise RuntimeError("persisted candidate judge artifact hash is stale")
+    return selected
+
+
+def _obtain_judge_selection(
+    callback: Callable[[str, list[dict[str, Any]]], dict[str, Any]],
+    problem: str,
+    judge_inputs: list[dict[str, Any]],
+    expected_mode: str | None,
+    existing: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Call the provider once, or reuse and validate its persisted receipt."""
+    requested_mode = normalize_mode(expected_mode)
+    input_sha256 = judge_input_sha256(
+        problem,
+        judge_inputs,
+        mode=requested_mode,
+    )
+    created = existing is None
+    receipt = dict(existing) if existing is not None else dict(callback(problem, judge_inputs))
+    if created:
+        identities = [
+            {
+                "candidate_id": item["candidate_id"],
+                "hard_score": item["hard_score"],
+                "iteration": item.get("iteration"),
+                "settlement_id": item.get("settlement_id"),
+                "git_head": item.get("git_head"),
+                "artifact_hash": item.get("artifact_hash"),
+                "base_artifact_id": item.get("base_artifact_id"),
+                "artifact_diff_sha256": item.get("artifact_diff_sha256"),
+            }
+            for item in judge_inputs
+        ]
+        receipt.update(
+            {
+                "candidate_count": len(judge_inputs),
+                "candidate_ids": [item["candidate_id"] for item in judge_inputs],
+                "candidate_artifacts": identities,
+                "selection_scope": "hard-best-ties-only",
+                "judge_input_sha256": input_sha256,
+            }
+        )
+    if receipt.get("status") != "selected":
+        raise RuntimeError(
+            "candidate judge did not select an eligible candidate: "
+            + str(receipt.get("error") or receipt.get("status"))
+        )
+    if created:
+        selected_id = receipt.get("selected_candidate_id")
+        selected = next(
+            (item for item in judge_inputs if item.get("candidate_id") == selected_id),
+            None,
+        )
+        if selected is None:
+            raise RuntimeError("candidate judge selected an unknown candidate")
+        receipt.update(
+            {
+                "selected_iteration": selected.get("iteration"),
+                "selected_settlement_id": selected.get("settlement_id"),
+                "selected_git_head": selected.get("git_head"),
+                "selected_artifact_hash": selected.get("artifact_hash"),
+            }
+        )
+        receipt["receipt_sha256"] = sha256_text(
+            json.dumps(
+                receipt,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    mode = receipt.get("mode")
+    if not isinstance(mode, str):
+        raise RuntimeError("candidate judge receipt has no mode")
+    if expected_mode is not None and mode != expected_mode:
+        raise RuntimeError("candidate judge receipt mode differs from the prepared mode")
+    selected = _validated_judge_item(receipt, judge_inputs, mode, input_sha256)
+    return receipt, selected, created
+
+
 def copy_goal_plus_assets(goal_plus_root: Path, workspace: Path) -> None:
     install_goal_plus(goal_plus_root, workspace, "codex")
 
@@ -271,6 +906,7 @@ def render_goal(
     early_stop_contract: dict[str, Any] | None = None,
     outer_deadline_at: str | None = None,
     public_feedback_command: str = "python3 evaluate.py",
+    candidate_judge_mode: str = MODE_OFF,
 ) -> str:
     """Add the host-native Goal Plus entrypoint and config to the common prompt."""
     if evaluation_mode is None:
@@ -281,6 +917,7 @@ def render_goal(
         raise ValueError(f"unsupported evaluation mode: {evaluation_mode}")
     if evaluation_mode == "blind":
         controller_only_official_evaluation = True
+    candidate_judge_mode = normalize_mode(candidate_judge_mode)
     exploration_seconds = max(1, wall_seconds - closeout_seconds)
     dispatch_seconds = (
         worker_runtime_seconds
@@ -310,7 +947,9 @@ def render_goal(
         max_parallel=concurrency,
         strategy="agent_guided",
         worker_model=worker_model,
-        annotator_model=worker_model,
+        annotator_model=(
+            None if candidate_judge_mode != MODE_OFF else worker_model
+        ),
         workspace_provider="git_worktree",
         promotion_mode=(
             "artifact_only" if evaluation_mode == "blind" else "apply"
@@ -360,8 +999,8 @@ def render_goal(
         "stop a worker. "
     ) + (
         "Return control for the controller-owned closeout.\n"
-        if evaluation_mode == "blind" else
-        "Finish selection/publication, the Goal and both reports.\n"
+        if evaluation_mode == "blind" or candidate_judge_mode != MODE_OFF
+        else "Finish selection/publication, the Goal and both reports.\n"
     )
     common_prompt = (
         render_controller_only_task_prompt(
@@ -397,6 +1036,18 @@ def render_goal(
             f"process iteration records `{target_metric}={target_score:g}`. Treat that stop "
             "as expected; selection, promotion, and final verification still run afterward.\n"
         )
+    candidate_judge_text = (
+        "- The host controller invokes the optional "
+        f"`{candidate_judge_mode}` candidate judge once per Search run after hard/process verification "
+        "on hard-best ties only. It receives bounded public summaries, cannot provide "
+        "worker feedback or a continue-search signal, and does not replace promotion "
+        "or official evaluation. Native Evidence Annotation is disabled in this mode. "
+        "Close all worker sessions and leave durable verifier evidence, but do not call "
+        "selection or promotion tools or complete the final Goal audit; the host controller "
+        "performs those closeout steps.\n"
+        if candidate_judge_mode != MODE_OFF
+        else ""
+    )
     if evaluation_mode == "blind":
         return (
             f"{goal_plus_command}\n\n"
@@ -461,14 +1112,31 @@ def render_goal(
             "agent process. The host controller applies the frozen rule, performs the sole "
             "promotion gate, completes the goal audit, and writes the final Goal Plus report "
             "inside the reserved closeout window before invoking the official evaluator.\n"
+            f"{candidate_judge_text}"
         )
+    ownership_text = (
+        "The host controller owns selection, promotion, and final reporting while the "
+        "candidate judge is enabled.\n\n"
+        if candidate_judge_mode != MODE_OFF
+        else "Goal Plus also owns selection, promotion, and final reporting.\n\n"
+    )
+    promotion_text = (
+        ""
+        if candidate_judge_mode != MODE_OFF
+        else (
+            f"- Promotion rule: select the valid verifier-backed candidate with the best "
+            f"`{metric_name}`, promote it, complete the full goal audit, and write the "
+            "final Goal Plus report.\n"
+        )
+    )
     return (
         f"{goal_plus_command}\n\n"
         f"{common_prompt.rstrip()}\n\n"
         "# Goal Plus configuration\n\n"
         "Use the current workspace and construct the verifier-backed Goal Plus search from "
-        "the configuration below. Goal Plus owns intake, triage, SearchSpec freezing, candidate "
-        "workspaces, selection, promotion, and final reporting.\n\n"
+        "the configuration below. Goal Plus owns intake, triage, SearchSpec freezing, and "
+        "candidate workspaces. "
+        f"{ownership_text}"
         "- Honor every leading typed command field in the SearchSpec.\n"
         "- Set `strategy.inner_agent=\"autoresearch\"`.\n"
         + '- Set `strategy.orchestration_mode="parallel_loops"`; set `strategy.selection.ranking_keys=["hard_score"]` and `ranking_tolerance=[0.0]`. Do not use `metric_name` as a ranking key.\n'
@@ -506,9 +1174,8 @@ def render_goal(
         f"- Outer budget: {wall_seconds} seconds total, with about {exploration_seconds} "
         f"seconds for exploration and {closeout_seconds} seconds reserved for completion. "
         "Treat `GOAL_PLUS_OUTER_DEADLINE_AT` as the authoritative upper deadline.\n"
-        f"- Promotion rule: select the valid verifier-backed candidate with the best "
-        f"`{metric_name}`, promote it, complete the full goal audit, and write the "
-        "final Goal Plus report.\n"
+        f"{promotion_text}"
+        f"{candidate_judge_text}"
         + (
             "- The controller runs official hidden grading after Search closeout; "
             "only public verifier evidence participates in Search selection.\n"
@@ -1909,11 +2576,7 @@ def _expected_public_gate_selection(run_path: Path) -> dict[str, Any]:
             and iteration.get("process_passed") is True
             and type(iteration.get("iteration")) is int
             and isinstance(iteration.get("git_head"), str)
-            and iteration.get("git_artifact_clean") is True
-            and not iteration.get("touched_denied_files", False)
-            and not iteration.get("changed_outside_allowed", False)
-            and iteration.get("disposition") not in {"discard", "failure"}
-            and type(iteration.get("score")) in {int, float}
+            and _publicly_compliant_iteration(iteration)
         ]
         if compliant:
             latest = max(compliant, key=lambda item: item["iteration"])
@@ -1957,12 +2620,12 @@ def _validate_existing_public_gate_selection(
 
 
 def _controller_closeout_allows_goal_status(
-    status: str, *, deterministic_public_gate: bool
+    status: str, *, controller_owned_closeout: bool
 ) -> bool:
-    """Blind closeout still owns select/promote after the stop hook forces blocked."""
+    """Controller-owned closeout may resume a Goal left blocked by the agent."""
     if status in {"active", "complete"}:
         return True
-    return deterministic_public_gate and status == "blocked"
+    return controller_owned_closeout and status == "blocked"
 
 
 def _controller_closeout_resume_blocked_goal(goal_runtime: Any, goal: Any) -> Any:
@@ -2007,6 +2670,9 @@ def finalize_goal_plus_search(
     workspace: Path,
     deterministic_public_gate: bool = False,
     verify_unsettled_candidates: bool = True,
+    candidate_judge: Callable[[str, list[dict[str, Any]]], dict[str, Any]] | None = None,
+    candidate_judge_mode: str | None = None,
+    baseline_public_score: float | None = None,
 ) -> dict[str, Any]:
     """Controller-owned drain, selection, and promotion after agent execution."""
     FileGoalPlusRuntime, FileSearchRuntime, SearchTools = _goal_plus_runtime_types()
@@ -2021,6 +2687,9 @@ def finalize_goal_plus_search(
         "duration_seconds": None,
         "runs": [],
     }
+    controller_owned_closeout = (
+        deterministic_public_gate or candidate_judge is not None
+    )
     try:
         goal_paths = sorted((root / "goal-plus").glob("gp_*/goal.json"))
         if not goal_paths:
@@ -2030,10 +2699,10 @@ def finalize_goal_plus_search(
             goal = goal_runtime.status(goal_path.parent.name)
             if not _controller_closeout_allows_goal_status(
                 str(goal.status),
-                deterministic_public_gate=deterministic_public_gate,
+                controller_owned_closeout=controller_owned_closeout,
             ):
                 raise RuntimeError(f"Goal {goal.goal_plus_id} requires host resume: {goal.status}")
-            if deterministic_public_gate and str(goal.status) == "blocked":
+            if controller_owned_closeout and str(goal.status) == "blocked":
                 goal = _controller_closeout_resume_blocked_goal(goal_runtime, goal)
             if goal.linked_search is not None and goal.linked_search.run_id:
                 goals_by_run.setdefault(goal.linked_search.run_id, []).append(
@@ -2050,35 +2719,137 @@ def finalize_goal_plus_search(
                 continue
             verified_in_closeout: list[str] = []
             public_gate_expected: dict[str, Any] | None = None
+            judge_receipt: dict[str, Any] | None = None
+            if candidate_judge is not None:
+                receipt_path = run_path.parent / "candidate-judge.json"
+                if receipt_path.is_file():
+                    judge_receipt = load_json(receipt_path)
             existing = _existing_promotion(run_path)
             if existing is not None:
                 run_data, candidate_id, selection, promotion = existing
-                if deterministic_public_gate:
+                if candidate_judge is not None:
+                    receipt_path = run_path.parent / "candidate-judge.json"
+                    if not receipt_path.is_file():
+                        raise RuntimeError(
+                            "candidate judge was enabled but the Search was already promoted "
+                            "without a persisted judge receipt"
+                        )
+                    if judge_receipt is None:
+                        judge_receipt = load_json(receipt_path)
+                    judge_inputs = _candidate_judge_inputs(
+                        run_path,
+                        candidate_paths,
+                        metric_direction=_run_metric_direction(run_path, run_data),
+                        pinned_candidates=judge_receipt.get("candidate_artifacts"),
+                        baseline_public_score=baseline_public_score,
+                    )
+                    judge_receipt, selected_item, _ = _obtain_judge_selection(
+                        candidate_judge,
+                        _run_problem_text(run_data),
+                        judge_inputs,
+                        candidate_judge_mode,
+                        judge_receipt,
+                    )
+                    if selected_item["candidate_id"] != candidate_id:
+                        raise RuntimeError(
+                            "persisted candidate judge receipt disagrees with promoted candidate"
+                        )
+                    for key in ("selected_iteration", "selected_git_head"):
+                        native_value = selection.get(key)
+                        if native_value is not None and native_value != judge_receipt.get(key):
+                            raise RuntimeError(
+                                "persisted candidate judge receipt disagrees with promotion metadata"
+                            )
+                if deterministic_public_gate and judge_receipt is None:
                     _validate_existing_public_gate_selection(run_path, selection)
                     selection["selection_rule"] = PUBLIC_GATE_SELECTION_RULE
+                if judge_receipt is not None:
+                    selection["selection_rule"] = (
+                        f"{PUBLIC_GATE_SELECTION_RULE}+{judge_receipt.get('mode')}"
+                    )
             else:
                 try:
                     if deterministic_public_gate:
                         # Selection may append a controller-verifier iteration. The
                         # deadline snapshot, not that closeout side effect, is authoritative.
                         public_gate_expected = _prepare_public_gate_selection(run_path)
-                        selection = tools.goal_plus_search_select(run_id)
-                        _validate_existing_public_gate_selection(
-                            run_path,
-                            selection,
-                            expected=public_gate_expected,
-                        )
-                        selection["selection_rule"] = PUBLIC_GATE_SELECTION_RULE
+                        if candidate_judge is None:
+                            selection = _search_select(tools, run_id)
+                            _validate_existing_public_gate_selection(
+                                run_path,
+                                selection,
+                                expected=public_gate_expected,
+                            )
+                            selection["selection_rule"] = PUBLIC_GATE_SELECTION_RULE
+                        else:
+                            run_data = load_json(run_path)
+                            judge_inputs = _candidate_judge_inputs(
+                                run_path,
+                                candidate_paths,
+                                metric_direction=_run_metric_direction(run_path, run_data),
+                                pinned_candidates=(
+                                    judge_receipt.get("candidate_artifacts")
+                                    if judge_receipt is not None
+                                    else None
+                                ),
+                                baseline_public_score=baseline_public_score,
+                            )
+                            judge_receipt, selected_item, created = _obtain_judge_selection(
+                                candidate_judge,
+                                _run_problem_text(run_data),
+                                judge_inputs,
+                                candidate_judge_mode,
+                                judge_receipt,
+                            )
+                            if float(selected_item["hard_score"]) != float(
+                                public_gate_expected["selected_score"]
+                            ):
+                                raise RuntimeError(
+                                    "candidate judge selected a candidate outside the public hard-score gate"
+                                )
+                            judge_receipt.update(
+                                {
+                                    "selected_iteration": selected_item.get("iteration"),
+                                    "selected_git_head": selected_item.get("git_head"),
+                                }
+                            )
+                            if created:
+                                write_json_atomic(
+                                    run_path.parent / "candidate-judge.json", judge_receipt
+                                )
+                            selection = _select_with_candidate(
+                                tools,
+                                run_id,
+                                str(selected_item["candidate_id"]),
+                                iteration=int(selected_item["iteration"]),
+                                settlement_id=str(selected_item["settlement_id"]),
+                                git_head=str(selected_item["git_head"]),
+                                artifact_hash=str(selected_item["artifact_hash"]),
+                                receipt_sha256=str(judge_receipt["receipt_sha256"]),
+                            )
+                            selection["selection_rule"] = (
+                                f"{PUBLIC_GATE_SELECTION_RULE}+{judge_receipt.get('mode')}"
+                            )
                         candidate_id = selection["selected_candidate_id"]
                         run_data = load_json(run_path)
                     else:
                         selected = _existing_selection(run_path)
-                        if selected is None:
+                        if selected is None or (
+                            candidate_judge is not None and judge_receipt is None
+                        ):
                             if verify_unsettled_candidates:
                                 for candidate_path in candidate_paths:
                                     candidate = load_json(candidate_path)
-                                    if not candidate.get("iterations"):
-                                        tools.goal_plus_search_run_verifier(
+                                    iterations = candidate.get("iterations")
+                                    needs_verification = not isinstance(iterations, list)
+                                    if isinstance(iterations, list):
+                                        needs_verification = not any(
+                                            _publicly_compliant_iteration(item)
+                                            for item in iterations
+                                        )
+                                    if needs_verification:
+                                        _search_run_verifier(
+                                            tools,
                                             run_id,
                                             candidate["candidate_id"],
                                             hypothesis="controller post-deadline final verification",
@@ -2086,13 +2857,89 @@ def finalize_goal_plus_search(
                                         verified_in_closeout.append(
                                             candidate["candidate_id"]
                                         )
-                            selection = tools.goal_plus_search_select(run_id)
+                            if candidate_judge is not None:
+                                run_data = load_json(run_path)
+                                current_paths = sorted(
+                                    (run_path.parent / "candidates").glob("*/candidate.json")
+                                )
+                                judge_inputs = _candidate_judge_inputs(
+                                    run_path,
+                                    current_paths,
+                                    metric_direction=_run_metric_direction(run_path, run_data),
+                                    pinned_candidates=(
+                                        judge_receipt.get("candidate_artifacts")
+                                        if judge_receipt is not None
+                                        else None
+                                    ),
+                                    baseline_public_score=baseline_public_score,
+                                )
+                                judge_receipt, selected_item, created = _obtain_judge_selection(
+                                    candidate_judge,
+                                    _run_problem_text(run_data),
+                                    judge_inputs,
+                                    candidate_judge_mode,
+                                    judge_receipt,
+                                )
+                                # Persist the sanitized receipt before any native mutation so
+                                # repair can reuse it without a second provider call.
+                                if created:
+                                    write_json_atomic(
+                                        run_path.parent / "candidate-judge.json", judge_receipt
+                                    )
+                                selection = _select_with_candidate(
+                                    tools,
+                                    run_id,
+                                    str(selected_item["candidate_id"]),
+                                    iteration=int(selected_item["iteration"]),
+                                    settlement_id=str(selected_item["settlement_id"]),
+                                    git_head=str(selected_item["git_head"]),
+                                    artifact_hash=str(selected_item["artifact_hash"]),
+                                    receipt_sha256=str(judge_receipt["receipt_sha256"]),
+                                )
+                                selection["selection_rule"] = (
+                                    f"{PUBLIC_GATE_SELECTION_RULE}+{judge_receipt.get('mode')}"
+                                )
+                            else:
+                                selection = _search_select(tools, run_id)
                             candidate_id = selection["selected_candidate_id"]
                             run_data = load_json(run_path)
+                        elif candidate_judge is not None and judge_receipt is not None:
+                            run_data, candidate_id, selection = selected
+                            judge_inputs = _candidate_judge_inputs(
+                                run_path,
+                                sorted(
+                                    (run_path.parent / "candidates").glob("*/candidate.json")
+                                ),
+                                metric_direction=_run_metric_direction(run_path, run_data),
+                                pinned_candidates=judge_receipt.get("candidate_artifacts"),
+                                baseline_public_score=baseline_public_score,
+                            )
+                            judge_receipt, selected_item, _ = _obtain_judge_selection(
+                                candidate_judge,
+                                _run_problem_text(run_data),
+                                judge_inputs,
+                                candidate_judge_mode,
+                                judge_receipt,
+                            )
+                            if selected_item["candidate_id"] != candidate_id:
+                                raise RuntimeError(
+                                    "persisted candidate judge receipt disagrees with native selection"
+                                )
+                            for key in ("selected_iteration", "selected_git_head"):
+                                native_value = selection.get(key)
+                                if native_value is not None and native_value != judge_receipt.get(key):
+                                    raise RuntimeError(
+                                        "persisted candidate judge receipt disagrees with selection metadata"
+                                    )
+                            selection["selection_rule"] = (
+                                f"{PUBLIC_GATE_SELECTION_RULE}+{judge_receipt.get('mode')}"
+                            )
                         else:
                             run_data, candidate_id, selection = selected
-                    promotion = tools.goal_plus_search_promote(run_id, candidate_id)
+                    promotion = _search_promote(tools, run_id, candidate_id)
                 except RuntimeError:
+                    if candidate_judge is not None:
+                        raise
                     existing = _existing_promotion(run_path)
                     if existing is not None:
                         run_data, candidate_id, selection, promotion = existing
@@ -2102,7 +2949,11 @@ def finalize_goal_plus_search(
                                 selection,
                                 expected=public_gate_expected,
                             )
-                            selection["selection_rule"] = PUBLIC_GATE_SELECTION_RULE
+                            selection["selection_rule"] = (
+                                f"{PUBLIC_GATE_SELECTION_RULE}+{judge_receipt.get('mode')}"
+                                if judge_receipt is not None
+                                else PUBLIC_GATE_SELECTION_RULE
+                            )
                     else:
                         if deterministic_public_gate:
                             raise
@@ -2110,16 +2961,29 @@ def finalize_goal_plus_search(
                         if selected is None:
                             raise
                         run_data, candidate_id, selection = selected
-                        promotion = tools.goal_plus_search_promote(run_id, candidate_id)
-            publication = search_runtime.promotion_record(run_id)
-            if publication.promotion_mode == "apply":
-                if publication.state == "applied":
+                        promotion = _search_promote(tools, run_id, candidate_id)
+            if candidate_judge is not None and judge_receipt is not None:
+                # Keep this idempotent for older receipts written before promotion.
+                write_json_atomic(run_path.parent / "candidate-judge.json", judge_receipt)
+            publication_method = getattr(search_runtime, "promotion_record", None)
+            publication = (
+                publication_method(run_id) if callable(publication_method) else None
+            )
+            promotion_mode = getattr(publication, "promotion_mode", "apply")
+            if promotion_mode == "apply":
+                state = getattr(publication, "state", "prepared")
+                if state == "applied":
                     patch_status = "already_applied"
                 else:
-                    applied = tools.goal_plus_search_apply_promotion(run_id)
-                    if applied["state"] != "applied":
-                        raise RuntimeError("Goal Plus publication has not been applied")
-                    patch_status = "applied"
+                    applied = _search_apply_promotion(tools, run_id)
+                    if applied is not None:
+                        if applied.get("state") not in {"applied", None}:
+                            raise RuntimeError("Goal Plus publication has not been applied")
+                        patch_status = "applied"
+                    else:
+                        patch_status = apply_promotion_patch(
+                            Path(run_data["source_path"]), Path(promotion["artifact_path"])
+                        )
             else:
                 patch_status = apply_promotion_patch(
                     Path(run_data["source_path"]), Path(promotion["artifact_path"])
@@ -2139,7 +3003,7 @@ def finalize_goal_plus_search(
                 if goal.status != "complete":
                     if not _controller_closeout_allows_goal_status(
                         str(goal.status),
-                        deterministic_public_gate=deterministic_public_gate,
+                        controller_owned_closeout=controller_owned_closeout,
                     ):
                         raise RuntimeError(f"Goal {goal_plus_id} requires host resume: {goal.status}")
                     goal_runtime.set_status(
@@ -2154,6 +3018,7 @@ def finalize_goal_plus_search(
                                 "run_id": run_id,
                                 "selected_candidate_id": candidate_id,
                                 "selected_score": selection.get("selected_score"),
+                                "candidate_judge": judge_receipt,
                             }
                         ],
                     )
@@ -2162,7 +3027,7 @@ def finalize_goal_plus_search(
                 for goal_plus_id in goal_ids
             }
             final_run_data = load_json(run_path)
-            report = tools.goal_plus_search_report(run_id)
+            report = _search_report(tools, run_id)
             result["runs"].append(
                 {
                     "goal_plus_ids": goal_ids,
@@ -2172,6 +3037,7 @@ def finalize_goal_plus_search(
                     "verified_in_closeout": verified_in_closeout,
                     "selection": selection,
                     "promotion": promotion,
+                    "candidate_judge": judge_receipt,
                     "source_patch_status": patch_status,
                     "final_state": final_run_data.get("state"),
                     "goal_statuses": goal_statuses,

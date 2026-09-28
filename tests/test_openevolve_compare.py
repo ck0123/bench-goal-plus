@@ -238,6 +238,23 @@ class OpenEvolveComparisonTest(unittest.TestCase):
             self.assertEqual(environment["PATH"].split(":")[0], str(python.parent))
             self.assertFalse((workspace / ".gp").exists())
 
+    def test_goal_plus_controller_capabilities_are_required_from_receipt(self) -> None:
+        from bench_goal_plus import goal_plus_installation as installation
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            receipt = root / "goal-plus-runtime.json"
+            receipt.write_text(json.dumps({"capabilities": []}))
+            with self.assertRaisesRegex(
+                RuntimeError, "controller_exact_selection"
+            ):
+                installation.require_goal_plus_runtime_capabilities(root)
+
+            receipt.write_text(json.dumps({
+                "capabilities": list(installation.GOAL_PLUS_CONTROLLER_CAPABILITIES)
+            }))
+            installation.require_goal_plus_runtime_capabilities(root)
+
     def test_goal_plus_entrypoint_matches_agent_harness(self) -> None:
         self.assertEqual(
             experiment.goal_plus_entrypoint("codex"),

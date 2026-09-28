@@ -18,6 +18,7 @@ from experiments.aibench_coding.cli import build_parser
 from experiments.aibench_coding.config import (
     AIBenchContractError,
     load_profile,
+    pi_api,
     resolve_profile,
     split_model,
 )
@@ -368,6 +369,55 @@ class AIBenchCodingContractTest(unittest.TestCase):
             self.assertTrue(result["preflight_failed"])
             self.assertEqual(benchmark_compare.CONTROLLER_ONLY_CLOSEOUT_ENV in environment, mode == "blind")
 
+    def test_candidate_judge_reserves_pi_closeout_in_visible_mode(self) -> None:
+        manifest = {
+            "workspace": str(self.root),
+            "budget": {},
+            "method": "goal-plus-pi",
+            "candidate_judge": {
+                "mode": "jev",
+                "endpoint": "https://openrouter.ai/api/alpha/decisions",
+                "model": "typesafe/jev-1.13",
+            },
+            "task": {"controller_only_official_evaluation": True},
+        }
+        environment = {
+            "GOAL_PLUS_JUDGE": "jev",
+            "GOAL_PLUS_JEV_MODEL": "typesafe/jev-1.13",
+            "OPENROUTER_API_KEY": "judge-secret",
+        }
+        with (
+            mock.patch.object(benchmark_compare, "EVALUATION_MODE", "visible"),
+            mock.patch.object(
+                benchmark_compare, "CONTROLLER_ONLY_OFFICIAL_EVALUATION", True
+            ),
+            mock.patch.object(benchmark_compare, "GOAL_PLUS_EARLY_STOP_CONTRACT", None),
+            mock.patch.object(
+                benchmark_compare, "GOAL_PLUS_POSTHOC_SELECTION_CONTRACT", None
+            ),
+            mock.patch.object(
+                benchmark_compare,
+                "evaluate_with_controller_runtime",
+                return_value={"valid": False, "budget": {"total_claimed": 0}},
+            ),
+        ):
+            result = benchmark_compare.execute_goal_plus(
+                manifest, self.root, SimpleNamespace(), environment
+            )
+        self.assertTrue(result["preflight_failed"])
+        self.assertEqual(
+            environment[benchmark_compare.CONTROLLER_ONLY_CLOSEOUT_ENV], "1"
+        )
+
+    def test_controller_runtime_capability_gate_matches_closeout_paths(self) -> None:
+        required = benchmark_compare._requires_controller_runtime_capabilities
+        with mock.patch.object(benchmark_compare, "EVALUATION_MODE", "visible"):
+            self.assertTrue(required("goal-plus-codex", "jev", True))
+            self.assertFalse(required("goal-plus-pi", "off", True))
+            self.assertFalse(required("plain-pi", "jev", True))
+        with mock.patch.object(benchmark_compare, "EVALUATION_MODE", "blind"):
+            self.assertTrue(required("goal-plus-pi", "off", True))
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
             prefix="aibench-coding-test-", dir=ensure_temp_root("tests")
@@ -376,6 +426,20 @@ class AIBenchCodingContractTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def _zai_profile(self, methods: list[str]) -> dict[str, object]:
+        _path, profile = load_profile("smoke")
+        profile["methods"] = methods
+        profile["model"] = "zai/glm-5.2"
+        profile["agent_provider"] = {
+            "id": "zai",
+            "name": "Z.AI Anthropic-compatible API",
+            "auth_mode": "anthropic-compatible",
+            "base_url_env": "ZAI_BASE_URL",
+            "api_key_env": "ZAI_API_KEY",
+            "wire_api": "anthropic-messages",
+        }
+        return profile
 
     def test_catalog_exposes_four_methods_and_native_capabilities(self) -> None:
         catalog = Catalog()
@@ -440,6 +504,19 @@ class AIBenchCodingContractTest(unittest.TestCase):
         }
         with self.assertRaisesRegex(AIBenchContractError, "openai-compatible"):
             resolve_profile(oauth)
+
+    def test_pi_provider_protocol_is_preserved(self) -> None:
+        profile = self._zai_profile(["goal-plus-pi"])
+        resolved = resolve_profile(profile)
+        self.assertEqual(pi_api(resolved), "anthropic-messages")
+
+    def test_codex_rejects_anthropic_provider(self) -> None:
+        profile = self._zai_profile(["goal-plus-codex"])
+        with self.assertRaisesRegex(
+            AIBenchContractError,
+            "Codex methods require openai-compatible Responses",
+        ):
+            resolve_profile(profile)
 
     def test_cli_accepts_native_runner_override_contract(self) -> None:
         args = build_parser().parse_args(
@@ -512,6 +589,63 @@ class AIBenchCodingContractTest(unittest.TestCase):
         self.assertEqual(resolve.call_args.args[0], "/host/bin/pi")
         self.assertEqual(
             environment[benchmark_compare.REAL_PI_BIN_ENV], "/host/bin/pi"
+        )
+
+    def test_candidate_judge_env_is_controller_only_for_goal_plus(self) -> None:
+        profile = self._zai_profile(["goal-plus-codex"])
+        judge_values = {
+            "PATH": "/usr/bin",
+            "ZAI_BASE_URL": "https://agent.example/v1",
+            "ZAI_API_KEY": "agent-key",
+            "GOAL_PLUS_JUDGE": "jev",
+            "OPENROUTER_API_KEY": "judge-key",
+            "GOAL_PLUS_JEV_API_KEY_ENV": "DECISIONS_API_KEY",
+            "DECISIONS_API_KEY": "provider-judge-key",
+            "GOAL_PLUS_JEV_ENDPOINT": "https://judge.example/decisions",
+            "GOAL_PLUS_JEV_MODEL": "typesafe/jev-1.13",
+            "GOAL_PLUS_JUDGE_TIMEOUT_SECONDS": "15",
+            "GOAL_PLUS_LLM_VERIFIER_MODEL": "judge-model",
+            "GOAL_PLUS_LLM_VERIFIER_API_KEY": "llm-judge-key",
+            "GOAL_PLUS_LLM_VERIFIER_BASE_URL": "https://llm-judge.example/v1",
+            "GOAL_PLUS_LLM_VERIFIER_EVALUATIONS": "2",
+            "GOAL_PLUS_LLM_VERIFIER_PIVOTS": "1",
+            "OPENAI_API_KEY": "openai-judge-key",
+            "OPENAI_BASE_URL": "https://openai-judge.example/v1",
+            "DEEPSEEK_API_KEY": "deepseek-agent-key",
+            "VERTEX_API_KEY": "vertex-agent-key",
+        }
+        with mock.patch.dict(os.environ, judge_values, clear=True):
+            goal_environment = runtime._agent_environment(
+                self.root / "goal-plus", profile, "goal-plus-codex"
+            )
+            plain_environment = runtime._agent_environment(
+                self.root / "plain", profile, "plain-codex"
+            )
+
+        for name, value in judge_values.items():
+            if name in runtime._CANDIDATE_JUDGE_CONTROLLER_ENV:
+                self.assertEqual(goal_environment.get(name), value)
+                self.assertNotIn(name, plain_environment)
+
+        self.assertEqual(goal_environment.get("GOAL_PLUS_JEV_API_KEY_ENV"), "DECISIONS_API_KEY")
+        self.assertEqual(goal_environment.get("DECISIONS_API_KEY"), "provider-judge-key")
+        self.assertNotIn("GOAL_PLUS_JEV_API_KEY_ENV", plain_environment)
+        self.assertNotIn("DECISIONS_API_KEY", plain_environment)
+
+        worker_environment = dict(goal_environment)
+        worker_environment.update(
+            {
+                "GOAL_PLUS_EVIDENCE_ANNOTATOR_MODEL": "old-annotator",
+                "GOAL_PLUS_EVIDENCE_ANNOTATOR_API_KEY_ENV": "OPENAI_API_KEY",
+            }
+        )
+        benchmark_compare._hide_candidate_judge_from_workers(worker_environment)
+        for name in runtime._CANDIDATE_JUDGE_CONTROLLER_ENV:
+            self.assertNotIn(name, worker_environment)
+        self.assertNotIn("GOAL_PLUS_JEV_API_KEY_ENV", worker_environment)
+        self.assertNotIn("DECISIONS_API_KEY", worker_environment)
+        self.assertNotIn(
+            "GOAL_PLUS_EVIDENCE_ANNOTATOR_MODEL", worker_environment
         )
 
     def _metadata(self) -> dict[str, object]:

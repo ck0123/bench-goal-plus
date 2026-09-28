@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from bench_artifacts import sanitize_id, utc_now
+from bench_goal_plus.candidate_judge import (
+    JUDGE_CONTROLLER_ENV_NAMES,
+    judge_controller_env_names,
+)
 from bench_goal_plus.upstreams import external_goal_plus_source, registered_upstream_branch
 from bench_runtime_paths import configure_temp_environment, ensure_temp_root
 from experiments.benchmark_compare import experiment as standalone
@@ -34,6 +38,7 @@ from .config import (
     UPSTREAM_CHECKOUT,
     UPSTREAM_ROOT,
     campaign_dir,
+    pi_api,
     preserve_conflict,
     split_model,
     write_json,
@@ -46,6 +51,12 @@ STANDALONE_CONTROLLER = ROOT / "experiments" / "benchmark_compare" / "experiment
 SANDBOX_SOURCE = Path(__file__).resolve().with_name("sandbox.py")
 TERMINAL_CELL_STATES = {"completed", "partial", "failed", "interrupted"}
 _NODE_VERSION = re.compile(r"v?(\d+)(?:\.|$)")
+
+# These values configure the controller-side optional candidate judge.  They
+# are passed to the standalone controller only for Goal Plus cells; the
+# controller removes them before it starts any worker process.
+# Kept as a tuple for the existing environment allow-list contract and tests.
+_CANDIDATE_JUDGE_CONTROLLER_ENV = tuple(sorted(JUDGE_CONTROLLER_ENV_NAMES))
 
 
 def _capture(command: list[str], *, cwd: Path | None = None) -> tuple[bool, str]:
@@ -405,7 +416,7 @@ def prepare(campaign_id: str, profile: dict[str, Any], profile_path: Path) -> Pa
                             method=method,
                             model=model_id,
                             pi_provider_id=provider_id,
-                            pi_api=f"openai-{profile['agent_provider']['wire_api']}",
+                            pi_api=pi_api(profile),
                             pi_api_key_env=profile["agent_provider"]["api_key_env"],
                             wall_time_seconds=profile["wall_time_seconds"],
                             concurrency=profile["concurrency"],
@@ -483,6 +494,8 @@ def _agent_environment(
         "no_proxy",
         *provider_env_names,
     }
+    if method in GOAL_PLUS_METHODS:
+        allowed.update(judge_controller_env_names(os.environ))
     environment = {name: os.environ[name] for name in allowed if name in os.environ}
     environment = dict(configure_temp_environment(environment))
     real_codex = shutil.which("codex")
@@ -535,7 +548,7 @@ def _run_cell(
         "--pi-provider-id",
         provider_id,
         "--pi-api",
-        f"openai-{provider['wire_api']}",
+        pi_api(profile),
         "--pi-api-key-env",
         provider["api_key_env"],
         "--api-base",

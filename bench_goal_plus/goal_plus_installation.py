@@ -10,6 +10,12 @@ import subprocess
 import sys
 
 
+GOAL_PLUS_CONTROLLER_CAPABILITIES = (
+    "goal_plus.controller_exact_selection.v1",
+    "goal_plus.controller_owned_closeout.v1",
+)
+
+
 def installation_environment(run_dir: Path) -> dict[str, str]:
     return {
         "GOAL_PLUS_INSTALL_HOME": str(run_dir / "controller-runtime/goal-plus-install"),
@@ -106,6 +112,28 @@ def install_goal_plus(source: Path, workspace: Path, agent_harness: str) -> None
     if not Path(receipt["python"]).is_file() or not Path(receipt["package"]).is_dir():
         raise RuntimeError("Goal Plus installer returned an incomplete runtime")
     (run_dir / "goal-plus-runtime.json").write_text(json.dumps(receipt, indent=2) + "\n")
+
+
+def require_goal_plus_runtime_capabilities(
+    run_dir: Path, required: tuple[str, ...] = GOAL_PLUS_CONTROLLER_CAPABILITIES
+) -> dict:
+    """Fail before launch when the installed runtime cannot honor the controller contract."""
+    receipt_path = run_dir / "goal-plus-runtime.json"
+    try:
+        receipt = json.loads(receipt_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"Goal Plus runtime receipt is unavailable or invalid: {receipt_path}"
+        ) from error
+    if not isinstance(receipt, dict):
+        raise RuntimeError(f"Goal Plus runtime receipt is not an object: {receipt_path}")
+    capabilities = set(receipt.get("capabilities") or [])
+    missing = sorted(set(required) - capabilities)
+    if missing:
+        raise RuntimeError(
+            "Goal Plus runtime lacks required capabilities: " + ", ".join(missing)
+        )
+    return receipt
 
 
 def bind_goal_plus_environment(environment: dict[str, str], run_dir: Path) -> None:

@@ -82,6 +82,8 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
         "prompt": str(raw.get("prompt") or ""),
         "grader_command": str((raw.get("grader") or {}).get("command") or ""),
         "validity_ok": metadata.get("validity_ok"),
+        "review_status": metadata.get("review_status"),
+        "validity_issues": metadata.get("validity_issues") or [],
         "materialization": result.to_dict(),
     }
 

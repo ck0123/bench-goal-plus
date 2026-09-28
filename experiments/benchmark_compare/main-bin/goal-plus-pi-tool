@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reserve ZSoft selection and promotion for the host controller."""
+"""Reserve controller-owned Goal Plus closeout tools for the host."""
 
 from __future__ import annotations
 
@@ -11,6 +11,9 @@ import sys
 CONTROLLER_ONLY_CLOSEOUT_ENV = "BENCH_GOAL_PLUS_CONTROLLER_ONLY_CLOSEOUT"
 CONTROLLER_ONLY_TOOLS = {
     "goal_plus_record_search_result",
+    "goal_plus_search_promote",
+    "goal_plus_search_select",
+    "record_search_result",
     "search_promote",
     "search_select",
 }
@@ -28,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "ok": False,
                     "tool": tool,
-                    "error": "ZSoft closeout is reserved for the host controller",
+                    "error": "Goal Plus closeout is reserved for the host controller",
                 }
             ),
             file=sys.stderr,
