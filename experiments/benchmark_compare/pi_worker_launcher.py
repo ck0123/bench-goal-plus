@@ -14,9 +14,11 @@ import stat
 import subprocess
 import sys
 import threading
+import traceback
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,12 @@ TOOL_SOCKET_ENV = "BENCH_GOAL_PLUS_PI_TOOL_SOCKET"
 REAL_PI_BIN_ENV = "BENCH_GOAL_PLUS_REAL_PI_BIN"
 LAUNCH_CONTEXT_VERSION = 1
 _MAX_PROXY_REQUEST_BYTES = 1024 * 1024
+# Host-side diagnostics for worker-facing rejections. Blind mode must keep
+# returning an opaque rejection, so the real cause is recorded next to the
+# other Goal Plus host logs instead of being discarded.
+_PROXY_ERROR_LOG_DIR = "pi-worker-proxy"
+_PROXY_LOG_TEXT_CAP = 4000
+_PROXY_LOG_ARGS_CAP = 2000
 _MAX_UNIX_SOCKET_PATH_BYTES = 103
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PATH_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -54,6 +62,8 @@ _WORKER_TOOLS = {
     "goal_plus_search_stage_shared_tool",
     "goal_plus_search_copy_shared_tool",
     "goal_plus_search_get_evidence_detail",
+    "goal_plus_search_read_shared_cache",
+    "goal_plus_search_append_shared_cache",
     "goal_plus_search_run_verifier",
     "goal_plus_search_list_iterations",
 }
@@ -79,6 +89,23 @@ _BLIND_SYSTEM_PROMPT = (
     "tool errors. Work only from public task files and source mounted in this sandbox."
 )
 _OPAQUE_RESULTS_LEDGER = "iteration\tcommit\tstate\n"
+_BLIND_CACHE_SECTION_FIELDS = {
+    "key",
+    "title",
+    "requirement",
+    "cardinality",
+    "requires_evidence",
+}
+_BLIND_CACHE_ENTRY_FIELDS = {
+    "key",
+    "title",
+    "section_key",
+    "content",
+    "writer",
+    "record_id",
+    "superseded_by",
+    "evidence_ref",
+}
 _BLIND_CONTEXT_SOURCE_FIELDS = {
     "agent_session_id",
     "best_iteration",
@@ -100,8 +127,10 @@ _BLIND_CONTEXT_SOURCE_FIELDS = {
     "results_tsv",
     "resume",
     "run_id",
+    "shared_cache",
     "supplemental_evaluation_enabled",
     "tool_family_catalog",
+    "verification",
     "workspace_access",
     "workspace_ledger_projection",
 }
@@ -146,6 +175,9 @@ _BLIND_VERIFIER_SOURCE_FIELDS = {
     "process_passed",
     "promotion_passed",
     "run_id",
+    "shared_cache_injected",
+    "shared_cache_snapshot",
+    "shared_cache_warning",
     "shared_tool_consumed_entries",
     "shared_tool_deduplicated_entries",
     "shared_tool_errors",
@@ -218,12 +250,16 @@ _BLIND_ITERATION_SOURCE_FIELDS = {
     "shared_tool_staged_bytes",
     "shared_tool_staged_entries",
     "shared_tool_staged_file_count",
+    "shared_tool_staging_dir",
     "shared_tools",
+    "settlement_receipt",
+    "settlement_sequence",
     "state",
     "summary",
     "toolization_advisories",
     "toolization_decision",
     "touched_denied_files",
+    "verifier_submission",
     "workspace_git_head_after_settlement",
     "workspace_artifact_after_settlement",
 }
@@ -637,6 +673,12 @@ def _blind_context_response(
     }
     projected["metric_name"] = _BLIND_PUBLIC_METRIC
     projected["metric_direction"] = "maximize"
+    shared_cache = result.get("shared_cache")
+    if shared_cache is not None:
+        projected_cache = _blind_shared_cache_snapshot(shared_cache)
+        if projected_cache is _INVALID_BLIND_RESPONSE:
+            return _INVALID_BLIND_RESPONSE
+        projected["shared_cache"] = projected_cache
     return projected
 
 
@@ -668,20 +710,128 @@ def _blind_verifier_receipt(
         or result.get("candidate_id") != context.candidate_id
     ):
         return _INVALID_BLIND_RESPONSE
-    return {
+    receipt: dict[str, Any] = {
         "run_id": context.run_id,
         "candidate_id": context.candidate_id,
         "recorded": True,
+    }
+    if result.get("shared_cache_injected") is True:
+        projected_cache = _blind_shared_cache_snapshot(
+            result.get("shared_cache_snapshot")
+        )
+        if projected_cache is _INVALID_BLIND_RESPONSE:
+            return _INVALID_BLIND_RESPONSE
+        receipt["shared_cache_snapshot"] = projected_cache
+    return receipt
+
+
+def _blind_shared_cache_snapshot(
+    snapshot: Any,
+) -> dict[str, Any] | object:
+    """Project an operator-frozen shared cache snapshot for a blind worker.
+
+    The cache is an operator-defined fact plane: sections and entries are
+    written only by peer candidates and the LLM verifier from public task
+    material, never by the official evaluator. The projection keeps the
+    template and the projected entries but performs a closed-field check so
+    the host cannot smuggle arbitrary shapes through the cache channel.
+    """
+    if not isinstance(snapshot, dict) or not set(snapshot) <= {
+        "sections", "entries", "total_records", "updates_allowed",
+    }:
+        return _INVALID_BLIND_RESPONSE
+    sections = snapshot.get("sections")
+    entries = snapshot.get("entries")
+    if not isinstance(sections, list) or not isinstance(entries, list):
+        return _INVALID_BLIND_RESPONSE
+    projected_sections: list[dict[str, Any]] = []
+    for section in sections:
+        if not isinstance(section, dict) or not set(section) <= _BLIND_CACHE_SECTION_FIELDS:
+            return _INVALID_BLIND_RESPONSE
+        if not isinstance(section.get("key"), str) or not section["key"]:
+            return _INVALID_BLIND_RESPONSE
+        if not isinstance(section.get("title"), str):
+            return _INVALID_BLIND_RESPONSE
+        if not isinstance(section.get("requirement"), str):
+            return _INVALID_BLIND_RESPONSE
+        if section.get("cardinality") not in {"any", "latest"}:
+            return _INVALID_BLIND_RESPONSE
+        if type(section.get("requires_evidence")) is not bool:
+            return _INVALID_BLIND_RESPONSE
+        projected_sections.append(dict(section))
+    projected_entries: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not set(entry) <= _BLIND_CACHE_ENTRY_FIELDS:
+            return _INVALID_BLIND_RESPONSE
+        for field in ("key", "title", "section_key", "content", "writer", "record_id"):
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                return _INVALID_BLIND_RESPONSE
+        for field in ("superseded_by", "evidence_ref"):
+            if entry.get(field) is not None and not isinstance(entry[field], str):
+                return _INVALID_BLIND_RESPONSE
+        projected_entries.append(dict(entry))
+    projected: dict[str, Any] = {
+        "sections": projected_sections,
+        "entries": projected_entries,
+    }
+    total_records = snapshot.get("total_records")
+    if total_records is not None and type(total_records) is not int:
+        return _INVALID_BLIND_RESPONSE
+    if total_records is not None:
+        projected["total_records"] = total_records
+    return projected
+
+
+def _blind_appended_shared_cache(
+    result: Any,
+) -> dict[str, Any] | object:
+    if not isinstance(result, dict) or not set(result) <= {
+        "section", "writer", "view",
+    }:
+        return _INVALID_BLIND_RESPONSE
+    if not isinstance(result.get("section"), str) or not result["section"]:
+        return _INVALID_BLIND_RESPONSE
+    if not isinstance(result.get("writer"), str) or not result["writer"]:
+        return _INVALID_BLIND_RESPONSE
+    view = result.get("view")
+    if not isinstance(view, list):
+        return _INVALID_BLIND_RESPONSE
+    projected_view = []
+    for entry in view:
+        if not isinstance(entry, dict) or not set(entry) <= _BLIND_CACHE_ENTRY_FIELDS:
+            return _INVALID_BLIND_RESPONSE
+        for field in ("key", "title", "section_key", "content", "writer", "record_id"):
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                return _INVALID_BLIND_RESPONSE
+        for field in ("superseded_by", "evidence_ref"):
+            if entry.get(field) is not None and not isinstance(entry[field], str):
+                return _INVALID_BLIND_RESPONSE
+        projected_view.append(dict(entry))
+    return {
+        "section": result["section"],
+        "writer": result["writer"],
+        "view": projected_view,
     }
 
 
 def _blind_iteration_receipts(
     result: Any, context: LaunchContext
-) -> list[dict[str, Any]] | object:
-    if not isinstance(result, list):
+) -> list[dict[str, Any]] | dict[str, Any] | object:
+    items = result
+    envelope: dict[str, Any] | None = None
+    if isinstance(result, dict) and set(result) == {
+        "items", "next_offset", "total",
+    }:
+        # The host paginates iteration listings; project the page shape.
+        items = result["items"]
+        envelope = {
+            "next_offset": result["next_offset"],
+            "total": result["total"],
+        }
+    if not isinstance(items, list):
         return _INVALID_BLIND_RESPONSE
     receipts: list[dict[str, Any]] = []
-    for item in result:
+    for item in items:
         if isinstance(item, dict) and set(item) == _BLIND_ITERATION_RECEIPT_FIELDS:
             if (
                 item["run_id"] != context.run_id
@@ -705,6 +855,8 @@ def _blind_iteration_receipts(
         if type(iteration) is not int or iteration < 1:
             return _INVALID_BLIND_RESPONSE
         receipts.append({"iteration": iteration, "recorded": True})
+    if envelope is not None:
+        return {"items": receipts, **envelope}
     return receipts
 
 
@@ -952,6 +1104,10 @@ def _blind_tool_response(
         return _blind_staged_shared_tool(result, context)
     if tool == "goal_plus_search_copy_shared_tool":
         return _blind_copied_shared_tool(result, context)
+    if tool == "goal_plus_search_read_shared_cache":
+        return _blind_shared_cache_snapshot(result)
+    if tool == "goal_plus_search_append_shared_cache":
+        return _blind_appended_shared_cache(result)
     return _INVALID_BLIND_RESPONSE
 
 
@@ -1021,6 +1177,57 @@ class WorkerToolProxy:
         self.host_environment["GOAL_PLUS_AGENT_SESSION_ID"] = context.agent_session_id
         self._server: _ThreadingUnixServer | None = None
         self._thread: threading.Thread | None = None
+        self._log_lock = threading.Lock()
+
+    def _log_rejection(
+        self,
+        stage: str,
+        exc: BaseException,
+        *,
+        tool: str | None = None,
+        args: Any = None,
+        note: str | None = None,
+    ) -> None:
+        """Record a swallowed worker-facing failure on the host side.
+
+        Blind evaluation collapses every proxy failure into one opaque
+        rejection; without this log the underlying cause (for example a host
+        tool's stderr) is unrecoverable after the run. The log lives under the
+        real Goal Plus root's host-logs, which workers never see.
+        """
+
+        def clip(value: Any, limit: int) -> str:
+            text = value if isinstance(value, str) else json.dumps(
+                value, ensure_ascii=False, default=str,
+            )
+            return text if len(text) <= limit else f"{text[:limit]}...<{len(text)} chars>"
+
+        record = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "agent_session_id": self.context.agent_session_id,
+            "run_id": self.context.run_id,
+            "candidate_id": self.context.candidate_id,
+            "evaluation_mode": self.evaluation_mode,
+            "stage": stage,
+            "tool": tool,
+            "error_type": type(exc).__name__,
+            "error": clip(str(exc), _PROXY_LOG_TEXT_CAP),
+            "traceback": clip("".join(traceback.format_exception(exc)), _PROXY_LOG_TEXT_CAP),
+            "args": clip(args, _PROXY_LOG_ARGS_CAP) if args is not None else None,
+            "note": note,
+        }
+        try:
+            target = (
+                self.root / "host-logs" / _PROXY_ERROR_LOG_DIR
+                / f"{self.context.agent_session_id}.jsonl"
+            )
+            with self._log_lock:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            # Diagnostics must never break the worker-facing response path.
+            pass
 
     def start(self) -> None:
         self.socket_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
@@ -1037,6 +1244,12 @@ class WorkerToolProxy:
                         request = json.loads(raw.decode("utf-8"))
                         response = proxy.dispatch(request)
                     except Exception as exc:  # noqa: BLE001
+                        proxy._log_rejection(
+                            "dispatch",
+                            exc,
+                            tool=request.get("tool") if isinstance(request, dict) else None,
+                            args=request.get("args") if isinstance(request, dict) else None,
+                        )
                         response = (
                             dict(_BLIND_RESPONSE_REJECTED)
                             if proxy.evaluation_mode == "blind"
@@ -1110,11 +1323,24 @@ class WorkerToolProxy:
                 and self.evaluation_mode == "visible"
             ):
                 self._project_worker_generation(result)
-        except Exception:  # workers must not receive raw host exceptions
+        except Exception as exc:  # workers must not receive raw host exceptions
+            self._log_rejection("host_tool", exc, tool=str(tool), args=args)
             return dict(_BLIND_RESPONSE_REJECTED)
         if self.evaluation_mode == "blind":
+            host_result = result
             result = _blind_tool_response(str(tool), result, self.context)
             if result is _INVALID_BLIND_RESPONSE:
+                self._log_rejection(
+                    "blind_projection",
+                    ValueError("blind projection rejected the host tool result"),
+                    tool=str(tool),
+                    args=args,
+                    note=(
+                        f"host_result_keys={','.join(sorted(host_result))}"
+                        if isinstance(host_result, dict)
+                        else f"host_result_type={type(host_result).__name__}"
+                    ),
+                )
                 return dict(_BLIND_RESPONSE_REJECTED)
         return {
             "ok": True,
@@ -1214,6 +1440,33 @@ class WorkerToolProxy:
             raise PermissionError(
                 "Pi iteration listing accepts only the bound agent_session_id"
             )
+        if (
+            tool == "goal_plus_search_read_shared_cache"
+            and set(args) != {"agent_session_id"}
+        ):
+            raise PermissionError(
+                "Pi shared cache reads accept only the bound agent_session_id"
+            )
+        if tool == "goal_plus_search_append_shared_cache":
+            if not set(args) <= {
+                "agent_session_id",
+                "section",
+                "content",
+                "supersedes",
+                "evidence_ref",
+            }:
+                raise PermissionError(
+                    "Pi shared cache appends accept only the documented fields"
+                )
+            if not isinstance(args.get("section"), str) or not args["section"]:
+                raise PermissionError("Pi shared cache appends require a section")
+            if not isinstance(args.get("content"), str) or not args["content"]:
+                raise PermissionError("Pi shared cache appends require content")
+            for field in ("supersedes", "evidence_ref"):
+                if args.get(field) is not None and not isinstance(args[field], str):
+                    raise PermissionError(
+                        "Pi shared cache appends require string optional fields"
+                    )
         if (
             tool == "goal_plus_search_run_verifier"
             and args.get("scope", "process") != "process"

@@ -13,6 +13,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from adapters import zsoft_blind
 from adapters.zsoft_detect import adapter
 from experiments.benchmark_compare import experiment as benchmark_experiment
 
@@ -125,6 +126,7 @@ class AdapterContractTest(unittest.TestCase):
         self.assertFalse((workspace / "source" / ".git").exists())
         metadata = json.loads((workspace / "task.json").read_text())
         self.assertEqual(metadata["source_revision"], commit)
+        self.assertEqual(metadata["scan_roots"], contract["scan_roots"])
         self.assertNotIn("upstream_root", metadata)
         self.assertEqual(metadata["primary_metric"], "format_valid")
         self.assertTrue((workspace / "public_check.py").is_file())
@@ -549,6 +551,16 @@ class AdapterContractTest(unittest.TestCase):
         self.assertEqual(summary["eligible_iteration_count"], 3)
         self.assertEqual(summary["official_evaluator_calls"], 2)
         self.assertEqual(summary["artifact_cache_hits"], 1)
+        self.assertEqual(len(summary["duplicate_artifact_groups"]), 1)
+        group = summary["duplicate_artifact_groups"][0]
+        self.assertFalse(group["cross_candidate"])
+        self.assertEqual(
+            [member["iteration"] for member in group["iterations"]], [2, 3]
+        )
+        self.assertEqual(len(summary["warnings"]), 1)
+        self.assertIn(
+            "identical_artifacts_within_candidate", summary["warnings"][0]
+        )
         self.assertEqual(evaluator.call_count, 2)
         self.assertEqual(summary["scores"][1]["iteration"], 2)
         self.assertEqual(summary["scores"][1]["f1"], 0.75)
@@ -561,6 +573,137 @@ class AdapterContractTest(unittest.TestCase):
         search_report = (search_run / "report.md").read_text(encoding="utf-8")
         self.assertIn("Metric: `format_valid`", search_report)
         self.assertNotIn("0.75", search_report)
+
+    def test_posthoc_flags_identical_artifacts_across_candidates(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        run_dir = tmp / "cell"
+        workspace = run_dir / "workspace"
+        search_run = workspace / ".gp" / "runs" / "run_fixture"
+        (search_run / "candidates").mkdir(parents=True)
+        (search_run / "workspace").mkdir(parents=True)
+        (workspace / "task.json").write_text(
+            json.dumps(
+                {
+                    "task_id": "civetweb-detect",
+                    "project_id": "civetweb",
+                    "commit": "1" * 40,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def commit_identical_artifact(candidate_id: str) -> str:
+            repository = search_run / "workspace" / candidate_id
+            (repository / "submission").mkdir(parents=True)
+            (
+                repository / "submission" / "finding.json"
+            ).write_text('{"fixture":"shared"}\n', encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "Test"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C", str(repository),
+                    "config", "user.email", "test@example.com",
+                ],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "commit", "-q", "-m", candidate_id],
+                check=True,
+            )
+            (search_run / "candidates" / candidate_id).mkdir(parents=True)
+            (
+                search_run / "candidates" / candidate_id / "candidate.json"
+            ).write_text(
+                json.dumps(
+                    {
+                        "candidate_id": candidate_id,
+                        "iterations": [
+                            {
+                                "iteration": 1,
+                                "git_head": subprocess.run(
+                                    ["git", "-C", str(repository), "rev-parse", "HEAD"],
+                                    capture_output=True,
+                                    text=True,
+                                    check=True,
+                                ).stdout.strip(),
+                                "artifact_hash": "shared",
+                                "score": 1.0,
+                                "process_passed": True,
+                                "git_artifact_clean": True,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return candidate_id
+
+        commit_identical_artifact("c001")
+        commit_identical_artifact("c002")
+
+        def score_snapshot(
+            evaluated_workspace: Path,
+            mode: str,
+            controller_runtime: Path,
+            benchmark_root: Path,
+        ) -> dict[str, object]:
+            f1 = 0.5
+            return {
+                "mode": "final",
+                "valid": True,
+                "format_valid": True,
+                "f1": f1,
+                "primary_metric": {"name": "f1", "direction": "maximize", "value": f1},
+                "zsoft_score": {
+                    "f1": f1, "precision": f1, "recall": f1,
+                    "tp": 1, "fp": 0, "fn": 0,
+                },
+            }
+
+        benchmark_experiment.configure_adapter("zsoft-detect")
+        self.addCleanup(benchmark_experiment.configure_adapter, "heurigym")
+        with mock.patch.object(
+            benchmark_experiment,
+            "evaluate_with_controller_runtime",
+            side_effect=score_snapshot,
+        ):
+            summary = benchmark_experiment.finalize_posthoc_official_selection(
+                run_dir=run_dir,
+                workspace=workspace,
+                benchmark_root=tmp / "benchmark",
+                closeout={"completed": True, "runs": [
+                    {"run_id": "run_fixture", "final_state": "promoted"}
+                ]},
+                contract=adapter.GOAL_PLUS_POSTHOC_SELECTION_CONTRACT,
+                worker_shutdown_verified=True,
+            )
+
+        self.assertTrue(summary["completed"])
+        self.assertEqual(summary["eligible_iteration_count"], 2)
+        self.assertEqual(summary["unique_artifact_count"], 1)
+        self.assertEqual(summary["official_evaluator_calls"], 1)
+        self.assertEqual(summary["artifact_cache_hits"], 1)
+        self.assertEqual(len(summary["duplicate_artifact_groups"]), 1)
+        group = summary["duplicate_artifact_groups"][0]
+        self.assertTrue(group["cross_candidate"])
+        self.assertEqual(
+            sorted(member["candidate_id"] for member in group["iterations"]),
+            ["c001", "c002"],
+        )
+        self.assertEqual(len(summary["warnings"]), 1)
+        self.assertIn(
+            "identical_artifacts_across_candidates", summary["warnings"][0]
+        )
+        # The warning is diagnostic only: selection follows the contract as before.
+        self.assertEqual(summary["selected"]["candidate_id"], "c001")
+        self.assertEqual(summary["selected"]["f1"], 0.5)
 
     def test_posthoc_requires_public_process_and_clean_artifact(self) -> None:
         eligible = {
@@ -578,6 +721,137 @@ class AdapterContractTest(unittest.TestCase):
                 self.assertFalse(benchmark_experiment._publicly_compliant_iteration(
                     {**eligible, **changed}
                 ))
+
+
+class ScanRootPathBaseTest(unittest.TestCase):
+    """Workspace-prefixed finding paths are format errors.
+
+    A finding whose location.path does not sit under a declared scan root can
+    never match the official evaluator, so the only worker-visible feedback
+    channel (the public format check) must reject it at submission time.
+    """
+
+    @staticmethod
+    def _finding(path: str) -> dict:
+        return {
+            "location": {
+                "path": path,
+                "function": "example_function",
+                "start_line": 1,
+                "end_line": 2,
+            },
+            "bug_type": "cwe_125",
+            "root_cause": {"cause": "c", "trigger": "t", "impact": "i"},
+        }
+
+    def _submission(self, paths: list[str]) -> Path:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        submission = tmp / "submission"
+        submission.mkdir()
+        for index, path in enumerate(paths):
+            (submission / f"finding{index:02d}.json").write_text(
+                json.dumps(self._finding(path))
+            )
+        return submission
+
+    def test_workspace_prefixed_path_is_rejected_with_the_roots(self) -> None:
+        diagnostics = zsoft_blind.validate_detect_submission(
+            self._submission(["source/src/civetweb.c"]),
+            scan_roots=["src/civetweb.c"],
+        )
+        self.assertFalse(zsoft_blind.diagnostics_valid(diagnostics))
+        [error] = diagnostics["errors"]
+        self.assertIn("scan roots", error["message"])
+        self.assertIn("src/civetweb.c", error["message"])
+
+    def test_repo_relative_paths_inside_roots_are_accepted(self) -> None:
+        diagnostics = zsoft_blind.validate_detect_submission(
+            self._submission(
+                [
+                    "src/civetweb.c",
+                    "./src/civetweb.c",
+                    "src/ulock/dlock/lib/server/dlock_server.cpp",
+                ]
+            ),
+            scan_roots=["src/civetweb.c", "src/ulock/dlock/lib/server"],
+        )
+        self.assertTrue(zsoft_blind.diagnostics_valid(diagnostics))
+
+    def test_missing_or_empty_roots_keep_whole_repository_behavior(self) -> None:
+        submission = self._submission(["source/src/civetweb.c", "anywhere/x.c"])
+        for roots in (None, []):
+            with self.subTest(roots=roots):
+                diagnostics = zsoft_blind.validate_detect_submission(
+                    submission, scan_roots=roots
+                )
+                self.assertTrue(zsoft_blind.diagnostics_valid(diagnostics))
+
+    def test_scan_roots_config_is_validated_fail_closed(self) -> None:
+        for bad in (
+            ["/absolute"],
+            ["../escape"],
+            ["valid/../valid"],
+            "not-a-list",
+            [5],
+            ["ok", 7],
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    zsoft_blind.validated_scan_roots_config(bad)
+
+    def test_public_check_reads_scan_roots_from_task_metadata(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        workspace = tmp / "workspace"
+        submission = workspace / "submission"
+        submission.mkdir(parents=True)
+        (submission / "finding01.json").write_text(
+            json.dumps(self._finding("source/src/civetweb.c"))
+        )
+        base_metadata = {
+            "artifact_name": "submission",
+            "public_validation_kind": "detect_json_findings",
+        }
+        (workspace / "task.json").write_text(
+            json.dumps({**base_metadata, "scan_roots": ["src/civetweb.c"]})
+        )
+        report = zsoft_blind.run_public_check(workspace)
+        self.assertFalse(report["valid"])
+        self.assertEqual(report[zsoft_blind.PUBLIC_METRIC], 0.0)
+
+        (workspace / "task.json").write_text(json.dumps(base_metadata))
+        report = zsoft_blind.run_public_check(workspace)
+        self.assertTrue(report["valid"])
+
+    def test_evaluate_workspace_applies_the_scan_root_base(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        workspace = tmp / "workspace"
+        submission = workspace / adapter.ARTIFACT_NAME
+        submission.mkdir(parents=True)
+        (submission / "finding01.json").write_text(
+            json.dumps(self._finding("source/src/civetweb.c"))
+        )
+        (workspace / "task.json").write_text(
+            json.dumps(
+                {
+                    "task_id": adapter.TASK_ID,
+                    "project_id": adapter.DEFAULT_PROJECT,
+                    "commit": adapter.project_commit(adapter.DEFAULT_PROJECT),
+                    "scan_roots": ["src/civetweb.c"],
+                }
+            )
+        )
+
+        with mock.patch.object(adapter, "_run") as scorer:
+            report = adapter.evaluate_workspace(
+                workspace, Path("/not-visible-to-public-check"), "public"
+            )
+
+        scorer.assert_not_called()
+        self.assertFalse(report["valid"])
+        self.assertEqual(report[adapter.GOAL_PLUS_PROCESS_METRIC], 0.0)
 
 
 if __name__ == "__main__":

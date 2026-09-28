@@ -100,7 +100,7 @@ DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_WALL_TIME_SECONDS = 300
 DEFAULT_CONCURRENCY = 2
 DEFAULT_REASONING_EFFORT = "high"
-PUBLIC_GATE_SELECTION_RULE = "lowest_candidate_id_latest_compliant_iteration"
+PUBLIC_GATE_SELECTION_RULE = "goal_plus_preferred_candidate_latest_compliant_iteration"
 REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 CODEX_SANDBOX = "danger-full-access"
 CODEX_PROVIDER_ID = "bench_proxy"
@@ -901,6 +901,7 @@ def render_goal(
     coordination_condition: str | None = None,
     search_space_mode: str | None = None,
     shared_dir_enabled: bool = False,
+    shared_cache_enabled: bool = False,
     controller_only_official_evaluation: bool = False,
     evaluation_mode: str | None = None,
     early_stop_contract: dict[str, Any] | None = None,
@@ -1069,6 +1070,16 @@ def render_goal(
                 if shared_dir_enabled
                 else ""
             )
+            + (
+                "- Set top-level `shared_cache.enabled=true` with "
+                '`shared_cache.sections=[{"key":"function_signatures","title":"Function signatures","requirement":"One function per entry. subject=<module.function>. content uses the fixed structure: signature (verbatim signature); pure (whether the function is pure); notes (side effects, global state, or non-local writes, or none). Correct a changed signature with supersedes instead of appending a parallel entry.","cardinality":"any","requires_evidence":false},{"key":"value_ranges","title":"Variable value ranges","requirement":"One (function, variable, direction) triple per entry. subject=<function>#<variable>. content uses the fixed structure: direction=input|output|intermediate; range (interval, enumeration, or predicate, e.g. [0,65536) or {None,\'\'}); basis (how the range was obtained: concrete observation, static derivation, or assumption); confidence=observed|derived|assumed. When a more precise range is found for the same subject, it must supersede the older entry instead of appending a looser parallel one.","cardinality":"any","requires_evidence":false},{"key":"fp_verdicts","title":"FP verdicts","requirement":"One finding per entry. subject=<file:line>#<bug_type>. content uses the fixed structure: verdict=fp|tp|uncertain; path (source-to-sink function chain covered by this verdict); basis (value-range propagation chain behind the verdict, citing record_id of the value_ranges entries used); notes. Correct an earlier verdict with supersedes.","cardinality":"any","requires_evidence":false}]`, '
+                '`shared_cache.verifier_input=false`, '
+                '`shared_cache.verifier_updates=false`, '
+                '`shared_cache.max_records=200`, and '
+                '`shared_cache.max_content_chars=2000`.\n'
+                if shared_cache_enabled
+                else ""
+            )
             + f"- `strategy.worker_budget.max_runtime_seconds={dispatch_seconds}` and "
             "`strategy.worker_budget.on_exceed=\"interrupt\"`; continue the same candidate "
             "lineages while useful work and outer time remain.\n"
@@ -1144,6 +1155,16 @@ def render_goal(
         + (
             "- Set top-level `shared_dir.enabled=true`.\n"
             if shared_dir_enabled
+            else ""
+        )
+        + (
+            "- Set top-level `shared_cache.enabled=true` with "
+            '`shared_cache.sections=[{"key":"function_signatures","title":"Function signatures","requirement":"One function per entry. subject=<module.function>. content uses the fixed structure: signature (verbatim signature); pure (whether the function is pure); notes (side effects, global state, or non-local writes, or none). Correct a changed signature with supersedes instead of appending a parallel entry.","cardinality":"any","requires_evidence":false},{"key":"value_ranges","title":"Variable value ranges","requirement":"One (function, variable, direction) triple per entry. subject=<function>#<variable>. content uses the fixed structure: direction=input|output|intermediate; range (interval, enumeration, or predicate, e.g. [0,65536) or {None,\'\'}); basis (how the range was obtained: concrete observation, static derivation, or assumption); confidence=observed|derived|assumed. When a more precise range is found for the same subject, it must supersede the older entry instead of appending a looser parallel one.","cardinality":"any","requires_evidence":false},{"key":"fp_verdicts","title":"FP verdicts","requirement":"One finding per entry. subject=<file:line>#<bug_type>. content uses the fixed structure: verdict=fp|tp|uncertain; path (source-to-sink function chain covered by this verdict); basis (value-range propagation chain behind the verdict, citing record_id of the value_ranges entries used); notes. Correct an earlier verdict with supersedes.","cardinality":"any","requires_evidence":false}]`, '
+            '`shared_cache.verifier_input=false`, '
+            '`shared_cache.verifier_updates=false`, '
+            '`shared_cache.max_records=200`, and '
+            '`shared_cache.max_content_chars=2000`.\n'
+            if shared_cache_enabled
             else ""
         )
         + f"- `strategy.worker_budget.max_runtime_seconds={dispatch_seconds}` and "
@@ -2553,7 +2574,16 @@ def _goal_plus_runtime_types() -> tuple[type[Any], type[Any], type[Any]]:
 
 
 def _expected_public_gate_selection(run_path: Path) -> dict[str, Any]:
-    expected: dict[str, Any] | None = None
+    """Recompute the Goal Plus selector's winner from public candidate evidence.
+
+    The selector breaks score ties by preferring the run's
+    ``best_candidate_id`` — the candidate that most recently settled at the
+    best hard score — and otherwise falls back to selection-pool order, which
+    starts at the lowest candidate id. Within the winning candidate the
+    latest compliant iteration wins because pool options are appended
+    newest-first.
+    """
+    compliant_by_candidate: dict[str, list[dict[str, Any]]] = {}
     compliant_scores: set[float] = set()
     candidates = [
         load_json(candidate_path)
@@ -2579,20 +2609,28 @@ def _expected_public_gate_selection(run_path: Path) -> dict[str, Any]:
             and _publicly_compliant_iteration(iteration)
         ]
         if compliant:
-            latest = max(compliant, key=lambda item: item["iteration"])
             compliant_scores.update(float(item["score"]) for item in compliant)
-            if expected is None:
-                expected = {
-                    "selected_candidate_id": str(candidate["candidate_id"]),
-                    "selected_score": float(latest["score"]),
-                    "selected_iteration": int(latest["iteration"]),
-                    "selected_git_head": str(latest["git_head"]),
-                }
-    if expected is None:
+            compliant_by_candidate[str(candidate["candidate_id"])] = compliant
+    if not compliant_by_candidate:
         raise RuntimeError("no publicly compliant candidate iteration is available")
     if len(compliant_scores) != 1:
         raise RuntimeError("public gate produced non-uniform passing scores")
-    return expected
+    preferred = load_json(run_path).get("best_candidate_id")
+    selected_candidate_id = (
+        preferred
+        if isinstance(preferred, str) and preferred in compliant_by_candidate
+        else min(compliant_by_candidate)
+    )
+    latest = max(
+        compliant_by_candidate[selected_candidate_id],
+        key=lambda item: item["iteration"],
+    )
+    return {
+        "selected_candidate_id": selected_candidate_id,
+        "selected_score": float(latest["score"]),
+        "selected_iteration": int(latest["iteration"]),
+        "selected_git_head": str(latest["git_head"]),
+    }
 
 
 def _prepare_public_gate_selection(run_path: Path) -> dict[str, Any]:
