@@ -84,6 +84,7 @@ from experiments.benchmark_compare.host_search_guard import prepend_to_path  # n
 from experiments.openevolve_compare.experiment import (  # noqa: E402
     PUBLIC_GATE_SELECTION_RULE,
     DEFAULT_REASONING_EFFORT,
+    SHARED_CACHE_SPEC_TEMPLATE,
     PI_APIS,
     PI_API_KEY_ENV,
     PI_PROVIDER_ID,
@@ -311,6 +312,7 @@ class PrepareConfig:
     method: str
     task_id: str | None = None
     shared_dir: bool = False
+    shared_cache: bool = False
     adapter_module: str | None = None
     condition: str | None = None
     coordination_variant: str | None = None
@@ -362,6 +364,7 @@ def add_runtime_prepare_arguments(
     parser.add_argument("--pi-api", choices=PI_APIS, default="openai-responses")
     parser.add_argument("--pi-api-key-env", default=PI_API_KEY_ENV)
     parser.add_argument("--shared-dir", action="store_true")
+    parser.add_argument("--shared-cache", action="store_true")
     parser.add_argument(
         "--reasoning-effort",
         choices=reasoning_choices,
@@ -650,6 +653,10 @@ def _configure_pi_worker_sandbox_environment(
         "launch_interception": "bench-owned-pi-path-shim",
         "goal_plus_source_changes_required": False,
         "environment_values_persisted": False,
+        # The launcher enforces a loopback-only network namespace whose sole
+        # egress is an api-only relay; this annotation records that contract
+        # for run-dir audits (see scripts/audit_network_access.py).
+        "network_isolation": "loopback-relay-api-only",
     }
 
 
@@ -705,6 +712,11 @@ def prepare(args: argparse.Namespace) -> int:
         "goal-plus-pi",
     }:
         raise ValueError("--shared-dir requires a Goal Plus method")
+    if getattr(args, "shared_cache", False) and args.method not in {
+        "goal-plus-codex",
+        "goal-plus-pi",
+    }:
+        raise ValueError("--shared-cache requires a Goal Plus method")
     if args.iterations_ceiling < 1:
         raise ValueError("iterations ceiling must be positive")
     if args.llm_max_tokens < 1:
@@ -883,6 +895,7 @@ def prepare(args: argparse.Namespace) -> int:
             coordination_condition=condition.condition_id if condition else None,
             search_space_mode=condition.search_space_mode if condition else None,
             shared_dir_enabled=getattr(args, "shared_dir", False),
+            shared_cache_enabled=getattr(args, "shared_cache", False),
             controller_only_official_evaluation=(
                 CONTROLLER_ONLY_OFFICIAL_EVALUATION
             ),
@@ -944,6 +957,7 @@ def prepare(args: argparse.Namespace) -> int:
             "artifact_name": ARTIFACT_NAME,
             "artifact_is_directory": (workspace / ARTIFACT_NAME).is_dir(),
             "shared_dir_enabled": getattr(args, "shared_dir", False),
+            "shared_cache_enabled": getattr(args, "shared_cache", False),
             "worker_sandbox": (
                 _pi_worker_sandbox_policy(args.pi_api_key_env)
                 if agent_harness == "pi"
@@ -1798,6 +1812,68 @@ def finalize_posthoc_official_selection(
             }
         )
 
+    # Flag eligible iterations whose materialized artifacts are byte-identical.
+    # Identical artifacts across candidates usually mean a host-side salvage
+    # copy or another homogenization path, not independent worker results; the
+    # artifact cache then reports one score for all of them. This is a warning
+    # only — selection and scores stay exactly as the contract defines them.
+    snapshot_groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        snapshot = row.get("snapshot_sha256")
+        if isinstance(snapshot, str):
+            snapshot_groups.setdefault(snapshot, []).append(
+                {
+                    "run_id": row["run_id"],
+                    "candidate_id": row["candidate_id"],
+                    "iteration": row["iteration"],
+                    "artifact_hash": row.get("artifact_hash"),
+                }
+            )
+    duplicate_artifact_groups: list[dict[str, Any]] = []
+    for snapshot, members in sorted(snapshot_groups.items()):
+        if len(members) < 2:
+            continue
+        duplicate_artifact_groups.append(
+            {
+                "snapshot_sha256": snapshot,
+                "artifact_hashes": sorted(
+                    {
+                        member["artifact_hash"]
+                        for member in members
+                        if isinstance(member.get("artifact_hash"), str)
+                    }
+                ),
+                "cross_candidate": len(
+                    {member["candidate_id"] for member in members}
+                )
+                > 1,
+                "iterations": members,
+            }
+        )
+    warnings: list[str] = []
+    cross_candidate_groups = [
+        group for group in duplicate_artifact_groups if group["cross_candidate"]
+    ]
+    if cross_candidate_groups:
+        affected = sum(
+            len(group["iterations"]) for group in cross_candidate_groups
+        )
+        warnings.append(
+            f"identical_artifacts_across_candidates: {affected} of {len(rows)} "
+            f"eligible iterations in {len(cross_candidate_groups)} artifact "
+            "group(s) share byte-identical submission artifacts across different "
+            "candidates; their artifact-cache scores reuse one official "
+            "evaluation and candidate diversity may be compromised (for example "
+            "by a host-side salvage copy). Selection and scores are unchanged; "
+            "inspect the run before comparing methods."
+        )
+    elif duplicate_artifact_groups:
+        warnings.append(
+            "identical_artifacts_within_candidate: some eligible iterations of "
+            "the same candidate share byte-identical submission artifacts and "
+            "reuse one official evaluation through the artifact cache."
+        )
+
     if not errors:
         metric_name = contract["metric_name"]
         selected_row = min(
@@ -1832,6 +1908,8 @@ def finalize_posthoc_official_selection(
             "eligible_iteration_count": len(rows),
             "unique_artifact_count": len(cache),
             "official_evaluator_calls": official_calls,
+            "duplicate_artifact_group_count": len(duplicate_artifact_groups),
+            "warnings": list(warnings),
             "score_record_path": str(score_record_path),
         }
         selected_artifact = artifact_paths[
@@ -1865,6 +1943,8 @@ def finalize_posthoc_official_selection(
         "unique_artifact_count": len(cache),
         "official_evaluator_calls": official_calls,
         "artifact_cache_hits": cache_hits,
+        "duplicate_artifact_groups": duplicate_artifact_groups,
+        "warnings": warnings,
         "selected": selected,
         "scores": rows,
         "errors": errors,
@@ -2033,6 +2113,12 @@ def execute_plain(
                 api_key_env=pi_api_key_env,
             )
             lane_environment["PI_CODING_AGENT_DIR"] = str(pi_home)
+            if bool(
+                (manifest.get("goal_plus_config") or {}).get("shared_cache_enabled")
+            ):
+                lane_environment["GOAL_PLUS_CONTROLLER_SHARED_CACHE"] = json.dumps(
+                    SHARED_CACHE_SPEC_TEMPLATE
+                )
             command = [
                 args.pi_bin,
                 "--mode",
@@ -2424,6 +2510,9 @@ def execute_goal_plus(
         shared_dir_enabled=bool(
             (manifest.get("goal_plus_config") or {}).get("shared_dir_enabled")
         ),
+        shared_cache_enabled=bool(
+            (manifest.get("goal_plus_config") or {}).get("shared_cache_enabled")
+        ),
         controller_only_official_evaluation=controller_only,
         evaluation_mode=EVALUATION_MODE,
         early_stop_contract=early_stop,
@@ -2445,6 +2534,12 @@ def execute_goal_plus(
             api_key_env=pi_api_key_env,
         )
         environment["PI_CODING_AGENT_DIR"] = str(pi_home)
+        if bool(
+            (manifest.get("goal_plus_config") or {}).get("shared_cache_enabled")
+        ):
+            environment["GOAL_PLUS_CONTROLLER_SHARED_CACHE"] = json.dumps(
+                SHARED_CACHE_SPEC_TEMPLATE
+            )
         environment["GOAL_PLUS_PI_MODEL"] = qualified_model
         command = [
             args.pi_bin,
