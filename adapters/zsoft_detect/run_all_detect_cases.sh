@@ -37,13 +37,15 @@ resolve_work_dir() {
 readonly WORK_DIR="$(resolve_work_dir)"
 [[ -n "$WORK_DIR" && -f "$WORK_DIR/scripts/bench.py" ]] \
     || { printf '错误: 无法定位 bench-goal-plus 仓库根 (设置 BENCH_GOAL_PLUS_WORK_DIR 可覆盖)\n' >&2; exit 1; }
-readonly CAMPAIGN_BASE="runs/benchmark-campaigns-v2-detect"
+readonly CAMPAIGN_BASE="runs/detect-glm-withcache-withskill-k4"
 readonly ZSOFT_CHECKOUT="$WORK_DIR/third_party/zsoft-bench"
 readonly DETECT_ROOT="$ZSOFT_CHECKOUT/benchmarks/vulnerability/zsoft-detect"
 readonly PROJECTS_DIR="$DETECT_ROOT/projects"
 readonly L1_SOURCE_CACHE="$ZSOFT_CHECKOUT/benchmarks/vulnerability/zsoft-l1/.cache/sources"
 readonly PYTHON="$WORK_DIR/.bench-env/venv/bin/python"
 readonly EXPECTED_CASES="${DETECT_EXPECTED_CASES:-5}"
+readonly SHARED_CACHE_ENABLED="${DETECT_SHARED_CACHE:-0}"
+readonly TASK_SKILLS_ENABLED="${DETECT_SKILL:-0}"
 
 MODE="all"
 REQUESTED_CASE_ID=""
@@ -85,10 +87,23 @@ usage() {
   DETECT_SOURCE_CACHE_ROOT      项目源码缓存根目录，每个 checkout 使用 PROJECT-COMMIT 命名
   DETECT_FETCH_MISSING_SOURCES  缺少源码时是否自动获取，1（默认）或 0
   DETECT_MAX_INFRA_ATTEMPTS     基础设施失败最大尝试次数
+  DETECT_PROVIDER               模型提供方:deepseek(默认)或 glm(智谱 OpenAI 兼容 API)
+  DETECT_MODEL                  模型 id,默认按提供方:deepseek-v4-flash / glm-4.6
+  DETECT_PI_API                 Pi 线协议:openai-completions(默认)或 anthropic-messages
+                                (例:z.ai 的 /api/anthropic 通道走 anthropic-messages)
+  GLM_API_KEY                   DETECT_PROVIDER=glm 时的凭据(未设置则交互输入)
+  GLM_BASE_URL                  glm API base,默认 https://open.bigmodel.cn/api/paas/v4
+  BENCH_GOAL_PLUS_SOURCE_DIR    外部 goal-plus 检出(与 EXPECTED_REF 一起做启动前校验)
+  BENCH_GOAL_PLUS_EXPECTED_REF  期望的 goal-plus 分支/ref,如 feat/shared-plane-component
   DETECT_STATUS_INTERVAL_SECONDS 实验运行心跳间隔，默认 60 秒
+  DETECT_SHARED_CACHE           1 时为 Goal Plus 运行开启 shared_cache 事实面与
+                                LLM verifier 逐 finding 路径可行性分析（默认 0）
+  DETECT_SKILL                  1 时把 adapter 的 task-local Skills（如
+                                path-validation）拷入 run workspace 供 worker
+                                使用（默认 0）
 
 实验合同:
-  默认配置为 model=deepseek-v4-flash、reasoning=high、T=1800、K=4、C=1、R=1。
+  默认配置为 provider=deepseek model=deepseek-v4-flash、reasoning=high、T=1800、K=4、C=1、R=1。
   detect 搜索过程中只使用公开格式校验；不查看 F1，也不提前终止。
   所有 agent 退出且收尾完成后，控制器对合规提交评分；final-eval 记录最高 F1。
   F1 同分时选择 candidate ID 最小者，同一 candidate 选择较晚 iteration。
@@ -184,6 +199,8 @@ done
     || die "DETECT_STATUS_INTERVAL_SECONDS 不能小于 10 秒"
 [[ "$FETCH_MISSING_SOURCES" == "0" || "$FETCH_MISSING_SOURCES" == "1" ]] \
     || die "DETECT_FETCH_MISSING_SOURCES 只能是 0 或 1"
+[[ "$TASK_SKILLS_ENABLED" == "0" || "$TASK_SKILLS_ENABLED" == "1" ]] \
+    || die "DETECT_SKILL 只能是 0 或 1"
 
 cd "$WORK_DIR" || die "无法进入工作目录: $WORK_DIR"
 
@@ -339,15 +356,74 @@ esac
 
 readonly TOTAL_TASK_CELLS=$((${#CASE_IDS[@]} * REPEAT_COUNT))
 
-if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
-    [[ -t 0 ]] || die "非交互运行前必须先 export DEEPSEEK_API_KEY"
-    read -rsp '请输入 DEEPSEEK_API_KEY: ' DEEPSEEK_API_KEY
+readonly DETECT_PROVIDER="${DETECT_PROVIDER:-deepseek}"
+case "$DETECT_PROVIDER" in
+    deepseek)
+        PROVIDER_KEY_ENV="DEEPSEEK_API_KEY"
+        PROVIDER_BASE_ENV="DEEPSEEK_BASE_URL"
+        PROVIDER_BASE_DEFAULT="https://api.deepseek.com"
+        PROVIDER_MODEL_DEFAULT="deepseek-v4-flash"
+        ;;
+    glm)
+        PROVIDER_KEY_ENV="GLM_API_KEY"
+        PROVIDER_BASE_ENV="GLM_BASE_URL"
+        PROVIDER_BASE_DEFAULT="https://open.bigmodel.cn/api/paas/v4"
+        PROVIDER_MODEL_DEFAULT="glm-4.6"
+        ;;
+    *)
+        die "DETECT_PROVIDER 只能是 deepseek 或 glm(当前: $DETECT_PROVIDER)"
+        ;;
+esac
+readonly DETECT_MODEL="${DETECT_MODEL:-$PROVIDER_MODEL_DEFAULT}"
+readonly PROVIDER_KEY_ENV PROVIDER_BASE_ENV
+readonly DETECT_PI_API="${DETECT_PI_API:-openai-completions}"
+case "$DETECT_PI_API" in
+    openai-completions|anthropic-messages) ;;
+    *) die "DETECT_PI_API 只能是 openai-completions 或 anthropic-messages(当前: $DETECT_PI_API)" ;;
+esac
+
+if [[ -z "${!PROVIDER_KEY_ENV:-}" ]]; then
+    [[ -t 0 ]] || die "非交互运行前必须先 export $PROVIDER_KEY_ENV"
+    read -rsp "请输入 $PROVIDER_KEY_ENV: " PROVIDER_KEY_VALUE
     printf '\n'
+    export "$PROVIDER_KEY_ENV=$PROVIDER_KEY_VALUE"
 fi
-[[ -n "$DEEPSEEK_API_KEY" ]] || die "DEEPSEEK_API_KEY 不能为空"
-export DEEPSEEK_API_KEY
-export DEEPSEEK_BASE_URL='https://api.deepseek.com'
+[[ -n "${!PROVIDER_KEY_ENV:-}" ]] || die "$PROVIDER_KEY_ENV 不能为空"
+export "$PROVIDER_BASE_ENV=${!PROVIDER_BASE_ENV:-$PROVIDER_BASE_DEFAULT}"
 unset OPENAI_BASE_URL OPENAI_API_BASE_URL OPENAI_API_BASE
+
+# 启动前校验外部 goal-plus 检出停留在期望 ref 上(如共享平面组件分支),
+# 避免静默回退到不含目标能力的默认运行时。
+if [[ -n "${BENCH_GOAL_PLUS_SOURCE_DIR:-}" && -n "${BENCH_GOAL_PLUS_EXPECTED_REF:-}" ]]; then
+    gp_head="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" rev-parse HEAD 2>/dev/null)" \
+        || die "BENCH_GOAL_PLUS_SOURCE_DIR 不是可用的 git 检出: $BENCH_GOAL_PLUS_SOURCE_DIR"
+    gp_want="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" rev-parse --verify --end-of-options "${BENCH_GOAL_PLUS_EXPECTED_REF}^{commit}" 2>/dev/null)" \
+        || die "goal-plus 检出中找不到 ref: $BENCH_GOAL_PLUS_EXPECTED_REF"
+    if [[ "$gp_head" != "$gp_want" ]]; then
+        gp_branch="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" branch --show-current 2>/dev/null || true)"
+        die "goal-plus 检出 HEAD 与 BENCH_GOAL_PLUS_EXPECTED_REF=$BENCH_GOAL_PLUS_EXPECTED_REF 不一致(当前: ${gp_branch:-detached} $gp_head);请先执行: git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" checkout $BENCH_GOAL_PLUS_EXPECTED_REF"
+    fi
+    status_message "GOAL_PLUS_SOURCE dir=$BENCH_GOAL_PLUS_SOURCE_DIR ref=$BENCH_GOAL_PLUS_EXPECTED_REF commit=$gp_head"
+fi
+
+# 宿主机环境加固（无 systemd 用户会话的主机需要）：
+# 1) Pi worker 的 Unix socket 要求私有的短路径 XDG_RUNTIME_DIR（本机无 /run/user/<uid>）
+# 2) pi-shim 的 `#!/usr/bin/env python3` 必须解析到仓库锁定的 Python 3.12
+#    （系统 python 3.9 无法运行 launcher 代码）
+# 3) bwrap 沙箱内只能看到 /usr 与 runtime root；沙箱内可用的现代 node
+#    需以真实二进制形式放在 ~/.local/bin/node（v22，勿用符号链接）
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+    export XDG_RUNTIME_DIR="$HOME/.xdg-runtime"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+fi
+export PATH="$WORK_DIR/.bench-env/venv/bin:$HOME/.local/bin:$PATH"
+
+if [[ "$TASK_SKILLS_ENABLED" == "1" ]]; then
+    export BENCH_GOAL_PLUS_ZSOFT_DETECT_TASK_SKILLS=1
+else
+    unset BENCH_GOAL_PLUS_ZSOFT_DETECT_TASK_SKILLS
+fi
 
 cleanup_runtime() {
     if [[ -n "$ACTIVE_HEARTBEAT_PID" ]]; then
@@ -356,7 +432,8 @@ cleanup_runtime() {
         ACTIVE_HEARTBEAT_PID=""
     fi
     unset BENCH_GOAL_PLUS_ZSOFT_DETECT_SOURCE_CACHE
-    unset DEEPSEEK_API_KEY
+    unset BENCH_GOAL_PLUS_ZSOFT_DETECT_TASK_SKILLS
+    unset "$PROVIDER_KEY_ENV"
 }
 
 handle_interrupt() {
@@ -391,9 +468,10 @@ case_status() {
 {
     printf 'ZSoft Detect 运行汇总\n'
     printf '开始时间: %s\n' "$(date --iso-8601=seconds)"
-    printf '配置: model=deepseek-v4-flash reasoning=high T=%d K=%d C=%d R=%d\n' \
+    printf '配置: provider=%s model=%s reasoning=high T=%d K=%d C=%d R=%d skill=%s\n' \
+        "$DETECT_PROVIDER" "$DETECT_MODEL" \
         "$WALL_TIME_SECONDS" "$LIVE_SEARCH_CONCURRENCY" \
-        "$CELL_CONCURRENCY" "$REPEAT_COUNT"
+        "$CELL_CONCURRENCY" "$REPEAT_COUNT" "$TASK_SKILLS_ENABLED"
     printf '评分策略: 搜索期间仅 format_valid；收尾后隐藏评分并记录最高 F1\n'
     printf '源码缓存: %s\n' "$SOURCE_CACHE_ROOT"
     printf '源码缓存模式: %s\n' "$SOURCE_CACHE_STORAGE_MODE"
@@ -406,7 +484,7 @@ status_message "INIT work_dir=$WORK_DIR"
 status_message "INIT log_dir=$LOG_DIR progress_file=$PROGRESS_FILE"
 status_message "INIT source_cache=$SOURCE_CACHE_ROOT storage_mode=$SOURCE_CACHE_STORAGE_MODE"
 status_message \
-    "CONFIG model=deepseek-v4-flash reasoning=high T=$WALL_TIME_SECONDS K=$LIVE_SEARCH_CONCURRENCY C=$CELL_CONCURRENCY R=$REPEAT_COUNT scoring=controller_posthoc_best_f1"
+    "CONFIG provider=$DETECT_PROVIDER model=$DETECT_MODEL reasoning=high T=$WALL_TIME_SECONDS K=$LIVE_SEARCH_CONCURRENCY C=$CELL_CONCURRENCY R=$REPEAT_COUNT scoring=controller_posthoc_best_f1 skill=$TASK_SKILLS_ENABLED"
 status_message \
     "QUEUE cases=${#CASE_IDS[@]} task_cells=$TOTAL_TASK_CELLS execution=serial"
 
@@ -418,12 +496,12 @@ if {
     "$PYTHON" scripts/bench.py setup \
         --benchmark zsoft-detect \
         --method goal-plus-pi \
-        --model deepseek-v4-flash \
+        --model "$DETECT_MODEL" \
         --reasoning-effort high \
-        --pi-provider-id deepseek \
-        --pi-api openai-completions \
-        --pi-api-key-env DEEPSEEK_API_KEY \
-        --pi-api-base-env DEEPSEEK_BASE_URL \
+        --pi-provider-id "$DETECT_PROVIDER" \
+        --pi-api "$DETECT_PI_API" \
+        --pi-api-key-env "$PROVIDER_KEY_ENV" \
+        --pi-api-base-env "$PROVIDER_BASE_ENV" \
         --skip-bootstrap \
         --skip-provision
 } >"$PREFLIGHT_LOG" 2>&1; then
@@ -525,12 +603,12 @@ build_bench_args() {
         --campaign-dir "$WORK_DIR/$CAMPAIGN_BASE/$campaign_id"
         --method goal-plus-pi
         --seed "$seed"
-        --model deepseek-v4-flash
+        --model "$DETECT_MODEL"
         --reasoning-effort high
-        --pi-provider-id deepseek
-        --pi-api openai-completions
-        --pi-api-key-env DEEPSEEK_API_KEY
-        --pi-api-base-env DEEPSEEK_BASE_URL
+        --pi-provider-id "$DETECT_PROVIDER"
+        --pi-api "$DETECT_PI_API"
+        --pi-api-key-env "$PROVIDER_KEY_ENV"
+        --pi-api-base-env "$PROVIDER_BASE_ENV"
         --wall-time-seconds "$WALL_TIME_SECONDS"
         --live-search-concurrency "$LIVE_SEARCH_CONCURRENCY"
         --cell-concurrency "$CELL_CONCURRENCY"
@@ -540,6 +618,9 @@ build_bench_args() {
         --skip-provision
         --foreground
     )
+    if [[ "$SHARED_CACHE_ENABLED" == "1" ]]; then
+        BENCH_ARGS+=(--shared-cache)
+    fi
 }
 
 start_launch_heartbeat() {
@@ -621,13 +702,14 @@ campaign_contract_valid() {
     jq -e \
         --arg case_id "$case_id" \
         --argjson seed "$seed" \
+        --arg model "$DETECT_MODEL" \
         --argjson wall_time "$WALL_TIME_SECONDS" \
         --argjson live_concurrency "$LIVE_SEARCH_CONCURRENCY" \
         --argjson cell_concurrency "$CELL_CONCURRENCY" '
         .task_id == $case_id and
         .methods == ["goal-plus-pi"] and
         .seeds == [$seed] and
-        .model == "deepseek-v4-flash" and
+        .model == $model and
         .reasoning_effort == "high" and
         .budget.wall_time_seconds == $wall_time and
         .budget.live_search_concurrency == $live_concurrency and
@@ -814,6 +896,10 @@ run_case_attempt() {
     jq -e \
         --arg case_id "$case_id" \
         --argjson seed "$seed" \
+        --arg model "$DETECT_MODEL" \
+        --arg provider "$DETECT_PROVIDER" \
+        --arg pi_api "$DETECT_PI_API" \
+        --arg api_key_env "$PROVIDER_KEY_ENV" \
         --argjson wall_time "$WALL_TIME_SECONDS" \
         --argjson live_concurrency "$LIVE_SEARCH_CONCURRENCY" '
         .status == "finished" and
@@ -822,7 +908,7 @@ run_case_attempt() {
         .task_id == $case_id and
         .method == "goal-plus-pi" and
         .seed == $seed and
-        .model == "deepseek-v4-flash" and
+        .model == $model and
         .reasoning_effort == "high" and
         .budget.wall_time_seconds == $wall_time and
         .budget.concurrency == $live_concurrency and
@@ -847,9 +933,9 @@ run_case_attempt() {
         .goal_plus_config.controller_only_official_evaluation == true and
         ((.goal_plus_config.early_stop // null) == null) and
         .goal_plus_config.posthoc_selection == .task.goal_plus_posthoc_selection and
-        .pi_provider.id == "deepseek" and
-        .pi_provider.api == "openai-completions" and
-        .pi_provider.api_key_env == "DEEPSEEK_API_KEY" and
+        .pi_provider.id == $provider and
+        .pi_provider.api == $pi_api and
+        .pi_provider.api_key_env == $api_key_env and
         .execution.goal_plus_controller_closeout.completed == true and
         .execution.evaluator_calls.setup_claimed_before_t == 1 and
         .execution.posthoc_official_selection.completed == true and
@@ -868,7 +954,7 @@ run_case_attempt() {
         (.execution.goal_plus_controller_closeout.runs | type) == "array" and
         (.execution.goal_plus_controller_closeout.runs | length) > 0 and
         all(.execution.goal_plus_controller_closeout.runs[];
-            .selection.selection_rule == "lowest_candidate_id_latest_compliant_iteration")
+            .selection.selection_rule == "goal_plus_preferred_candidate_latest_compliant_iteration")
     ' "$experiment" >/dev/null 2>&1 || {
         ATTEMPT_REASON="experiment_contract_invalid"
         case_status "$log_file" \

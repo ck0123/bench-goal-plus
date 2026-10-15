@@ -82,6 +82,7 @@ PI_WORKER_SANDBOX = {
 VERIFIER_TIMEOUT_SECONDS = 30
 OFFICIAL_EVALUATOR_TIMEOUT_SECONDS = 600
 SOURCE_CACHE_ENV = "BENCH_GOAL_PLUS_ZSOFT_DETECT_SOURCE_CACHE"
+TASK_SKILLS_ENV = "BENCH_GOAL_PLUS_ZSOFT_DETECT_TASK_SKILLS"
 
 # project -> bench commit (from projects/<p>/versions/*)
 PROJECT_COMMITS: dict[str, str] = {
@@ -178,6 +179,42 @@ def bench_contract(
     return json.loads(completed.stdout)
 
 
+TASK_SKILLS_SOURCE = Path(__file__).resolve().parent / "skills"
+
+
+def copy_task_skills(workspace: Path) -> list[str]:
+    """Copy adapter-owned task-local Skills into the workspace.
+
+    Goal Plus discovers Git-tracked ``.agents/skills/<name>/SKILL.md`` bundles
+    at freeze time and instructs every candidate worker to read them, so the
+    copies must exist before ``init_git`` commits the workspace. The copies
+    are opt-in: they run only when ``BENCH_GOAL_PLUS_ZSOFT_DETECT_TASK_SKILLS``
+    is exactly ``1``, so skill-free campaigns remain the default contract.
+    """
+    copied: list[str] = []
+    if os.environ.get(TASK_SKILLS_ENV) != "1":
+        return copied
+    if not TASK_SKILLS_SOURCE.is_dir():
+        return copied
+    for skill_dir in sorted(TASK_SKILLS_SOURCE.iterdir()):
+        skill_file = skill_dir / "SKILL.md"
+        if not skill_dir.is_dir() or not skill_file.is_file():
+            continue
+        if skill_dir.is_symlink() or skill_file.is_symlink():
+            raise AdapterError(
+                f"task-local Skill cannot be a symlink: {skill_dir.name}"
+            )
+        destination = workspace / ".agents" / "skills" / skill_dir.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            skill_dir,
+            destination,
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+        copied.append(f".agents/skills/{skill_dir.name}/SKILL.md")
+    return copied
+
+
 def task_text(project: str, contract: dict[str, Any]) -> str:
     roots = ", ".join(contract["scan_roots"]) or "(whole repository)"
     bug_types = ", ".join(
@@ -196,6 +233,12 @@ def task_text(project: str, contract: dict[str, Any]) -> str:
             "copy (`bench-contract.json`): location (repo-relative path,",
             "function, 1-based inclusive line range), bug_type, and",
             "root_cause (cause/trigger/impact).",
+            "",
+            "Submit incrementally: as soon as one finding is verified",
+            "against the source, write its JSON file immediately — do not",
+            "batch findings to the end of your session. Partial",
+            "submissions are valid and each verified file counts; an",
+            "unfinished batch at the deadline counts as nothing.",
             "",
             f"Use `python3 {PUBLIC_CHECKER_NAME}` to check only the public",
             "JSON structure. It does not assess whether a reported issue is",
@@ -303,6 +346,7 @@ def materialize_workspace(
         workspace / PUBLIC_CHECKER_NAME,
         follow_symlinks=False,
     )
+    copy_task_skills(workspace)
     (workspace / ".gitignore").write_text(
         ".bench-runtime/\n.gp/\n.codex-log/\n__pycache__/\n*.pyc\n"
     )
@@ -322,6 +366,7 @@ def materialize_workspace(
         "evaluation_mode": EVALUATION_MODE,
         "requires_protected_pi_workers": REQUIRES_PROTECTED_PI_WORKERS,
         "public_validation_kind": DETECT_VALIDATION_KIND,
+        "scan_roots": list(contract.get("scan_roots") or []),
         "primary_metric": GOAL_PLUS_PROCESS_METRIC,
         "direction": DIRECTION,
     }
@@ -561,7 +606,12 @@ def evaluate_workspace(
     runtime_dir, budget = claim_evaluator_call(workspace, mode)
     ensure_single_final_claim(mode, budget)
     submission = workspace / ARTIFACT_NAME
-    public_diagnostics = validate_detect_submission(submission)
+    public_diagnostics = validate_detect_submission(
+        submission,
+        scan_roots=zsoft_blind.validated_scan_roots_config(
+            metadata.get("scan_roots")
+        ),
+    )
     format_valid = diagnostics_valid(public_diagnostics)
     if mode == "public":
         report = {

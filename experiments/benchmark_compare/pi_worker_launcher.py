@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -11,12 +12,16 @@ import shutil
 import signal
 import socketserver
 import stat
+import struct
 import subprocess
 import sys
 import threading
+import traceback
+import urllib.parse
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +31,12 @@ TOOL_SOCKET_ENV = "BENCH_GOAL_PLUS_PI_TOOL_SOCKET"
 REAL_PI_BIN_ENV = "BENCH_GOAL_PLUS_REAL_PI_BIN"
 LAUNCH_CONTEXT_VERSION = 1
 _MAX_PROXY_REQUEST_BYTES = 1024 * 1024
+# Host-side diagnostics for worker-facing rejections. Blind mode must keep
+# returning an opaque rejection, so the real cause is recorded next to the
+# other Goal Plus host logs instead of being discarded.
+_PROXY_ERROR_LOG_DIR = "pi-worker-proxy"
+_PROXY_LOG_TEXT_CAP = 4000
+_PROXY_LOG_ARGS_CAP = 2000
 _MAX_UNIX_SOCKET_PATH_BYTES = 103
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PATH_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -54,12 +65,27 @@ _WORKER_TOOLS = {
     "goal_plus_search_stage_shared_tool",
     "goal_plus_search_copy_shared_tool",
     "goal_plus_search_get_evidence_detail",
+    "goal_plus_search_read_shared_cache",
+    "goal_plus_search_append_shared_cache",
     "goal_plus_search_run_verifier",
     "goal_plus_search_list_iterations",
 }
 _SESSION_SCOPED_TOOLS = _WORKER_TOOLS
 _TOOL_PROXY_BIN = Path(__file__).resolve().parent / "bin" / "goal-plus-pi-tool"
 _SANDBOX_TOOL_BIN = Path("/opt/bench-goal-plus/bin")
+_LLM_RELAY_BIN = _SANDBOX_TOOL_BIN / "llm-relay"
+_LLM_RELAY_SOURCE_BIN = _TOOL_PROXY_BIN.parent / "llm-relay"
+_LLM_RELAY_PORT = 8787
+_LLM_RELAY_SOCKET_NAME = "llm-relay.sock"
+_LLM_RELAY_MAGIC = b"BGPLLM1\n"
+_LLM_RELAY_MAX_HEADER_BYTES = 64 * 1024
+_LLM_RELAY_MAX_BODY_BYTES = 64 * 1024 * 1024
+_LLM_BASE_URL_ENVS = (
+    "DEEPSEEK_BASE_URL",
+    "GLM_BASE_URL",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_BASE_URL",
+)
 _SANDBOX_GIT_DIR = Path("/opt/bench-goal-plus/git-admin")
 _BLIND_PUBLIC_METRIC = "format_valid"
 _BLIND_RESPONSE_REJECTED = {
@@ -79,6 +105,23 @@ _BLIND_SYSTEM_PROMPT = (
     "tool errors. Work only from public task files and source mounted in this sandbox."
 )
 _OPAQUE_RESULTS_LEDGER = "iteration\tcommit\tstate\n"
+_BLIND_CACHE_SECTION_FIELDS = {
+    "key",
+    "title",
+    "requirement",
+    "cardinality",
+    "requires_evidence",
+}
+_BLIND_CACHE_ENTRY_FIELDS = {
+    "key",
+    "title",
+    "section_key",
+    "content",
+    "writer",
+    "record_id",
+    "superseded_by",
+    "evidence_ref",
+}
 _BLIND_CONTEXT_SOURCE_FIELDS = {
     "agent_session_id",
     "best_iteration",
@@ -100,8 +143,10 @@ _BLIND_CONTEXT_SOURCE_FIELDS = {
     "results_tsv",
     "resume",
     "run_id",
+    "shared_cache",
     "supplemental_evaluation_enabled",
     "tool_family_catalog",
+    "verification",
     "workspace_access",
     "workspace_ledger_projection",
 }
@@ -146,6 +191,9 @@ _BLIND_VERIFIER_SOURCE_FIELDS = {
     "process_passed",
     "promotion_passed",
     "run_id",
+    "shared_cache_injected",
+    "shared_cache_snapshot",
+    "shared_cache_warning",
     "shared_tool_consumed_entries",
     "shared_tool_deduplicated_entries",
     "shared_tool_errors",
@@ -218,12 +266,16 @@ _BLIND_ITERATION_SOURCE_FIELDS = {
     "shared_tool_staged_bytes",
     "shared_tool_staged_entries",
     "shared_tool_staged_file_count",
+    "shared_tool_staging_dir",
     "shared_tools",
+    "settlement_receipt",
+    "settlement_sequence",
     "state",
     "summary",
     "toolization_advisories",
     "toolization_decision",
     "touched_denied_files",
+    "verifier_submission",
     "workspace_git_head_after_settlement",
     "workspace_artifact_after_settlement",
 }
@@ -637,6 +689,12 @@ def _blind_context_response(
     }
     projected["metric_name"] = _BLIND_PUBLIC_METRIC
     projected["metric_direction"] = "maximize"
+    shared_cache = result.get("shared_cache")
+    if shared_cache is not None:
+        projected_cache = _blind_shared_cache_snapshot(shared_cache)
+        if projected_cache is _INVALID_BLIND_RESPONSE:
+            return _INVALID_BLIND_RESPONSE
+        projected["shared_cache"] = projected_cache
     return projected
 
 
@@ -668,20 +726,128 @@ def _blind_verifier_receipt(
         or result.get("candidate_id") != context.candidate_id
     ):
         return _INVALID_BLIND_RESPONSE
-    return {
+    receipt: dict[str, Any] = {
         "run_id": context.run_id,
         "candidate_id": context.candidate_id,
         "recorded": True,
+    }
+    if result.get("shared_cache_injected") is True:
+        projected_cache = _blind_shared_cache_snapshot(
+            result.get("shared_cache_snapshot")
+        )
+        if projected_cache is _INVALID_BLIND_RESPONSE:
+            return _INVALID_BLIND_RESPONSE
+        receipt["shared_cache_snapshot"] = projected_cache
+    return receipt
+
+
+def _blind_shared_cache_snapshot(
+    snapshot: Any,
+) -> dict[str, Any] | object:
+    """Project an operator-frozen shared cache snapshot for a blind worker.
+
+    The cache is an operator-defined fact plane: sections and entries are
+    written only by peer candidates and the LLM verifier from public task
+    material, never by the official evaluator. The projection keeps the
+    template and the projected entries but performs a closed-field check so
+    the host cannot smuggle arbitrary shapes through the cache channel.
+    """
+    if not isinstance(snapshot, dict) or not set(snapshot) <= {
+        "sections", "entries", "total_records", "updates_allowed",
+    }:
+        return _INVALID_BLIND_RESPONSE
+    sections = snapshot.get("sections")
+    entries = snapshot.get("entries")
+    if not isinstance(sections, list) or not isinstance(entries, list):
+        return _INVALID_BLIND_RESPONSE
+    projected_sections: list[dict[str, Any]] = []
+    for section in sections:
+        if not isinstance(section, dict) or not set(section) <= _BLIND_CACHE_SECTION_FIELDS:
+            return _INVALID_BLIND_RESPONSE
+        if not isinstance(section.get("key"), str) or not section["key"]:
+            return _INVALID_BLIND_RESPONSE
+        if not isinstance(section.get("title"), str):
+            return _INVALID_BLIND_RESPONSE
+        if not isinstance(section.get("requirement"), str):
+            return _INVALID_BLIND_RESPONSE
+        if section.get("cardinality") not in {"any", "latest"}:
+            return _INVALID_BLIND_RESPONSE
+        if type(section.get("requires_evidence")) is not bool:
+            return _INVALID_BLIND_RESPONSE
+        projected_sections.append(dict(section))
+    projected_entries: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not set(entry) <= _BLIND_CACHE_ENTRY_FIELDS:
+            return _INVALID_BLIND_RESPONSE
+        for field in ("key", "title", "section_key", "content", "writer", "record_id"):
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                return _INVALID_BLIND_RESPONSE
+        for field in ("superseded_by", "evidence_ref"):
+            if entry.get(field) is not None and not isinstance(entry[field], str):
+                return _INVALID_BLIND_RESPONSE
+        projected_entries.append(dict(entry))
+    projected: dict[str, Any] = {
+        "sections": projected_sections,
+        "entries": projected_entries,
+    }
+    total_records = snapshot.get("total_records")
+    if total_records is not None and type(total_records) is not int:
+        return _INVALID_BLIND_RESPONSE
+    if total_records is not None:
+        projected["total_records"] = total_records
+    return projected
+
+
+def _blind_appended_shared_cache(
+    result: Any,
+) -> dict[str, Any] | object:
+    if not isinstance(result, dict) or not set(result) <= {
+        "section", "writer", "view",
+    }:
+        return _INVALID_BLIND_RESPONSE
+    if not isinstance(result.get("section"), str) or not result["section"]:
+        return _INVALID_BLIND_RESPONSE
+    if not isinstance(result.get("writer"), str) or not result["writer"]:
+        return _INVALID_BLIND_RESPONSE
+    view = result.get("view")
+    if not isinstance(view, list):
+        return _INVALID_BLIND_RESPONSE
+    projected_view = []
+    for entry in view:
+        if not isinstance(entry, dict) or not set(entry) <= _BLIND_CACHE_ENTRY_FIELDS:
+            return _INVALID_BLIND_RESPONSE
+        for field in ("key", "title", "section_key", "content", "writer", "record_id"):
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                return _INVALID_BLIND_RESPONSE
+        for field in ("superseded_by", "evidence_ref"):
+            if entry.get(field) is not None and not isinstance(entry[field], str):
+                return _INVALID_BLIND_RESPONSE
+        projected_view.append(dict(entry))
+    return {
+        "section": result["section"],
+        "writer": result["writer"],
+        "view": projected_view,
     }
 
 
 def _blind_iteration_receipts(
     result: Any, context: LaunchContext
-) -> list[dict[str, Any]] | object:
-    if not isinstance(result, list):
+) -> list[dict[str, Any]] | dict[str, Any] | object:
+    items = result
+    envelope: dict[str, Any] | None = None
+    if isinstance(result, dict) and set(result) == {
+        "items", "next_offset", "total",
+    }:
+        # The host paginates iteration listings; project the page shape.
+        items = result["items"]
+        envelope = {
+            "next_offset": result["next_offset"],
+            "total": result["total"],
+        }
+    if not isinstance(items, list):
         return _INVALID_BLIND_RESPONSE
     receipts: list[dict[str, Any]] = []
-    for item in result:
+    for item in items:
         if isinstance(item, dict) and set(item) == _BLIND_ITERATION_RECEIPT_FIELDS:
             if (
                 item["run_id"] != context.run_id
@@ -705,6 +871,8 @@ def _blind_iteration_receipts(
         if type(iteration) is not int or iteration < 1:
             return _INVALID_BLIND_RESPONSE
         receipts.append({"iteration": iteration, "recorded": True})
+    if envelope is not None:
+        return {"items": receipts, **envelope}
     return receipts
 
 
@@ -952,6 +1120,10 @@ def _blind_tool_response(
         return _blind_staged_shared_tool(result, context)
     if tool == "goal_plus_search_copy_shared_tool":
         return _blind_copied_shared_tool(result, context)
+    if tool == "goal_plus_search_read_shared_cache":
+        return _blind_shared_cache_snapshot(result)
+    if tool == "goal_plus_search_append_shared_cache":
+        return _blind_appended_shared_cache(result)
     return _INVALID_BLIND_RESPONSE
 
 
@@ -990,6 +1162,175 @@ def _run_host_tool(
     return json.loads(completed.stdout)
 
 
+class LlmRelayServer:
+    """Host-side egress relay for sandboxed Pi workers (api-only allowlist).
+
+    The worker sandbox runs in a loopback-only network namespace, so its sole
+    route to the model API is this relay over a private unix socket. The
+    relay forwards every request verbatim to the single configured upstream
+    origin and nothing else, which is what makes bwrap ``--share-net``
+    unnecessary. Credentials pass through in memory only and are never
+    logged.
+    """
+
+    _HOP_BY_HOP = {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+        "host",
+        "content-length",
+    }
+
+    def __init__(
+        self,
+        *,
+        socket_dir: Path,
+        upstream: str,
+        agent_session_id: str,
+    ) -> None:
+        parsed = urllib.parse.urlsplit(upstream)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError(f"llm relay upstream must be an http(s) URL: {upstream!r}")
+        if parsed.username or parsed.password:
+            raise ValueError("llm relay upstream must not embed credentials")
+        self.upstream_scheme = parsed.scheme
+        self.upstream_host = parsed.hostname
+        self.upstream_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        # Preserve the base URL's path prefix (e.g. z.ai /api/anthropic,
+        # bigmodel /api/paas/v4); worker requests arrive with a relative
+        # path only, so the prefix must be prepended host-side.
+        self.upstream_path = parsed.path.rstrip("/")
+        self.socket_path = socket_dir / _LLM_RELAY_SOCKET_NAME
+        self.agent_session_id = agent_session_id
+        self._server: _ThreadingUnixServer | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        relay = self
+
+        class Handler(socketserver.StreamRequestHandler):
+            def _reject(self, wfile, message: str) -> None:
+                header = json.dumps({"status": 502, "error": message}).encode("utf-8")
+                wfile.write(struct.pack(">I", len(header)))
+                wfile.write(header)
+                wfile.write(struct.pack(">Q", 0))
+                wfile.flush()
+
+            def handle(self) -> None:
+                magic = self.rfile.readline(len(_LLM_RELAY_MAGIC) + 1)
+                if magic != _LLM_RELAY_MAGIC:
+                    self._reject(self.wfile, "bad relay magic")
+                    return
+                header_line = self.rfile.readline(_LLM_RELAY_MAX_HEADER_BYTES + 1)
+                if len(header_line) > _LLM_RELAY_MAX_HEADER_BYTES:
+                    self._reject(self.wfile, "relay request header too large")
+                    return
+                try:
+                    request = json.loads(header_line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._reject(self.wfile, "relay request header is not JSON")
+                    return
+                if not isinstance(request, dict):
+                    self._reject(self.wfile, "relay request header is not an object")
+                    return
+                raw_length = self.rfile.read(8)
+                if len(raw_length) != 8:
+                    self._reject(self.wfile, "relay request length truncated")
+                    return
+                body_length = struct.unpack(">Q", raw_length)[0]
+                if body_length > _LLM_RELAY_MAX_BODY_BYTES:
+                    self._reject(self.wfile, "relay request body too large")
+                    return
+                body = self.rfile.read(body_length) if body_length else b""
+                if len(body) != body_length:
+                    self._reject(self.wfile, "relay request body truncated")
+                    return
+                try:
+                    status, headers, payload = relay._forward(request, body)
+                except Exception as exc:  # noqa: BLE001 - report opaque cause
+                    sys.stderr.write(
+                        f"[llm-relay] upstream error ({relay.agent_session_id}): "
+                        f"{type(exc).__name__}: {exc}\n"
+                    )
+                    status, headers, payload = 502, {"content-type": "text/plain"}, (
+                        f"llm relay upstream failure ({type(exc).__name__})".encode()
+                    )
+                response_header = json.dumps(
+                    {"status": status, "headers": headers}
+                ).encode("utf-8")
+                self.wfile.write(struct.pack(">I", len(response_header)))
+                self.wfile.write(response_header)
+                self.wfile.write(struct.pack(">Q", len(payload)))
+                if payload:
+                    self.wfile.write(payload)
+                self.wfile.flush()
+
+        self._server = _ThreadingUnixServer(str(self.socket_path), Handler)
+        os.chmod(self.socket_path, 0o600)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            name=f"zsoft-pi-llm-relay-{self.agent_session_id}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _forward(
+        self, request: dict[str, Any], body: bytes
+    ) -> tuple[int, dict[str, str], bytes]:
+        method = str(request.get("method") or "GET").upper()
+        path = str(request.get("path") or "/")
+        if self.upstream_path:
+            path = f"{self.upstream_path}{path}"
+        raw_headers = request.get("headers") or {}
+        if not isinstance(raw_headers, dict):
+            raise ValueError("relay request headers must be an object")
+        headers = {
+            str(name): str(value)
+            for name, value in raw_headers.items()
+            if str(name).lower() not in self._HOP_BY_HOP
+        }
+        headers["Host"] = (
+            f"{self.upstream_host}:{self.upstream_port}"
+            if (self.upstream_scheme == "https" and self.upstream_port != 443)
+            or (self.upstream_scheme == "http" and self.upstream_port != 80)
+            else self.upstream_host
+        )
+        if self.upstream_scheme == "https":
+            connection = http.client.HTTPSConnection(
+                self.upstream_host, self.upstream_port, timeout=120
+            )
+        else:
+            connection = http.client.HTTPConnection(
+                self.upstream_host, self.upstream_port, timeout=120
+            )
+        try:
+            connection.request(method, path, body=body if body else None, headers=headers)
+            response = connection.getresponse()
+            payload = response.read(_LLM_RELAY_MAX_BODY_BYTES + 1)
+            if len(payload) > _LLM_RELAY_MAX_BODY_BYTES:
+                raise ValueError("upstream response exceeds relay cap")
+            response_headers = {
+                name: value
+                for name, value in response.getheaders()
+                if name.lower() not in self._HOP_BY_HOP
+            }
+            return response.status, response_headers, payload
+        finally:
+            connection.close()
+
+    def close(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        self.socket_path.unlink(missing_ok=True)
+
+
 class WorkerToolProxy:
     def __init__(
         self,
@@ -1021,6 +1362,57 @@ class WorkerToolProxy:
         self.host_environment["GOAL_PLUS_AGENT_SESSION_ID"] = context.agent_session_id
         self._server: _ThreadingUnixServer | None = None
         self._thread: threading.Thread | None = None
+        self._log_lock = threading.Lock()
+
+    def _log_rejection(
+        self,
+        stage: str,
+        exc: BaseException,
+        *,
+        tool: str | None = None,
+        args: Any = None,
+        note: str | None = None,
+    ) -> None:
+        """Record a swallowed worker-facing failure on the host side.
+
+        Blind evaluation collapses every proxy failure into one opaque
+        rejection; without this log the underlying cause (for example a host
+        tool's stderr) is unrecoverable after the run. The log lives under the
+        real Goal Plus root's host-logs, which workers never see.
+        """
+
+        def clip(value: Any, limit: int) -> str:
+            text = value if isinstance(value, str) else json.dumps(
+                value, ensure_ascii=False, default=str,
+            )
+            return text if len(text) <= limit else f"{text[:limit]}...<{len(text)} chars>"
+
+        record = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "agent_session_id": self.context.agent_session_id,
+            "run_id": self.context.run_id,
+            "candidate_id": self.context.candidate_id,
+            "evaluation_mode": self.evaluation_mode,
+            "stage": stage,
+            "tool": tool,
+            "error_type": type(exc).__name__,
+            "error": clip(str(exc), _PROXY_LOG_TEXT_CAP),
+            "traceback": clip("".join(traceback.format_exception(exc)), _PROXY_LOG_TEXT_CAP),
+            "args": clip(args, _PROXY_LOG_ARGS_CAP) if args is not None else None,
+            "note": note,
+        }
+        try:
+            target = (
+                self.root / "host-logs" / _PROXY_ERROR_LOG_DIR
+                / f"{self.context.agent_session_id}.jsonl"
+            )
+            with self._log_lock:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            # Diagnostics must never break the worker-facing response path.
+            pass
 
     def start(self) -> None:
         self.socket_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
@@ -1037,6 +1429,12 @@ class WorkerToolProxy:
                         request = json.loads(raw.decode("utf-8"))
                         response = proxy.dispatch(request)
                     except Exception as exc:  # noqa: BLE001
+                        proxy._log_rejection(
+                            "dispatch",
+                            exc,
+                            tool=request.get("tool") if isinstance(request, dict) else None,
+                            args=request.get("args") if isinstance(request, dict) else None,
+                        )
                         response = (
                             dict(_BLIND_RESPONSE_REJECTED)
                             if proxy.evaluation_mode == "blind"
@@ -1110,11 +1508,24 @@ class WorkerToolProxy:
                 and self.evaluation_mode == "visible"
             ):
                 self._project_worker_generation(result)
-        except Exception:  # workers must not receive raw host exceptions
+        except Exception as exc:  # workers must not receive raw host exceptions
+            self._log_rejection("host_tool", exc, tool=str(tool), args=args)
             return dict(_BLIND_RESPONSE_REJECTED)
         if self.evaluation_mode == "blind":
+            host_result = result
             result = _blind_tool_response(str(tool), result, self.context)
             if result is _INVALID_BLIND_RESPONSE:
+                self._log_rejection(
+                    "blind_projection",
+                    ValueError("blind projection rejected the host tool result"),
+                    tool=str(tool),
+                    args=args,
+                    note=(
+                        f"host_result_keys={','.join(sorted(host_result))}"
+                        if isinstance(host_result, dict)
+                        else f"host_result_type={type(host_result).__name__}"
+                    ),
+                )
                 return dict(_BLIND_RESPONSE_REJECTED)
         return {
             "ok": True,
@@ -1215,6 +1626,33 @@ class WorkerToolProxy:
                 "Pi iteration listing accepts only the bound agent_session_id"
             )
         if (
+            tool == "goal_plus_search_read_shared_cache"
+            and set(args) != {"agent_session_id"}
+        ):
+            raise PermissionError(
+                "Pi shared cache reads accept only the bound agent_session_id"
+            )
+        if tool == "goal_plus_search_append_shared_cache":
+            if not set(args) <= {
+                "agent_session_id",
+                "section",
+                "content",
+                "supersedes",
+                "evidence_ref",
+            }:
+                raise PermissionError(
+                    "Pi shared cache appends accept only the documented fields"
+                )
+            if not isinstance(args.get("section"), str) or not args["section"]:
+                raise PermissionError("Pi shared cache appends require a section")
+            if not isinstance(args.get("content"), str) or not args["content"]:
+                raise PermissionError("Pi shared cache appends require content")
+            for field in ("supersedes", "evidence_ref"):
+                if args.get(field) is not None and not isinstance(args[field], str):
+                    raise PermissionError(
+                        "Pi shared cache appends require string optional fields"
+                    )
+        if (
             tool == "goal_plus_search_run_verifier"
             and args.get("scope", "process") != "process"
         ):
@@ -1258,6 +1696,7 @@ class BubblewrapWorker:
             evaluation_mode=policy.evaluation_mode,
         )
         self.private_git_admin: PrivateGitAdmin | None = None
+        self.llm_relays: list[LlmRelayServer] = []
 
     def prepare(self) -> tuple[list[str], dict[str, str]]:
         try:
@@ -1321,13 +1760,18 @@ class BubblewrapWorker:
             raise FileNotFoundError(
                 f"worker tool proxy is not executable: {_TOOL_PROXY_BIN}"
             )
+        if not _LLM_RELAY_SOURCE_BIN.is_file() or not os.access(
+            _LLM_RELAY_SOURCE_BIN, os.X_OK
+        ):
+            raise FileNotFoundError(
+                f"worker llm relay wrapper is not executable: {_LLM_RELAY_SOURCE_BIN}"
+            )
 
         args = [
             bwrap,
             "--die-with-parent",
             "--new-session",
             "--unshare-all",
-            "--share-net",
             "--unshare-user",
         ]
         if _bwrap_supports_option(bwrap, "--disable-userns", self.environment):
@@ -1354,6 +1798,22 @@ class BubblewrapWorker:
         )
         created = {"/proc", "/dev", "/tmp", "/run", "/home", "/home/pi"}
         _mount_system(args)
+        # The sandbox has no external route; stub DNS/hosts so that worker
+        # network attempts fail fast and deterministically instead of
+        # hanging on the host resolver.
+        netstub = self.proxy.socket_dir / "netstub"
+        netstub.mkdir(exist_ok=True)
+        (netstub / "resolv.conf").write_text(
+            "# benchmark sandbox: no external resolution\nnameserver 127.0.0.1\n",
+            encoding="utf-8",
+        )
+        (netstub / "hosts").write_text(
+            "127.0.0.1 localhost localhost.localdomain\n"
+            "::1 localhost localhost.localdomain\n",
+            encoding="utf-8",
+        )
+        args.extend(["--ro-bind", str(netstub / "resolv.conf"), "/etc/resolv.conf"])
+        args.extend(["--ro-bind", str(netstub / "hosts"), "/etc/hosts"])
         for runtime in pi_runtime_roots:
             if not _is_system_path(runtime):
                 _add_bind(args, runtime, runtime, readonly=True, created=created)
@@ -1435,6 +1895,13 @@ class BubblewrapWorker:
             or self.environment.get("GOAL_PLUS_PYTHON", str(python)) != str(python)
         ):
             raise ValueError("Pi worker requires its installed Goal Plus runtime receipt")
+        # Publish the installed runtime identity to every consumer: the
+        # host-side tool proxy dispatches _run_host_tool through
+        # GOAL_PLUS_PYTHON, and the sandboxed Pi transport inherits the same
+        # value. Both must be the receipt python, which the check above just
+        # guaranteed (unset env defaults to it).
+        self.environment["GOAL_PLUS_PYTHON"] = str(python)
+        self.proxy.host_environment["GOAL_PLUS_PYTHON"] = str(python)
         _add_bind(args, package / "assets", package / "assets", readonly=True, created=created)
         _add_bind(args, receipt_path, receipt_path, readonly=True, created=created)
         _add_bind(args, _TOOL_PROXY_BIN, python, readonly=True, created=created)
@@ -1458,6 +1925,10 @@ class BubblewrapWorker:
         )
         _add_bind(args, private_pi_home, pi_home, readonly=False, created=created)
         private_models = private_pi_home / "models.json"
+        relay_upstream = self._prepare_llm_relay(private_models)
+        if relay_upstream:
+            relay_url = f"http://127.0.0.1:{_LLM_RELAY_PORT}"
+            command = [token.replace(relay_upstream, relay_url) for token in command]
         if private_models.is_file():
             _add_bind(
                 args,
@@ -1481,6 +1952,10 @@ class BubblewrapWorker:
             runtime_root=self.proxy.socket_dir / "runtime",
             agent_session_id=self.context.agent_session_id,
             private_git_admin=self.private_git_admin,
+            relay_socket_path=(
+                self.llm_relays[-1].socket_path if self.llm_relays else None
+            ),
+            relay_port=_LLM_RELAY_PORT,
         )
         sandbox_env["BENCH_GOAL_PLUS_PACKAGE"] = str(package)
         sandbox_env["BENCH_GOAL_PLUS_BUILD"] = receipt["build"]
@@ -1489,13 +1964,87 @@ class BubblewrapWorker:
                 "--chdir",
                 str(self.context.workspace),
                 "--",
+                str(_LLM_RELAY_BIN),
+                "--",
                 str(executable_path),
                 *command[1:],
             ]
         )
         return args, sandbox_env
 
+    def _prepare_llm_relay(self, private_models: Path) -> str | None:
+        """Point the private Pi runtime at the loopback relay and start it.
+
+        Returns the original upstream origin (for command-line rewriting), or
+        None when no provider origin could be determined anywhere - in that
+        case the sandbox would have no route to its model API, so the launch
+        is refused rather than silently degraded.
+        """
+        origins: list[str] = []
+        if private_models.is_file():
+            document = json.loads(private_models.read_text(encoding="utf-8"))
+            providers = document.get("providers")
+            if isinstance(providers, dict):
+                for provider in providers.values():
+                    if isinstance(provider, dict):
+                        base_url = provider.get("baseUrl")
+                        if isinstance(base_url, str) and base_url.strip():
+                            origins.append(base_url.strip().rstrip("/"))
+        for name in _LLM_BASE_URL_ENVS:
+            value = self.environment.get(name)
+            if value and value.strip():
+                origins.append(value.strip().rstrip("/"))
+        netlocs = {
+            urllib.parse.urlsplit(origin).netloc
+            for origin in origins
+            if urllib.parse.urlsplit(origin).scheme in ("http", "https")
+        }
+        if not origins:
+            raise RuntimeError(
+                "llm relay: no model API origin found in the private Pi "
+                "models.json or the base-url environment; refusing to start "
+                "a network-isolated worker that cannot reach its provider"
+            )
+        if len(netlocs) != 1:
+            raise RuntimeError(
+                "llm relay: multiple distinct model API origins "
+                f"{sorted(netlocs)}; a single relay endpoint cannot serve them all"
+            )
+        upstream = next(
+            origin
+            for origin in origins
+            if urllib.parse.urlsplit(origin).scheme in ("http", "https")
+        )
+        relay_url = f"http://127.0.0.1:{_LLM_RELAY_PORT}"
+        if private_models.is_file():
+            document = json.loads(private_models.read_text(encoding="utf-8"))
+            providers = document.get("providers")
+            if isinstance(providers, dict):
+                changed = False
+                for provider in providers.values():
+                    if isinstance(provider, dict) and isinstance(
+                        provider.get("baseUrl"), str
+                    ):
+                        provider["baseUrl"] = relay_url
+                        changed = True
+                if changed:
+                    private_models.write_text(
+                        json.dumps(document, ensure_ascii=False, indent=1) + "\n",
+                        encoding="utf-8",
+                    )
+        relay = LlmRelayServer(
+            socket_dir=self.proxy.socket_dir,
+            upstream=upstream,
+            agent_session_id=self.context.agent_session_id,
+        )
+        relay.start()
+        self.llm_relays.append(relay)
+        return upstream
+
     def close(self) -> None:
+        for relay in self.llm_relays:
+            relay.close()
+        self.llm_relays.clear()
         self.proxy.close()
         _remove_private_runtime_tree(self.proxy.socket_dir)
 
@@ -1538,6 +2087,18 @@ def _worker_proxy_base(environment: Mapping[str, str]) -> Path:
     user_runtime = Path("/run") / "user" / str(os.geteuid())
     if user_runtime not in candidates:
         candidates.append(user_runtime)
+    # The Goal Plus candidate outer sandbox mounts a fresh tmpfs at /tmp and
+    # leaves the standard runtime dirs read-only; a private directory under
+    # /tmp is always short enough for the 103-byte sun_path limit and
+    # writable both on the host and inside the outer bubblewrap.
+    tmp_proxy = Path(os.sep, "tmp", f"bgp-sockets-{os.geteuid()}")
+    try:
+        tmp_proxy.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp_proxy.chmod(0o700)
+    except OSError:
+        tmp_proxy = None
+    if tmp_proxy is not None and tmp_proxy not in candidates:
+        candidates.append(tmp_proxy)
 
     for candidate in candidates:
         if (
@@ -2028,6 +2589,8 @@ def _sandbox_environment(
     runtime_root: Path,
     agent_session_id: str,
     private_git_admin: PrivateGitAdmin | None,
+    relay_socket_path: Path | None = None,
+    relay_port: int | None = None,
 ) -> dict[str, str]:
     runtime_bin = pi_runtime / "bin" if pi_runtime.is_dir() else pi_runtime.parent
     result = {
@@ -2065,11 +2628,22 @@ def _sandbox_environment(
         "PI_CODING_AGENT_DIR",
         "GOAL_PLUS_PI_MODEL",
         "GOAL_PLUS_PI_WORKER_CONTINUE_UNTIL_MS",
+        # The installed Goal Plus Python drives the worker-side transport RPC
+        # (goal-plus-transport.ts spawns it via GOAL_PLUS_PYTHON); without it
+        # every worker session dies with "native session transport closed".
+        "GOAL_PLUS_PYTHON",
         *policy.pass_env,
     }
     for name in sorted(inherited_names):
         if name in environment:
             result[name] = environment[name]
+    if relay_socket_path is not None and relay_port is not None:
+        result["BENCH_GOAL_PLUS_PI_LLM_RELAY_SOCKET"] = str(relay_socket_path)
+        result["BENCH_GOAL_PLUS_PI_LLM_RELAY_PORT"] = str(relay_port)
+        result["BENCH_GOAL_PLUS_PI_NETWORK_ISOLATION"] = "loopback-relay-api-only"
+        relay_origin = f"http://127.0.0.1:{relay_port}"
+        for name in _LLM_BASE_URL_ENVS:
+            result[name] = relay_origin
     return result
 
 
