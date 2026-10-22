@@ -28,7 +28,8 @@ runtime's PyTorch CUDA probe before evaluating a seed. The legacy target
 - Goal Plus uses the common typed-command and public apply lifecycle, with
   Git worktrees, autoresearch and no shared-dir. An external clean source
   checkout uses `BENCH_GOAL_PLUS_SOURCE_DIR` plus
-  `BENCH_GOAL_PLUS_EXPECTED_REF`; plan records its full identity.
+  clean checkout (`BENCH_GOAL_PLUS_EXPECTED_REF` optionally pins an exact ref);
+plan records its full identity.
 - UnifiedTask uses the adapter's shell with host login profiles disabled to
   preserve the evaluator cwd. The shell is part of the frozen evaluator hash.
 - Final source is `campaign-summary.json`; `finish` exports `report.md` and the

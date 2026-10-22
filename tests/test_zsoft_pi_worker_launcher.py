@@ -58,8 +58,8 @@ class CurrentGoalPlusContractTest(unittest.TestCase):
                 "goal_plus_search_stage_shared_tool",
                 "goal_plus_search_copy_shared_tool",
                 "goal_plus_search_get_evidence_detail",
-                "goal_plus_search_read_shared_cache",
-                "goal_plus_search_append_shared_cache",
+                "goal_plus_search_read_shared_knowledge",
+                "goal_plus_search_append_shared_knowledge",
                 "goal_plus_search_run_verifier",
                 "goal_plus_search_list_iterations",
             },
@@ -318,7 +318,7 @@ try {
         self.assertEqual(result, {"ok": True, "result": [
             {"iteration": 1, "recorded": True},
         ]})
-        self.assertEqual(host.call_args.args[2], {"agent_session_id": "agent_1"})
+        self.assertEqual(host.call_args.args[2], {})
         self.assertEqual(host.call_args.args[3]["GOAL_PLUS_PI_ROLE"], "worker")
 
     def test_current_global_evidence_does_not_expose_artifact_handles(self) -> None:
@@ -677,6 +677,24 @@ def test_bench_pi_shim_rejects_symlinked_root_and_non_rpc_worker(
         )
 
 
+def test_bench_pi_shim_passes_host_structured_inference_to_the_real_binary(
+    tmp_path: Path,
+) -> None:
+    command = [
+        "--mode", "json", "--print", "--no-session", "--no-builtin-tools",
+        "--tools", "goal_plus_thinkthread_annotation_submit",
+        "--no-extensions", "--extension", str(tmp_path / "structured-output.ts"),
+        "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve",
+        "--system-prompt", "annotation instructions",
+    ]
+    environment = {
+        "GOAL_PLUS_PI_ROLE": "worker",
+        "GOAL_PLUS_ROOT": str(tmp_path),
+        REAL_PI_BIN_ENV: str(Path(sys.executable).resolve()),
+    }
+    assert _shim_worker_launch(command, environment, tmp_path) is None
+
+
 def test_bench_pi_shim_passes_non_worker_pi_to_the_real_binary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -809,14 +827,17 @@ def test_host_tool_proxy_enforces_worker_identity(
     assert response == {"ok": True, "result": context_response}
     assert calls[0][1] == "goal_plus_search_get_agent_context"
 
-    with pytest.raises(PermissionError, match="bound agent_session_id"):
-        proxy.dispatch(
-            {
-                "tool": "goal_plus_search_get_global_evidence",
-                "args": {"agent_session_id": "agent_other"},
-            }
-        )
-    with pytest.raises(PermissionError, match="accepts only the bound agent_session_id"):
+    corrected = proxy.dispatch(
+        {
+            "tool": "goal_plus_search_get_global_evidence",
+            "args": {"agent_session_id": "agent_other"},
+        }
+    )
+    assert corrected["ok"] is True
+    # agent_session_id is stripped from forwarded args; the trusted
+    # GOAL_PLUS_AGENT_SESSION_ID env var carries the identity.
+    assert "agent_session_id" not in calls[-1][2]
+    with pytest.raises(PermissionError, match="accepts only offset and limit"):
         proxy.dispatch(
             {
                 "tool": "goal_plus_search_list_iterations",
@@ -1140,8 +1161,9 @@ def test_blind_tool_proxy_reduces_verifier_and_iteration_results_to_receipts(
             "agent_session_id": "agent_other",
         },
     }
-    with pytest.raises(PermissionError, match="bound agent_session_id"):
-        proxy.dispatch(wrong_session_request)
+    # wrong ids are corrected to the bound session, not rejected
+    corrected_receipt = proxy.dispatch(wrong_session_request)
+    assert corrected_receipt["ok"] is True
 
     evidence_request = {
         "tool": "goal_plus_search_get_global_evidence",
@@ -1711,7 +1733,7 @@ def test_bench_path_shim_launches_standard_goal_plus_pi_worker(
     )
 
 
-def test_blind_tool_proxy_projects_the_shared_cache_fact_plane(
+def test_blind_tool_proxy_projects_the_shared_knowledge_board(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1745,7 +1767,7 @@ def test_blind_tool_proxy_projects_the_shared_cache_fact_plane(
     }
 
     read_request = {
-        "tool": "goal_plus_search_read_shared_cache",
+        "tool": "goal_plus_search_read_shared_knowledge",
         "args": {"agent_session_id": "agent_1"},
     }
     monkeypatch.setattr(
@@ -1757,11 +1779,13 @@ def test_blind_tool_proxy_projects_the_shared_cache_fact_plane(
     assert response["result"] == snapshot
 
     append_request = {
-        "tool": "goal_plus_search_append_shared_cache",
+        "tool": "goal_plus_search_append_shared_knowledge",
         "args": {
             "agent_session_id": "agent_1",
             "section": "fp_signals",
-            "content": "finding_02.json anchor path is outside the mounted source tree.",
+            "entry_type": "fact",
+            "subject": "finding_02.json#path",
+            "content": {"signal": "anchor path is outside the mounted source tree."},
             "evidence_ref": "submission/finding_02.json",
         },
     }
@@ -1798,7 +1822,7 @@ def test_blind_tool_proxy_projects_the_shared_cache_fact_plane(
 
     with pytest.raises(PermissionError):
         proxy.dispatch({
-            "tool": "goal_plus_search_append_shared_cache",
+            "tool": "goal_plus_search_append_shared_knowledge",
             "args": {
                 "agent_session_id": "agent_1",
                 "section": "trigger_evidence",
@@ -1808,7 +1832,7 @@ def test_blind_tool_proxy_projects_the_shared_cache_fact_plane(
         })
 
 
-def test_blind_context_and_verifier_receipts_carry_the_cache_snapshot(
+def test_blind_context_and_verifier_receipts_carry_the_knowledge_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1850,7 +1874,7 @@ def test_blind_context_and_verifier_receipts_carry_the_cache_snapshot(
         "metric_name": "format_valid",
         "metric_direction": "maximize",
         "candidate_task": {"workspace": str(tmp_path)},
-        "shared_cache": snapshot,
+        "shared_knowledge": snapshot,
     }
     monkeypatch.setattr(
         "experiments.benchmark_compare.pi_worker_launcher._run_host_tool",
@@ -1858,7 +1882,7 @@ def test_blind_context_and_verifier_receipts_carry_the_cache_snapshot(
     )
     response = proxy.dispatch(context_request)
     assert response["ok"] is True
-    assert response["result"]["shared_cache"] == {
+    assert response["result"]["shared_knowledge"] == {
         "sections": snapshot["sections"],
         "entries": snapshot["entries"],
         "total_records": 1,
@@ -1875,8 +1899,8 @@ def test_blind_context_and_verifier_receipts_carry_the_cache_snapshot(
     verifier_result = {
         "run_id": "run_1",
         "candidate_id": "c001",
-        "shared_cache_injected": True,
-        "shared_cache_snapshot": snapshot,
+        "shared_knowledge_injected": True,
+        "shared_knowledge_snapshot": snapshot,
     }
     monkeypatch.setattr(
         "experiments.benchmark_compare.pi_worker_launcher._run_host_tool",
@@ -1888,7 +1912,7 @@ def test_blind_context_and_verifier_receipts_carry_the_cache_snapshot(
         "run_id": "run_1",
         "candidate_id": "c001",
         "recorded": True,
-        "shared_cache_snapshot": {
+        "shared_knowledge_snapshot": {
             "sections": snapshot["sections"],
             "entries": snapshot["entries"],
             "total_records": 1,

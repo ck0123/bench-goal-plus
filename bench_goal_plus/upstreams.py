@@ -18,26 +18,43 @@ def external_swebench_source() -> dict[str, str] | None:
 
 
 def _external_source(name: str, required: tuple[str, ...]) -> dict[str, str] | None:
+    """Resolve an externally supplied source checkout.
+
+    ``BENCH_<name>_SOURCE_DIR`` selects the checkout.  ``BENCH_<name>_EXPECTED_REF``
+    is optional: when set, HEAD must match it exactly (reproducible experiments);
+    when unset, whatever commit the checkout currently sits on is used as-is, so a
+    freshly downloaded repository works without pinning hashes.  The checkout must
+    still be clean and contain the required assets, and the recorded identity
+    (branch/commit) keeps prepare-vs-run consistency enforced either way.
+    """
     source = os.environ.get(f"BENCH_{name}_SOURCE_DIR")
     expected = os.environ.get(f"BENCH_{name}_EXPECTED_REF")
-    if not source and not expected:
+    if not source:
+        if expected:
+            raise ValueError(
+                f"external {name} requires BENCH_{name}_SOURCE_DIR when "
+                f"BENCH_{name}_EXPECTED_REF is set"
+            )
         return None
-    if not source or not expected:
-        raise ValueError(f"external {name} requires BENCH_{name}_SOURCE_DIR and BENCH_{name}_EXPECTED_REF")
     path = Path(source).expanduser().resolve(strict=True)
 
     def git(*args: str) -> str:
         return subprocess.check_output(["git", "-C", str(path), *args], text=True).strip()
 
     head = git("rev-parse", "HEAD")
-    if head != git("rev-parse", "--verify", "--end-of-options", f"{expected}^{{commit}}"):
-        raise ValueError(f"external {name} HEAD differs from expected ref")
+    if expected:
+        if head != git("rev-parse", "--verify", "--end-of-options", f"{expected}^{{commit}}"):
+            raise ValueError(f"external {name} HEAD differs from expected ref")
     if git("status", "--porcelain"):
         raise ValueError(f"external {name} checkout has local changes")
     if not all((path / item).exists() for item in required):
         raise ValueError(f"external {name} source is missing required assets")
-    return {"source_kind": "external", "source_dir": str(path), "expected_ref": expected,
-            "branch": git("branch", "--show-current"), "commit": head}
+    identity: dict[str, str] = {"source_kind": "external", "source_dir": str(path)}
+    if expected:
+        identity["expected_ref"] = expected
+    identity["branch"] = git("branch", "--show-current")
+    identity["commit"] = head
+    return identity
 
 
 def require_prepared_goal_plus_source(identity: Mapping[str, Any] | None) -> None:

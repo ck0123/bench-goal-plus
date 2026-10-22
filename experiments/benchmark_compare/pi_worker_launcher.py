@@ -65,8 +65,8 @@ _WORKER_TOOLS = {
     "goal_plus_search_stage_shared_tool",
     "goal_plus_search_copy_shared_tool",
     "goal_plus_search_get_evidence_detail",
-    "goal_plus_search_read_shared_cache",
-    "goal_plus_search_append_shared_cache",
+    "goal_plus_search_read_shared_knowledge",
+    "goal_plus_search_append_shared_knowledge",
     "goal_plus_search_run_verifier",
     "goal_plus_search_list_iterations",
 }
@@ -105,14 +105,14 @@ _BLIND_SYSTEM_PROMPT = (
     "tool errors. Work only from public task files and source mounted in this sandbox."
 )
 _OPAQUE_RESULTS_LEDGER = "iteration\tcommit\tstate\n"
-_BLIND_CACHE_SECTION_FIELDS = {
+_BLIND_KNOWLEDGE_SECTION_FIELDS = {
     "key",
     "title",
     "requirement",
     "cardinality",
     "requires_evidence",
 }
-_BLIND_CACHE_ENTRY_FIELDS = {
+_BLIND_KNOWLEDGE_ENTRY_FIELDS = {
     "key",
     "title",
     "section_key",
@@ -121,6 +121,10 @@ _BLIND_CACHE_ENTRY_FIELDS = {
     "record_id",
     "superseded_by",
     "evidence_ref",
+    "entry_type",
+    "subject",
+    "confidence",
+    "limits",
 }
 _BLIND_CONTEXT_SOURCE_FIELDS = {
     "agent_session_id",
@@ -143,16 +147,27 @@ _BLIND_CONTEXT_SOURCE_FIELDS = {
     "results_tsv",
     "resume",
     "run_id",
-    "shared_cache",
+    "shared_knowledge",
     "supplemental_evaluation_enabled",
     "tool_family_catalog",
     "verification",
     "workspace_access",
     "workspace_ledger_projection",
+    "dispatch_audit_context",
+    "fork_group",
+    "candidate_origin",
+    "selected_model",
+    "spec_revision",
+    "outer_deadline_at",
+    "frozen_spec_id",
+    "spec_hash",
+    "tool_capabilities",
 }
 _BLIND_CANDIDATE_TASK_SOURCE_FIELDS = {
     "acceptance",
     "allowed_files",
+    "expected_tradeoff",
+    "intent",
     "denied_files",
     "hypothesis",
     "instructions",
@@ -191,9 +206,9 @@ _BLIND_VERIFIER_SOURCE_FIELDS = {
     "process_passed",
     "promotion_passed",
     "run_id",
-    "shared_cache_injected",
-    "shared_cache_snapshot",
-    "shared_cache_warning",
+    "shared_knowledge_injected",
+    "shared_knowledge_snapshot",
+    "shared_knowledge_warning",
     "shared_tool_consumed_entries",
     "shared_tool_deduplicated_entries",
     "shared_tool_errors",
@@ -689,12 +704,12 @@ def _blind_context_response(
     }
     projected["metric_name"] = _BLIND_PUBLIC_METRIC
     projected["metric_direction"] = "maximize"
-    shared_cache = result.get("shared_cache")
-    if shared_cache is not None:
-        projected_cache = _blind_shared_cache_snapshot(shared_cache)
-        if projected_cache is _INVALID_BLIND_RESPONSE:
+    shared_knowledge = result.get("shared_knowledge")
+    if shared_knowledge is not None:
+        projected_knowledge = _blind_shared_knowledge_snapshot(shared_knowledge)
+        if projected_knowledge is _INVALID_BLIND_RESPONSE:
             return _INVALID_BLIND_RESPONSE
-        projected["shared_cache"] = projected_cache
+        projected["shared_knowledge"] = projected_knowledge
     return projected
 
 
@@ -731,17 +746,17 @@ def _blind_verifier_receipt(
         "candidate_id": context.candidate_id,
         "recorded": True,
     }
-    if result.get("shared_cache_injected") is True:
-        projected_cache = _blind_shared_cache_snapshot(
-            result.get("shared_cache_snapshot")
+    if result.get("shared_knowledge_injected") is True:
+        projected_knowledge = _blind_shared_knowledge_snapshot(
+            result.get("shared_knowledge_snapshot")
         )
-        if projected_cache is _INVALID_BLIND_RESPONSE:
+        if projected_knowledge is _INVALID_BLIND_RESPONSE:
             return _INVALID_BLIND_RESPONSE
-        receipt["shared_cache_snapshot"] = projected_cache
+        receipt["shared_knowledge_snapshot"] = projected_knowledge
     return receipt
 
 
-def _blind_shared_cache_snapshot(
+def _blind_shared_knowledge_snapshot(
     snapshot: Any,
 ) -> dict[str, Any] | object:
     """Project an operator-frozen shared cache snapshot for a blind worker.
@@ -762,7 +777,7 @@ def _blind_shared_cache_snapshot(
         return _INVALID_BLIND_RESPONSE
     projected_sections: list[dict[str, Any]] = []
     for section in sections:
-        if not isinstance(section, dict) or not set(section) <= _BLIND_CACHE_SECTION_FIELDS:
+        if not isinstance(section, dict) or not set(section) <= _BLIND_KNOWLEDGE_SECTION_FIELDS:
             return _INVALID_BLIND_RESPONSE
         if not isinstance(section.get("key"), str) or not section["key"]:
             return _INVALID_BLIND_RESPONSE
@@ -777,7 +792,7 @@ def _blind_shared_cache_snapshot(
         projected_sections.append(dict(section))
     projected_entries: list[dict[str, Any]] = []
     for entry in entries:
-        if not isinstance(entry, dict) or not set(entry) <= _BLIND_CACHE_ENTRY_FIELDS:
+        if not isinstance(entry, dict) or not set(entry) <= _BLIND_KNOWLEDGE_ENTRY_FIELDS:
             return _INVALID_BLIND_RESPONSE
         for field in ("key", "title", "section_key", "content", "writer", "record_id"):
             if not isinstance(entry.get(field), str) or not entry[field]:
@@ -798,12 +813,30 @@ def _blind_shared_cache_snapshot(
     return projected
 
 
-def _blind_appended_shared_cache(
+def _blind_appended_shared_knowledge(
     result: Any,
 ) -> dict[str, Any] | object:
     if not isinstance(result, dict) or not set(result) <= {
-        "section", "writer", "view",
+        "section", "writer", "record_id", "deduplicated",
+        "contradiction_with", "view", "knowledge_html",
+        "knowledge_html_warning",
     }:
+        return _INVALID_BLIND_RESPONSE
+    for flag in ("deduplicated",):
+        if flag in result and not isinstance(result[flag], bool):
+            return _INVALID_BLIND_RESPONSE
+    contradictions = result.get("contradiction_with")
+    if contradictions is not None and (
+        not isinstance(contradictions, list)
+        or not all(isinstance(item, str) for item in contradictions)
+    ):
+        return _INVALID_BLIND_RESPONSE
+    for path_key in ("knowledge_html", "knowledge_html_warning"):
+        if path_key in result and not isinstance(result[path_key], str):
+            return _INVALID_BLIND_RESPONSE
+    if "record_id" in result and (
+        not isinstance(result["record_id"], str) or not result["record_id"]
+    ):
         return _INVALID_BLIND_RESPONSE
     if not isinstance(result.get("section"), str) or not result["section"]:
         return _INVALID_BLIND_RESPONSE
@@ -814,7 +847,7 @@ def _blind_appended_shared_cache(
         return _INVALID_BLIND_RESPONSE
     projected_view = []
     for entry in view:
-        if not isinstance(entry, dict) or not set(entry) <= _BLIND_CACHE_ENTRY_FIELDS:
+        if not isinstance(entry, dict) or not set(entry) <= _BLIND_KNOWLEDGE_ENTRY_FIELDS:
             return _INVALID_BLIND_RESPONSE
         for field in ("key", "title", "section_key", "content", "writer", "record_id"):
             if not isinstance(entry.get(field), str) or not entry[field]:
@@ -1120,10 +1153,10 @@ def _blind_tool_response(
         return _blind_staged_shared_tool(result, context)
     if tool == "goal_plus_search_copy_shared_tool":
         return _blind_copied_shared_tool(result, context)
-    if tool == "goal_plus_search_read_shared_cache":
-        return _blind_shared_cache_snapshot(result)
-    if tool == "goal_plus_search_append_shared_cache":
-        return _blind_appended_shared_cache(result)
+    if tool == "goal_plus_search_read_shared_knowledge":
+        return _blind_shared_knowledge_snapshot(result)
+    if tool == "goal_plus_search_append_shared_knowledge":
+        return _blind_appended_shared_knowledge(result)
     return _INVALID_BLIND_RESPONSE
 
 
@@ -1492,6 +1525,22 @@ class WorkerToolProxy:
             raise PermissionError(f"Pi worker proxy does not allow tool {tool!r}")
         if not isinstance(args, dict):
             raise TypeError("proxy tool args must be a JSON object")
+        # The server hides agent_session_id from the model signature for
+        # candidate callers and injects it from the GOAL_PLUS_AGENT_SESSION_ID
+        # environment variable; forwarding it as an explicit parameter would
+        # be an unexpected keyword argument. Strip it instead, and let the
+        # trusted env var carry the identity.
+        if tool in _SESSION_SCOPED_TOOLS:
+            args = {k: v for k, v in args.items() if k != "agent_session_id"}
+        # The server hides agent_session_id, run_id, and candidate_id from
+        # candidate callers and auto-injects them from the trusted
+        # GOAL_PLUS_AGENT_SESSION_ID env var. The proxy strips all three;
+        # the env var carries the identity to the server.
+        if tool == "goal_plus_search_run_verifier":
+            args = {
+                k: v for k, v in args.items()
+                if k not in ("agent_session_id", "run_id", "candidate_id")
+            }
         self._authorize(str(tool), args)
         if self.evaluation_mode == "blind" and tool in _BLIND_BLOCKED_TOOLS:
             return dict(_BLIND_RESPONSE_REJECTED)
@@ -1606,37 +1655,31 @@ class WorkerToolProxy:
                 destination.unlink(missing_ok=True)
 
     def _authorize(self, tool: str, args: dict[str, Any]) -> None:
-        if (
-            tool in _SESSION_SCOPED_TOOLS
-            and args.get("agent_session_id") != self.context.agent_session_id
-        ):
-            raise PermissionError("Pi worker proxy requires the bound agent_session_id")
-        if "run_id" in args and args["run_id"] != self.context.run_id:
+        # agent_session_id is stripped before dispatch and the trusted
+        # GOAL_PLUS_AGENT_SESSION_ID env var carries the identity to the
+        # server; no explicit parameter check is needed here.
+        if "run_id" in args and args["run_id"] is not None and args["run_id"] != self.context.run_id:
             raise PermissionError("Pi worker proxy rejected a different run_id")
-        if (
-            tool == "goal_plus_search_run_verifier"
-            and args.get("candidate_id") != self.context.candidate_id
-        ):
-            raise PermissionError("Pi worker proxy rejected a different candidate_id")
-        if (
-            tool == "goal_plus_search_list_iterations"
-            and set(args) != {"agent_session_id"}
-        ):
-            raise PermissionError(
-                "Pi iteration listing accepts only the bound agent_session_id"
-            )
-        if (
-            tool == "goal_plus_search_read_shared_cache"
-            and set(args) != {"agent_session_id"}
-        ):
-            raise PermissionError(
-                "Pi shared cache reads accept only the bound agent_session_id"
-            )
-        if tool == "goal_plus_search_append_shared_cache":
+        # candidate_id is stripped for run_verifier (server auto-injects)
+        if tool == "goal_plus_search_list_iterations":
+            if not set(args) <= {"offset", "limit"}:
+                raise PermissionError(
+                    "Pi iteration listing accepts only offset and limit"
+                )
+        if tool == "goal_plus_search_read_shared_knowledge":
+            if set(args) - {"known_snapshot_id", "compact"}:
+                raise PermissionError(
+                    "Pi shared knowledge reads accept only snapshot parameters"
+                )
+        if tool == "goal_plus_search_append_shared_knowledge":
             if not set(args) <= {
                 "agent_session_id",
                 "section",
+                "entry_type",
+                "subject",
                 "content",
+                "confidence",
+                "limits",
                 "supersedes",
                 "evidence_ref",
             }:
@@ -1645,9 +1688,13 @@ class WorkerToolProxy:
                 )
             if not isinstance(args.get("section"), str) or not args["section"]:
                 raise PermissionError("Pi shared cache appends require a section")
-            if not isinstance(args.get("content"), str) or not args["content"]:
-                raise PermissionError("Pi shared cache appends require content")
-            for field in ("supersedes", "evidence_ref"):
+            if not isinstance(args.get("entry_type"), str) or not args["entry_type"]:
+                raise PermissionError("Pi shared cache appends require entry_type")
+            if not isinstance(args.get("subject"), str) or not args["subject"]:
+                raise PermissionError("Pi shared cache appends require subject")
+            if not isinstance(args.get("content"), dict) or not args["content"]:
+                raise PermissionError("Pi shared cache appends require content dict")
+            for field in ("confidence", "limits", "supersedes", "evidence_ref"):
                 if args.get(field) is not None and not isinstance(args[field], str):
                     raise PermissionError(
                         "Pi shared cache appends require string optional fields"
@@ -1990,10 +2037,29 @@ class BubblewrapWorker:
                         base_url = provider.get("baseUrl")
                         if isinstance(base_url, str) and base_url.strip():
                             origins.append(base_url.strip().rstrip("/"))
-        for name in _LLM_BASE_URL_ENVS:
-            value = self.environment.get(name)
-            if value and value.strip():
-                origins.append(value.strip().rstrip("/"))
+        # Prefer the provider baseUrl from the worker's own models.json;
+        # environment variables for OTHER providers (e.g. GLM_BASE_URL when
+        # the worker uses deepseek) are irrelevant and must not cause the
+        # relay to fail with "multiple origins".
+        if private_models.is_file():
+            try:
+                document = json.loads(private_models.read_text(encoding="utf-8"))
+                providers = document.get("providers")
+                if isinstance(providers, dict):
+                    for provider in providers.values():
+                        if not isinstance(provider, dict):
+                            continue
+                        base_url = provider.get("baseUrl")
+                        if isinstance(base_url, str) and base_url.strip():
+                            origins.append(base_url.strip().rstrip("/"))
+            except (OSError, json.JSONDecodeError):
+                pass
+        if not origins:
+            # Fallback to env vars only if models.json had no baseUrl
+            for name in _LLM_BASE_URL_ENVS:
+                value = self.environment.get(name)
+                if value and value.strip():
+                    origins.append(value.strip().rstrip("/"))
         netlocs = {
             urllib.parse.urlsplit(origin).netloc
             for origin in origins
@@ -2005,11 +2071,20 @@ class BubblewrapWorker:
                 "models.json or the base-url environment; refusing to start "
                 "a network-isolated worker that cannot reach its provider"
             )
-        if len(netlocs) != 1:
-            raise RuntimeError(
-                "llm relay: multiple distinct model API origins "
-                f"{sorted(netlocs)}; a single relay endpoint cannot serve them all"
-            )
+        if len(netlocs) > 1:
+            # Multiple origins only matter if all are needed; prefer the
+            # models.json origin over env vars.
+            json_origins = [
+                o for o in origins
+                if urllib.parse.urlsplit(o).scheme in ("http", "https")
+            ]
+            if len(json_origins) == 1:
+                origins = json_origins
+            else:
+                raise RuntimeError(
+                    "llm relay: multiple distinct model API origins "
+                    f"{sorted(netlocs)}; a single relay endpoint cannot serve them all"
+                )
         upstream = next(
             origin
             for origin in origins
@@ -2708,6 +2783,27 @@ def _pi_mode(command: list[str]) -> str | None:
         return None
 
 
+def _structured_inference_launch(command: list[str]) -> bool:
+    """Detect Goal Plus' host-side one-shot structured-inference annotator.
+
+    ``goal_plus.execution.structured_inference`` runs the evidence annotator
+    as a single JSON-print CLI process (``--mode json --print --no-session
+    --no-builtin-tools``) from the controller-owned annotation drainer. That
+    process inherits ``GOAL_PLUS_PI_ROLE=worker`` from the Pi session
+    profile, but it is host-side controller infrastructure like the final
+    checker — never a Search candidate worker — and its only route to the
+    model API is the host network, so it must reach the real binary
+    unsandboxed. Candidate worker launches always use ``--mode rpc``; any
+    other non-RPC worker launch still fails closed in the shim.
+    """
+    return (
+        _pi_mode(command) == "json"
+        and "--print" in command
+        and "--no-session" in command
+        and "--no-builtin-tools" in command
+    )
+
+
 def _shim_worker_launch(
     command: list[str],
     environment: Mapping[str, str],
@@ -2716,6 +2812,8 @@ def _shim_worker_launch(
     if environment.get("GOAL_PLUS_PI_ROLE") != "worker":
         return None
     if _pi_mode(command) != "rpc":
+        if _structured_inference_launch(command):
+            return None
         raise RuntimeError("Goal Plus Pi worker must use RPC mode")
     root_value = environment.get("GOAL_PLUS_ROOT")
     if not root_value:

@@ -34,7 +34,8 @@ The exact model must exist in the host Pi catalog; no model substitution occurs.
 Goal Plus uses the common runner's source installation (`install.sh --pi`),
 typed host command, Git worktrees, `autoresearch`, `parallel_loops`, disabled
 shared-dir, and public promotion/apply lifecycle. To exercise a clean external
-checkout, set `BENCH_GOAL_PLUS_SOURCE_DIR` and `BENCH_GOAL_PLUS_EXPECTED_REF`.
+checkout, set `BENCH_GOAL_PLUS_SOURCE_DIR` (used at its current HEAD;
+`BENCH_GOAL_PLUS_EXPECTED_REF` optionally pins an exact ref).
 Plan and prepared evidence record its full source identity; changing it before
 execution is rejected. This does not change the registered upstream branch.
 

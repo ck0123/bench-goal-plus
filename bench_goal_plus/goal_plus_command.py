@@ -43,6 +43,7 @@ def goal_plus_command_config(
     workspace_provider: GoalPlusWorkspaceProvider = "git_worktree",
     promotion_mode: GoalPlusPromotionMode = "apply",
     mode: Literal["autonomous", "probe"] = "autonomous",
+    spawn_mode: Literal["fresh", "fork"] = "fresh",
 ) -> dict[str, str | int]:
     """Return the typed config persisted by the Goal Plus host command."""
 
@@ -54,6 +55,7 @@ def goal_plus_command_config(
         "workspace_provider": workspace_provider,
         "promotion_mode": promotion_mode,
         "strategy": _config_token("strategy", strategy),
+        "spawn_mode": _config_token("spawn mode", spawn_mode),
     }
     if worker_model is not None:
         model = _config_token("worker model", worker_model)

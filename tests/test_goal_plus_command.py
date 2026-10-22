@@ -32,7 +32,7 @@ class GoalPlusCommandTests(unittest.TestCase):
             command,
             "/goal-plus mode=autonomous max_parallel=2 "
             "workspace_provider=git_worktree promotion_mode=apply "
-            "strategy=agent_guided workers=bench-openai/gpt-5.6-luna*2 "
+            "strategy=agent_guided spawn_mode=fresh workers=bench-openai/gpt-5.6-luna*2 "
             "annotator=bench-openai/gpt-5.6-terra",
         )
         self.assertNotIn(" -- ", command)
@@ -52,6 +52,7 @@ class GoalPlusCommandTests(unittest.TestCase):
                 "workspace_provider": "git_worktree",
                 "promotion_mode": "artifact_only",
                 "strategy": "random",
+                "spawn_mode": "fresh",
                 "workers": "gpt-5.6-sol*1",
                 "annotator": "gpt-5.5",
             },

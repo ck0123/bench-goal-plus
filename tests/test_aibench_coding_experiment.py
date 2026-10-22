@@ -50,8 +50,8 @@ class AIBenchCodingContractTest(unittest.TestCase):
             Path(environment["AIBENCH_PROXY_RUNTIME_DIR"]).parent,
             self.root,
         )
-        self.assertEqual(environment["BENCH_GOAL_PLUS_SOURCE_DIR"], "/trusted/goal-plus")
         self.assertEqual(environment["BENCH_GOAL_PLUS_EXPECTED_REF"], "current")
+        self.assertEqual(environment["BENCH_GOAL_PLUS_SOURCE_DIR"], "/trusted/goal-plus")
         self.assertEqual(environment["PI_CODING_AGENT_DIR"], "/trusted/pi")
         self.assertNotIn("UNRELATED_SECRET", environment)
 
