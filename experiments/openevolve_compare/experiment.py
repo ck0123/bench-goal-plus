@@ -881,58 +881,39 @@ def render_controller_only_task_prompt(
     )
 
 
-# Controller-owned shared-cache template exported to Goal Plus via
-# GOAL_PLUS_CONTROLLER_SHARED_CACHE. The prompt text below embeds the same
+# Controller-owned shared-knowledge template exported to Goal Plus via
+# GOAL_PLUS_CONTROLLER_SHARED_KNOWLEDGE. The prompt text below embeds the same
 # template for the agent; with the overlay exported, freezing force-applies
 # this value and no longer depends on instruction following. Keep the two
-# copies byte-equivalent when editing.
-SHARED_CACHE_SPEC_TEMPLATE: dict = {
+# copies byte-equivalent when editing. Runtime admission enforces the uniform
+# content format: type=fact first key, subject second key, and
+# evidence_ref=cXXX:iter anchoring for every entry.
+SHARED_KNOWLEDGE_SPEC_TEMPLATE: dict = {
     "enabled": True,
     "sections": [
         {
             "key": "function_signatures",
             "title": "Function signatures",
-            "requirement": (
-                "One function per entry. subject=<module.function>. content "
-                "uses the fixed structure: signature (verbatim signature); "
-                "pure (whether the function is pure); notes (side effects, "
-                "global state, or non-local writes, or none). Correct a "
-                "changed signature with supersedes instead of appending a "
-                "parallel entry."
-            ),
+            "requirement": "One function per entry. subject=<module.function>.",
             "cardinality": "any",
             "requires_evidence": False,
+            "content_keys": ["signature", "pure", "notes"],
         },
         {
             "key": "value_ranges",
             "title": "Variable value ranges",
-            "requirement": (
-                "One (function, variable, direction) triple per entry. "
-                "subject=<function>#<variable>. content uses the fixed "
-                "structure: direction=input|output|intermediate; range "
-                "(interval, enumeration, or predicate, e.g. [0,65536) or "
-                "{None,''}); basis (how the range was obtained: concrete "
-                "observation, static derivation, or assumption); "
-                "confidence=observed|derived|assumed. When a more precise "
-                "range is found for the same subject, it must supersede the "
-                "older entry instead of appending a looser parallel one."
-            ),
+            "requirement": "One (function, variable, direction) triple per entry. subject=<function>#<variable>.",
             "cardinality": "any",
             "requires_evidence": False,
+            "content_keys": ["direction", "range", "basis"],
         },
         {
             "key": "fp_verdicts",
             "title": "FP verdicts",
-            "requirement": (
-                "One finding per entry. subject=<file:line>#<bug_type>. "
-                "content uses the fixed structure: verdict=fp|tp|uncertain; "
-                "path (source-to-sink function chain covered by this "
-                "verdict); basis (value-range propagation chain behind the "
-                "verdict, citing record_id of the value_ranges entries "
-                "used); notes. Correct an earlier verdict with supersedes."
-            ),
+            "requirement": "One finding per entry. subject=<file>:<line>#<bug_type>.",
             "cardinality": "any",
             "requires_evidence": False,
+            "content_keys": ["verdict", "path", "basis", "notes"],
         },
     ],
     "verifier_input": False,
@@ -1036,7 +1017,8 @@ def render_goal(
     initial_launch_contract = (
         "- After `goal_plus_search_plan_next`, call `goal_plus_search_start_batch` "
         "once to materialize the candidates. Start each candidate with "
-        "`goal_plus_session_run`, then observe it with `goal_plus_session_wait`. "
+        "`goal_plus_session_run`, then observe it with `goal_plus_session_wait_any` "
+        "(timeout_seconds at most 300). "
         "Start every initial worker before waiting. Review settled Evidence and "
         "call `goal_plus_session_run` with a new call_id to continue the same session "
         "while useful work and time remain. Close "
@@ -1053,10 +1035,21 @@ def render_goal(
         if outer_deadline_at is not None else "- Read the outer deadline from Goal status. "
     ) + (
         f"Before each run or wait, check current UTC and reserve {closeout_seconds} "
-        "seconds for completion. Bound both invocation and wait timeouts by the "
-        "remaining exploration time, not the original worker maximum. Give the worker "
-        "that exploration cutoff and ask it to commit and submit its verifier before "
-        "then. When exploration time is exhausted, interrupt any active invocation, "
+        "seconds for completion. Scheduling discipline: (1) State a working window "
+        "in each `goal_plus_session_run` prompt; the worker may commit and submit "
+        "one finding or several within it — the turn cadence is the worker's "
+        "choice, do not impose an attempt granularity. (2) The invocation "
+        "`timeout_seconds` must cover that working window with margin (at least the "
+        "window plus 120 seconds); clamp it to the remaining exploration time only "
+        "when the remaining time is smaller. An invocation timeout shorter than the "
+        "working window you requested kills the worker transport mid-attempt and "
+        "forces a session replacement. (3) While any invocation is running, keep "
+        "polling with `goal_plus_session_wait_any` (timeout_seconds at most 300) in a "
+        "loop; never end your own turn to wait for a worker. (4) If an invocation "
+        "times out anyway, wait for that session to settle (its wait result or "
+        "recovery status shows no unsettled invocation) before starting any "
+        "replacement session for the same candidate. When exploration time is "
+        "exhausted, interrupt any active invocation, "
         "wait for it to settle, and close the session. A wait timeout alone does not "
         "stop a worker. "
     ) + (
@@ -1122,6 +1115,7 @@ def render_goal(
             "- Honor every leading typed command field in the SearchSpec.\n"
             "- Set `strategy.inner_agent=\"autoresearch\"`.\n"
             + '- Set `strategy.orchestration_mode="parallel_loops"`; set `strategy.selection.ranking_keys=["hard_score"]` and `ranking_tolerance=[0.0]`. Do not use `metric_name` as a ranking key.\n'
+            + "- Set `strategy.initial_context=\"fresh\"` — candidates start from the frozen source; do not use fork spawn mode (the benchmark host spawns workers by session RPC and has no Main checkpoint to fork).\n"
             + "- Use the Goal's linked Search lifecycle for this optimization.\n"
             + "- Set `strategy.config.global_evidence_mode=\"manual\"` so every worker can "
             "read settled public-verifier Evidence from the other candidates as reference.\n"
@@ -1132,8 +1126,8 @@ def render_goal(
                 else ""
             )
             + (
-                "- Set top-level `shared_cache.enabled=true` with "
-                '`shared_cache.sections=[{"key":"function_signatures","title":"Function signatures","requirement":"One function per entry. subject=<module.function>. content uses the fixed structure: signature (verbatim signature); pure (whether the function is pure); notes (side effects, global state, or non-local writes, or none). Correct a changed signature with supersedes instead of appending a parallel entry.","cardinality":"any","requires_evidence":false},{"key":"value_ranges","title":"Variable value ranges","requirement":"One (function, variable, direction) triple per entry. subject=<function>#<variable>. content uses the fixed structure: direction=input|output|intermediate; range (interval, enumeration, or predicate, e.g. [0,65536) or {None,\'\'}); basis (how the range was obtained: concrete observation, static derivation, or assumption); confidence=observed|derived|assumed. When a more precise range is found for the same subject, it must supersede the older entry instead of appending a looser parallel one.","cardinality":"any","requires_evidence":false},{"key":"fp_verdicts","title":"FP verdicts","requirement":"One finding per entry. subject=<file:line>#<bug_type>. content uses the fixed structure: verdict=fp|tp|uncertain; path (source-to-sink function chain covered by this verdict); basis (value-range propagation chain behind the verdict, citing record_id of the value_ranges entries used); notes. Correct an earlier verdict with supersedes.","cardinality":"any","requires_evidence":false}]`, '
+                "- Set top-level `shared_knowledge.enabled=true` with "
+                '`shared_knowledge.sections=[{"key":"function_signatures","title":"Function signatures","requirement":"One function per entry. content starts with type=fact; subject=<module.function>; then signature (verbatim signature); pure (whether the function is pure); notes (side effects, global state, or non-local writes, or none). Anchor every entry with evidence_ref=cXXX:iter of your latest settled iteration. Correct a changed signature with supersedes instead of appending a parallel entry.","cardinality":"any","requires_evidence":false},{"key":"value_ranges","title":"Variable value ranges","requirement":"One (function, variable, direction) triple per entry. content starts with type=fact; subject=<function>#<variable>; then direction=input|output|intermediate; range (interval, enumeration, or predicate, e.g. [0,65536) or {None,\'\'}); basis (how the range was obtained: concrete observation, static derivation, or assumption); confidence=observed|derived|assumed. Anchor with evidence_ref=cXXX:iter. When a more precise range is found for the same subject, it must supersede the older entry instead of appending a looser parallel one.","cardinality":"any","requires_evidence":false},{"key":"fp_verdicts","title":"FP verdicts","requirement":"One finding per entry. content starts with type=fact; subject=<file:line>#<bug_type>; then verdict=fp|tp|uncertain; path (source-to-sink function chain covered by this verdict); basis (value-range propagation chain behind the verdict, citing record_id of the value_ranges entries used); notes. Anchor with evidence_ref=cXXX:iter. Correct an earlier verdict with supersedes.","cardinality":"any","requires_evidence":false}]`, '
                 '`shared_cache.verifier_input=false`, '
                 '`shared_cache.verifier_updates=false`, '
                 '`shared_cache.max_records=200`, and '
@@ -1212,6 +1206,7 @@ def render_goal(
         "- Honor every leading typed command field in the SearchSpec.\n"
         "- Set `strategy.inner_agent=\"autoresearch\"`.\n"
         + '- Set `strategy.orchestration_mode="parallel_loops"`; set `strategy.selection.ranking_keys=["hard_score"]` and `ranking_tolerance=[0.0]`. Do not use `metric_name` as a ranking key.\n'
+        + "- Set `strategy.initial_context=\"fresh\"` — candidates start from the frozen source; do not use fork spawn mode (the benchmark host spawns workers by session RPC and has no Main checkpoint to fork).\n"
         + "- Use the Goal's linked Search lifecycle for this optimization.\n"
         + (
             "- Set top-level `shared_dir.enabled=true`.\n"
@@ -1219,8 +1214,8 @@ def render_goal(
             else ""
         )
         + (
-            "- Set top-level `shared_cache.enabled=true` with "
-            '`shared_cache.sections=[{"key":"function_signatures","title":"Function signatures","requirement":"One function per entry. subject=<module.function>. content uses the fixed structure: signature (verbatim signature); pure (whether the function is pure); notes (side effects, global state, or non-local writes, or none). Correct a changed signature with supersedes instead of appending a parallel entry.","cardinality":"any","requires_evidence":false},{"key":"value_ranges","title":"Variable value ranges","requirement":"One (function, variable, direction) triple per entry. subject=<function>#<variable>. content uses the fixed structure: direction=input|output|intermediate; range (interval, enumeration, or predicate, e.g. [0,65536) or {None,\'\'}); basis (how the range was obtained: concrete observation, static derivation, or assumption); confidence=observed|derived|assumed. When a more precise range is found for the same subject, it must supersede the older entry instead of appending a looser parallel one.","cardinality":"any","requires_evidence":false},{"key":"fp_verdicts","title":"FP verdicts","requirement":"One finding per entry. subject=<file:line>#<bug_type>. content uses the fixed structure: verdict=fp|tp|uncertain; path (source-to-sink function chain covered by this verdict); basis (value-range propagation chain behind the verdict, citing record_id of the value_ranges entries used); notes. Correct an earlier verdict with supersedes.","cardinality":"any","requires_evidence":false}]`, '
+            "- Set top-level `shared_knowledge.enabled=true` with "
+            '`shared_knowledge.sections=[{"key":"function_signatures","title":"Function signatures","requirement":"One function per entry. content starts with type=fact; subject=<module.function>; then signature (verbatim signature); pure (whether the function is pure); notes (side effects, global state, or non-local writes, or none). Anchor every entry with evidence_ref=cXXX:iter of your latest settled iteration. Correct a changed signature with supersedes instead of appending a parallel entry.","cardinality":"any","requires_evidence":false},{"key":"value_ranges","title":"Variable value ranges","requirement":"One (function, variable, direction) triple per entry. content starts with type=fact; subject=<function>#<variable>; then direction=input|output|intermediate; range (interval, enumeration, or predicate, e.g. [0,65536) or {None,\'\'}); basis (how the range was obtained: concrete observation, static derivation, or assumption); confidence=observed|derived|assumed. Anchor with evidence_ref=cXXX:iter. When a more precise range is found for the same subject, it must supersede the older entry instead of appending a looser parallel one.","cardinality":"any","requires_evidence":false},{"key":"fp_verdicts","title":"FP verdicts","requirement":"One finding per entry. content starts with type=fact; subject=<file:line>#<bug_type>; then verdict=fp|tp|uncertain; path (source-to-sink function chain covered by this verdict); basis (value-range propagation chain behind the verdict, citing record_id of the value_ranges entries used); notes. Anchor with evidence_ref=cXXX:iter. Correct an earlier verdict with supersedes.","cardinality":"any","requires_evidence":false}]`, '
             '`shared_cache.verifier_input=false`, '
             '`shared_cache.verifier_updates=false`, '
             '`shared_cache.max_records=200`, and '
@@ -2257,6 +2252,37 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
                     and isinstance(item.get("score"), (int, float))
                     and item.get("process_passed") is not False
                 )
+        # Precompute, per candidate, when the NEXT session bound after each
+        # one — a session that was replaced mid-run ended no later than that.
+        next_bound_by_session: dict[str, str] = {}
+        by_candidate_sessions: dict[str, list[tuple[str, str]]] = {}
+        for session_path in session_paths:
+            session = load_json(session_path)
+            candidate_id = session.get("candidate_id")
+            handle = session.get("session_handle") or {}
+            metadata = handle.get("metadata") or {}
+            bound_at = metadata.get("bound_at")
+            session_id = session.get("agent_session_id")
+            if (
+                isinstance(candidate_id, str)
+                and isinstance(bound_at, str)
+                and isinstance(session_id, str)
+            ):
+                by_candidate_sessions.setdefault(candidate_id, []).append(
+                    (bound_at, session_id)
+                )
+        for _cid, entries in by_candidate_sessions.items():
+            entries.sort()
+            for index in range(len(entries) - 1):
+                next_bound_by_session[entries[index][1]] = entries[index + 1][0]
+        candidates_with_iterations = {
+            candidate.get("candidate_id")
+            for candidate_path in candidate_paths
+            for candidate in [load_json(candidate_path)]
+            if isinstance(candidate.get("iterations"), list)
+            and len(candidate["iterations"]) > 0
+            and isinstance(candidate.get("candidate_id"), str)
+        }
         for session_path in session_paths:
             session = load_json(session_path)
             if isinstance(session.get("agent_harness"), str):
@@ -2266,7 +2292,12 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
                 session_counts_by_candidate[candidate_id] = (
                     session_counts_by_candidate.get(candidate_id, 0) + 1
                 )
-            intervals = session_worker_intervals(session)
+            replacement_at = next_bound_by_session.get(
+                str(session.get("agent_session_id"))
+            )
+            intervals = session_worker_intervals(
+                session, replacement_bound_at=replacement_at
+            )
             if len(intervals) > 1:
                 same_agent_continuation_session_count += 1
             is_bound = (
@@ -2288,6 +2319,11 @@ def collect_goal_plus_state(workspace: Path) -> dict[str, Any]:
                 and isinstance(counters.get("verifier_runs"), int)
                 and counters["verifier_runs"] > 0
             ):
+                worker_verified_candidate_ids.add(candidate_id)
+            elif isinstance(candidate_id, str) and candidate_id in candidates_with_iterations:
+                # Upstream no longer reliably populates counters.verifier_runs
+                # on the session record after the fork rework; settled
+                # iterations are equivalent evidence of worker verifier runs.
                 worker_verified_candidate_ids.add(candidate_id)
             if is_bound:
                 worker_intervals.extend(intervals)

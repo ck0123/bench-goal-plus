@@ -84,7 +84,7 @@ from experiments.benchmark_compare.host_search_guard import prepend_to_path  # n
 from experiments.openevolve_compare.experiment import (  # noqa: E402
     PUBLIC_GATE_SELECTION_RULE,
     DEFAULT_REASONING_EFFORT,
-    SHARED_CACHE_SPEC_TEMPLATE,
+    SHARED_KNOWLEDGE_SPEC_TEMPLATE,
     PI_APIS,
     PI_API_KEY_ENV,
     PI_PROVIDER_ID,
@@ -2116,8 +2116,8 @@ def execute_plain(
             if bool(
                 (manifest.get("goal_plus_config") or {}).get("shared_cache_enabled")
             ):
-                lane_environment["GOAL_PLUS_CONTROLLER_SHARED_CACHE"] = json.dumps(
-                    SHARED_CACHE_SPEC_TEMPLATE
+                lane_environment["GOAL_PLUS_CONTROLLER_SHARED_KNOWLEDGE"] = json.dumps(
+                    SHARED_KNOWLEDGE_SPEC_TEMPLATE
                 )
             command = [
                 args.pi_bin,
@@ -2471,6 +2471,18 @@ def execute_goal_plus(
         seconds=budget["wall_time_seconds"]
     )
     environment["GOAL_PLUS_OUTER_DEADLINE_AT"] = deadline.isoformat()
+    # Floor for main-initiated candidate invocation timeouts: shorter values
+    # kill the worker transport mid-attempt and force session replacement.
+    # The pi extension clamps goal_plus_session_run to at least this value.
+    environment["GOAL_PLUS_SESSION_RUN_TIMEOUT_FLOOR"] = str(
+        int(budget["worker_runtime_seconds"]) + 120
+    )
+    # Expected initial candidate count: the pi extension checks that
+    # start_batch materializes at least this many candidates in one call,
+    # catching the "split proposals across calls" model failure immediately.
+    environment["GOAL_PLUS_EXPECTED_CANDIDATES"] = str(
+        budget["concurrency"]
+    )
     environment["GOAL_PLUS_VERIFIER_TMPDIR"] = str(
         run_dir / "controller-runtime/goal-plus"
     )
@@ -2537,8 +2549,8 @@ def execute_goal_plus(
         if bool(
             (manifest.get("goal_plus_config") or {}).get("shared_cache_enabled")
         ):
-            environment["GOAL_PLUS_CONTROLLER_SHARED_CACHE"] = json.dumps(
-                SHARED_CACHE_SPEC_TEMPLATE
+            environment["GOAL_PLUS_CONTROLLER_SHARED_KNOWLEDGE"] = json.dumps(
+                SHARED_KNOWLEDGE_SPEC_TEMPLATE
             )
         environment["GOAL_PLUS_PI_MODEL"] = qualified_model
         command = [

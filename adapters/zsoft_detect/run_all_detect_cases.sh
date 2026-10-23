@@ -37,7 +37,7 @@ resolve_work_dir() {
 readonly WORK_DIR="$(resolve_work_dir)"
 [[ -n "$WORK_DIR" && -f "$WORK_DIR/scripts/bench.py" ]] \
     || { printf '错误: 无法定位 bench-goal-plus 仓库根 (设置 BENCH_GOAL_PLUS_WORK_DIR 可覆盖)\n' >&2; exit 1; }
-readonly CAMPAIGN_BASE="runs/detect-glm-withcache-withskill-k4"
+readonly CAMPAIGN_BASE="${DETECT_CAMPAIGN_BASE:-runs/detect-deepseek-v4.1-flash-1017-k4}"
 readonly ZSOFT_CHECKOUT="$WORK_DIR/third_party/zsoft-bench"
 readonly DETECT_ROOT="$ZSOFT_CHECKOUT/benchmarks/vulnerability/zsoft-detect"
 readonly PROJECTS_DIR="$DETECT_ROOT/projects"
@@ -88,22 +88,28 @@ usage() {
   DETECT_FETCH_MISSING_SOURCES  缺少源码时是否自动获取，1（默认）或 0
   DETECT_MAX_INFRA_ATTEMPTS     基础设施失败最大尝试次数
   DETECT_PROVIDER               模型提供方:deepseek(默认)或 glm(智谱 OpenAI 兼容 API)
-  DETECT_MODEL                  模型 id,默认按提供方:deepseek-v4-flash / glm-4.6
+  DETECT_MODEL                  模型 id,默认按提供方:DeepSeek-V4.1-Flash-1017 / glm-4.6
   DETECT_PI_API                 Pi 线协议:openai-completions(默认)或 anthropic-messages
                                 (例:z.ai 的 /api/anthropic 通道走 anthropic-messages)
   GLM_API_KEY                   DETECT_PROVIDER=glm 时的凭据(未设置则交互输入)
   GLM_BASE_URL                  glm API base,默认 https://open.bigmodel.cn/api/paas/v4
-  BENCH_GOAL_PLUS_SOURCE_DIR    外部 goal-plus 检出(与 EXPECTED_REF 一起做启动前校验)
-  BENCH_GOAL_PLUS_EXPECTED_REF  期望的 goal-plus 分支/ref,如 feat/shared-plane-component
+  DEEPSEEK_BASE_URL             deepseek 兼容 API base,默认 http://113.46.219.251:8080/v1
+  BENCH_GOAL_PLUS_SOURCE_DIR    外部 goal-plus 检出;设置后直接使用该目录的当前
+                                HEAD(要求工作树干净)
+  BENCH_GOAL_PLUS_EXPECTED_REF  可选:期望的 goal-plus 分支/ref。设置时 HEAD 必须
+                                精确匹配(可复现实验);不设置则不做 hash 校对
   DETECT_STATUS_INTERVAL_SECONDS 实验运行心跳间隔，默认 60 秒
   DETECT_SHARED_CACHE           1 时为 Goal Plus 运行开启 shared_cache 事实面与
                                 LLM verifier 逐 finding 路径可行性分析（默认 0）
   DETECT_SKILL                  1 时把 adapter 的 task-local Skills（如
                                 path-validation）拷入 run workspace 供 worker
                                 使用（默认 0）
+  DETECT_CAMPAIGN_BASE          campaign 输出根目录（相对 WORK_DIR），默认
+                                runs/detect-deepseek-v4.1-flash-1017-k4；新实验请
+                                指向独立目录，如 runs/<experiment-label>
 
 实验合同:
-  默认配置为 provider=deepseek model=deepseek-v4-flash、reasoning=high、T=1800、K=4、C=1、R=1。
+  默认配置为 provider=deepseek model=DeepSeek-V4.1-Flash-1017、base=http://113.46.219.251:8080/v1、reasoning=high、T=1800、K=4、C=1、R=1。
   detect 搜索过程中只使用公开格式校验；不查看 F1，也不提前终止。
   所有 agent 退出且收尾完成后，控制器对合规提交评分；final-eval 记录最高 F1。
   F1 同分时选择 candidate ID 最小者，同一 candidate 选择较晚 iteration。
@@ -361,8 +367,10 @@ case "$DETECT_PROVIDER" in
     deepseek)
         PROVIDER_KEY_ENV="DEEPSEEK_API_KEY"
         PROVIDER_BASE_ENV="DEEPSEEK_BASE_URL"
-        PROVIDER_BASE_DEFAULT="https://api.deepseek.com"
-        PROVIDER_MODEL_DEFAULT="deepseek-v4-flash"
+        # This endpoint is OpenAI-compatible. Keep the key in the environment;
+        # never persist credentials in this script or campaign manifests.
+        PROVIDER_BASE_DEFAULT="http://113.46.219.251:8080/v1"
+        PROVIDER_MODEL_DEFAULT="DeepSeek-V4.1-Flash-1017"
         ;;
     glm)
         PROVIDER_KEY_ENV="GLM_API_KEY"
@@ -392,8 +400,9 @@ fi
 export "$PROVIDER_BASE_ENV=${!PROVIDER_BASE_ENV:-$PROVIDER_BASE_DEFAULT}"
 unset OPENAI_BASE_URL OPENAI_API_BASE_URL OPENAI_API_BASE
 
-# 启动前校验外部 goal-plus 检出停留在期望 ref 上(如共享平面组件分支),
-# 避免静默回退到不含目标能力的默认运行时。
+# 启动前校验外部 goal-plus 检出身份。EXPECTED_REF 为可选 pin：
+# 设置时 HEAD 必须精确匹配（可复现实验）；未设置时直接使用当前检出，
+# 下游 upstreams 层仍会校验工作树干净并锁定 prepare↔run 一致性。
 if [[ -n "${BENCH_GOAL_PLUS_SOURCE_DIR:-}" && -n "${BENCH_GOAL_PLUS_EXPECTED_REF:-}" ]]; then
     gp_head="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" rev-parse HEAD 2>/dev/null)" \
         || die "BENCH_GOAL_PLUS_SOURCE_DIR 不是可用的 git 检出: $BENCH_GOAL_PLUS_SOURCE_DIR"
@@ -401,7 +410,7 @@ if [[ -n "${BENCH_GOAL_PLUS_SOURCE_DIR:-}" && -n "${BENCH_GOAL_PLUS_EXPECTED_REF
         || die "goal-plus 检出中找不到 ref: $BENCH_GOAL_PLUS_EXPECTED_REF"
     if [[ "$gp_head" != "$gp_want" ]]; then
         gp_branch="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" branch --show-current 2>/dev/null || true)"
-        die "goal-plus 检出 HEAD 与 BENCH_GOAL_PLUS_EXPECTED_REF=$BENCH_GOAL_PLUS_EXPECTED_REF 不一致(当前: ${gp_branch:-detached} $gp_head);请先执行: git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" checkout $BENCH_GOAL_PLUS_EXPECTED_REF"
+        die "goal-plus 检出 HEAD 与 BENCH_GOAL_PLUS_EXPECTED_REF=$BENCH_GOAL_PLUS_EXPECTED_REF 不一致(当前: ${gp_branch:-detached} $gp_head)。二选一: 精确复现请 git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" checkout $BENCH_GOAL_PLUS_EXPECTED_REF;直接使用当前 HEAD 请 unset BENCH_GOAL_PLUS_EXPECTED_REF"
     fi
     status_message "GOAL_PLUS_SOURCE dir=$BENCH_GOAL_PLUS_SOURCE_DIR ref=$BENCH_GOAL_PLUS_EXPECTED_REF commit=$gp_head"
 fi

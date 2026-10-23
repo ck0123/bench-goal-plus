@@ -163,6 +163,7 @@ def _session_worker_intervals_from_binding(
     session: Mapping[str, Any],
     *,
     metadata: Mapping[str, Any],
+    replacement_bound_at: str | None = None,
 ) -> list[dict[str, Any]]:
     """Accept Goal Plus native-rpc sessions that bound workers but omitted dispatches."""
     candidate_id = session.get("candidate_id")
@@ -173,6 +174,17 @@ def _session_worker_intervals_from_binding(
         return []
     started_at = bound_at
     ended_at = session.get("updated_at")
+    # A session replaced mid-run keeps no dispatch receipts and its record is
+    # only flushed at closeout, so updated_at overstates the binding end.
+    # When the next same-candidate session bound, this binding was over.
+    if (
+        isinstance(replacement_bound_at, str)
+        and replacement_bound_at
+        and isinstance(ended_at, str)
+        and ended_at
+        and replacement_bound_at < ended_at
+    ):
+        ended_at = replacement_bound_at
     if not isinstance(ended_at, str) or not ended_at:
         return []
     started = _parse_timestamp(started_at)
@@ -200,7 +212,11 @@ def _session_worker_intervals_from_binding(
     }]
 
 
-def session_worker_intervals(session: Mapping[str, Any]) -> list[dict[str, Any]]:
+def session_worker_intervals(
+    session: Mapping[str, Any],
+    *,
+    replacement_bound_at: str | None = None,
+) -> list[dict[str, Any]]:
     """Use native invocation receipts; allocation and resource release are not execution."""
     harness = session_agent_harness(session)
     if harness is None:
@@ -217,7 +233,9 @@ def session_worker_intervals(session: Mapping[str, Any]) -> list[dict[str, Any]]
             handle=handle,
             dispatches=dispatches,
         )
-    return _session_worker_intervals_from_binding(session, metadata=metadata)
+    return _session_worker_intervals_from_binding(
+        session, metadata=metadata, replacement_bound_at=replacement_bound_at
+    )
 
 
 def frozen_agent_harness(frozen: Mapping[str, Any]) -> Literal["codex", "pi"] | None:

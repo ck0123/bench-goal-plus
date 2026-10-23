@@ -59,8 +59,9 @@ Pi retains public `visible_test_score` feedback; hidden `task_success` is
 controller-only and does not enter Search. Codex profiles require Responses.
 The exact Pi model metadata is projected from the host catalog into the isolated
 runtime. An external Goal Plus checkout can be selected with
-`BENCH_GOAL_PLUS_SOURCE_DIR` and `BENCH_GOAL_PLUS_EXPECTED_REF`; setup validates
-its clean revision and prepare records that identity for execution checks.
+`BENCH_GOAL_PLUS_SOURCE_DIR` (used at its current HEAD; optionally pinned with
+`BENCH_GOAL_PLUS_EXPECTED_REF`); setup validates a clean revision and prepare
+records that identity for execution checks.
 Each Pi cell receives a private writable socket directory under `.tmp/`.
 Isolated candidates use `search_run_verifier` (legacy host alias
 `goal_plus_search_run_verifier`) to execute public tests in the

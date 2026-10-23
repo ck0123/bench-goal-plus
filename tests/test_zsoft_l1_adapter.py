@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,40 @@ class AdapterContractTest(unittest.TestCase):
                 adapter.ZSOFT_ROOT,
                 adapter.BENCHMARK_ROOT / ".forbidden-workspace",
             )
+
+    def test_materialize_keeps_task_skills_opt_in_by_default(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with mock.patch.dict(os.environ):
+            os.environ.pop(adapter.REA_TOOLS_ENV, None)
+            adapter.materialize_workspace(adapter.ZSOFT_ROOT, tmp / "ws")
+        self.assertFalse((tmp / "ws" / ".agents" / "skills").exists())
+        metadata = json.loads((tmp / "ws" / "task.json").read_text())
+        self.assertFalse(metadata["rea_tools"])
+        self.assertEqual(metadata["task_skills"], [])
+
+    def test_materialize_copies_rea_skill_when_tools_enabled(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with mock.patch.dict(
+            os.environ, {adapter.REA_TOOLS_ENV: "1"}
+        ):
+            adapter.materialize_workspace(adapter.ZSOFT_ROOT, tmp / "ws")
+        skill = tmp / "ws" / ".agents" / "skills" / "rea-analysis" / "SKILL.md"
+        self.assertTrue(skill.is_file())
+        self.assertFalse(skill.is_symlink())
+        metadata = json.loads((tmp / "ws" / "task.json").read_text())
+        self.assertTrue(metadata["rea_tools"])
+        self.assertEqual(
+            metadata["task_skills"], [".agents/skills/rea-analysis/SKILL.md"]
+        )
+        tracked = subprocess.run(
+            ["git", "-C", str(tmp / "ws"), "ls-files"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+        self.assertIn(".agents/skills/rea-analysis/SKILL.md", tracked)
 
     def test_git_commit_supports_shared_runtime_checkouts(self) -> None:
         self.assertRegex(
