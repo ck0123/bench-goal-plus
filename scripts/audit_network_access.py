@@ -9,7 +9,10 @@ recorded tool result, and classifies it as ``succeeded``, ``failed`` or
 
 Usage:
     python3 scripts/audit_network_access.py runs/detect-foo [runs/detect-bar ...]
+    python3 scripts/audit_network_access.py runs/benchmark-campaigns-v3
     python3 scripts/audit_network_access.py --json runs/detect-foo
+
+Discovers ``detect-*`` and ``l1-*`` campaign directories under each run dir.
 
 Exit code: 0 = clean, 1 = contamination found, 2 = usage error.
 Output previews are truncated and never include request bodies.
@@ -159,6 +162,7 @@ def audit_campaign(campaign_dir: Path) -> dict[str, object]:
 
 def resolve_campaigns(arguments: list[str]) -> list[Path]:
     campaigns: list[Path] = []
+    prefixes = ("detect-", "l1-")
     for argument in arguments:
         path = Path(argument).expanduser().resolve()
         if not path.is_dir():
@@ -166,9 +170,16 @@ def resolve_campaigns(arguments: list[str]) -> list[Path]:
         if (path / "campaign.json").is_file():
             campaigns.append(path)
         else:
-            found = sorted(child for child in path.glob("detect-*") if (child / "campaign.json").is_file())
+            found = sorted(
+                child
+                for child in path.iterdir()
+                if child.name.startswith(prefixes)
+                and (child / "campaign.json").is_file()
+            )
             if not found:
-                raise SystemExit(f"no detect-* campaigns under {path}")
+                raise SystemExit(
+                    f"no {'/'.join(prefixes)} campaigns under {path}"
+                )
             campaigns.extend(found)
     return campaigns
 

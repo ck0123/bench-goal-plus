@@ -38,6 +38,9 @@ ZSOFT_ROOT = Path(
 BENCHMARK_ROOT = ZSOFT_ROOT / "benchmarks" / "vulnerability" / "zsoft-l1"
 ZSOFT_EVALUATOR_PYTHON = ROOT / ".bench-env" / "venv" / "bin" / "python"
 
+TASK_SKILLS_SOURCE = Path(__file__).resolve().parent / "skills"
+REA_TOOLS_ENV = "BENCH_GOAL_PLUS_ZSOFT_L1_REA_TOOLS"
+
 BENCHMARK_NAME = "zsoft-l1"
 TASK_ID = "sample-asan-crash"
 DEFAULT_TASK_ID = TASK_ID
@@ -160,6 +163,42 @@ def task_metadata(
 ) -> dict[str, Any]:
     path = benchmark_root / "tasks" / task_id / "task.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def copy_task_skills(workspace: Path) -> list[str]:
+    """Copy adapter-owned task-local Skills into the workspace.
+
+    Goal Plus discovers Git-tracked ``.agents/skills/<name>/SKILL.md`` bundles
+    at freeze time and instructs every candidate worker to read them, so the
+    copies must exist before ``init_git`` commits the workspace. The REA
+    analysis skill is opt-in via ``BENCH_GOAL_PLUS_ZSOFT_L1_REA_TOOLS=1`` (the
+    campaign script sets it together with ``BENCH_GOAL_PLUS_REA_ROOT``, which
+    bind-mounts the REA package into the worker sandbox), so default campaigns
+    keep the plain PoC contract.
+    """
+    copied: list[str] = []
+    rea_enabled = os.environ.get(REA_TOOLS_ENV) == "1"
+    if not TASK_SKILLS_SOURCE.is_dir():
+        return copied
+    for skill_dir in sorted(TASK_SKILLS_SOURCE.iterdir()):
+        if skill_dir.name == "rea-analysis" and not rea_enabled:
+            continue
+        skill_file = skill_dir / "SKILL.md"
+        if not skill_dir.is_dir() or not skill_file.is_file():
+            continue
+        if skill_dir.is_symlink() or skill_file.is_symlink():
+            raise AdapterError(
+                f"task-local Skill cannot be a symlink: {skill_dir.name}"
+            )
+        destination = workspace / ".agents" / "skills" / skill_dir.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            skill_dir,
+            destination,
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+        copied.append(f".agents/skills/{skill_dir.name}/SKILL.md")
+    return copied
 
 
 def _task_evaluator_timeout(metadata: dict[str, Any]) -> int:
@@ -311,6 +350,7 @@ def materialize_workspace(
     meta = task_metadata(task_id, benchmark_root)
     subject = meta["subjects"][0]
     ref = subject["versions"][0]["ref"]
+    copied_skills = copy_task_skills(workspace)
     metadata = {
         "schema_version": 1,
         "adapter": "zsoft-l1-poc",
@@ -329,6 +369,8 @@ def materialize_workspace(
         "public_validation_kind": L1_VALIDATION_KIND,
         "primary_metric": GOAL_PLUS_PROCESS_METRIC,
         "direction": DIRECTION,
+        "rea_tools": os.environ.get(REA_TOOLS_ENV) == "1",
+        "task_skills": copied_skills,
     }
     (workspace / "task.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
