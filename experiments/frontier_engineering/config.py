@@ -14,7 +14,8 @@ from bench_goal_plus.upstreams import registered_upstream_source_path
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE_DIR = Path(__file__).resolve().parent / "profiles"
 RUNS_ROOT = ROOT / "runs" / "frontier-engineering"
-UPSTREAM_ROOT = ROOT / "third_party" / "frontier-engineering"
+UPSTREAM_KEY = "frontier_engineering_official"
+UPSTREAM_ROOT = registered_upstream_source_path(UPSTREAM_KEY, repository_root=ROOT)
 GOAL_PLUS_ROOT = registered_upstream_source_path(
     "goal_plus",
     repository_root=ROOT,
@@ -61,7 +62,7 @@ V1_LITE_TASKS: dict[str, TaskContract] = {
         TaskContract(
             "QuantumComputing/task_01_routing_qftentangled",
             "solve.py",
-            "frontier-v1-main",
+            "frontier-quantum",
         ),
         TaskContract(
             "JobShop/abz",
@@ -225,6 +226,11 @@ def validate_profile(profile_id: str, profile: dict[str, Any]) -> None:
             )
     if not isinstance(profile.get("model"), str) or not profile["model"]:
         raise FrontierEngineeringContractError(f"{profile_id}: model is required")
+    spawn_mode = profile.get("goal_plus_spawn_mode", "fresh")
+    if spawn_mode not in {"fresh", "fork"}:
+        raise FrontierEngineeringContractError("goal_plus_spawn_mode must be fresh or fork")
+    if spawn_mode == "fork" and (methods != ["goal-plus-pi"] or profile.get("concurrency", 0) < 2):
+        raise FrontierEngineeringContractError("fork requires Goal Plus Pi with K >= 2")
     pi_provider_config(profile)
     if profile.get("reasoning_effort") not in REASONING_EFFORTS:
         raise FrontierEngineeringContractError(f"{profile_id}: unsupported reasoning_effort")

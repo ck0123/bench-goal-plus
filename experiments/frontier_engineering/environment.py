@@ -11,12 +11,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from bench_runtime_paths import configure_temp_environment
+from bench_runtime_paths import configure_temp_environment, make_preserved_temp_directory
 from bench_goal_plus.upstreams import external_goal_plus_source, registered_upstream_branch
 
 from .config import (
     GOAL_PLUS_ROOT,
     ROOT,
+    UPSTREAM_KEY,
     UPSTREAM_ROOT,
     V1_LITE_TASKS,
     pi_provider_config,
@@ -351,6 +352,15 @@ def local_inventory(profile: dict[str, Any]) -> dict[str, Any]:
             missing_path = str(seed or seed_reference)
             if missing_path not in missing:
                 missing.append(missing_path)
+        if task_id == "QuantumComputing/task_01_routing_qftentangled":
+            for relative in (
+                "benchmarks/_shared/candidate_sandbox.py",
+                "benchmarks/_shared/qiskit_candidate_runner.py",
+                f"benchmarks/{task_id}/verification/utils.py",
+            ):
+                path = UPSTREAM_ROOT / relative
+                if not path.is_file():
+                    missing.append(str(path))
         checks.append(
             {
                 "kind": "task",
@@ -411,7 +421,11 @@ def provision(profile: dict[str, Any]) -> dict[str, Any]:
     environment = configure_temp_environment(os.environ.copy())
     environment["PYTHONNOUSERSITE"] = "1"
     for env_name in env_names:
-        spec = UPSTREAM_ROOT / "scripts/env/specs" / f"{env_name}.json"
+        spec = (
+            Path(__file__).resolve().parent / "runtime-specs/frontier-quantum.json"
+            if env_name == "frontier-quantum"
+            else UPSTREAM_ROOT / "scripts/env/specs" / f"{env_name}.json"
+        )
         command = [
             "python3",
             "scripts/env/ensure_uv_env.py",
@@ -442,6 +456,33 @@ def _runtime_probe(env_name: str, modules: list[str]) -> dict[str, Any]:
         "passed": ok,
         "detail": output or None,
     }
+
+
+def _quantum_diagnostic_probe() -> dict[str, Any]:
+    from . import task_adapter
+
+    destination = make_preserved_temp_directory(
+        prefix="quantum-diagnostics-", namespace="frontier-engineering"
+    )
+    previous = task_adapter.TASK_ID
+    try:
+        task_adapter.configure_task(task_adapter.QUANTUM_TASK)
+        task_adapter.materialize_workspace(UPSTREAM_ROOT, destination / "workspace")
+        ok, output = command_output(
+            ["python3", "task_python.py", "-c",
+             "from qiskit import QuantumCircuit; from qiskit.quantum_info import Statevector; "
+             "from mqt.bench import get_benchmark; from structural_optimizer import optimize_by_local_rewrite; "
+             "assert Statevector.from_instruction(QuantumCircuit(2)).data[0] == 1; "
+             "print('quantum diagnostics OK')"],
+            cwd=destination / "workspace",
+        )
+    except Exception as error:
+        ok, output = False, f"{type(error).__name__}: {error}"
+    finally:
+        task_adapter.configure_task(previous)
+    return {"kind": "agent-diagnostic-runtime", "name": "quantum-workspace-python",
+            "command": "python3 task_python.py", "workspace": str(destination / "workspace"),
+            "details": output, "passed": ok}
 
 
 def _nvidia_driver_probe() -> dict[str, Any]:
@@ -600,7 +641,7 @@ def doctor(
     if "openevolve" in profile["methods"]:
         checks.extend(_openevolve_agent_checks(profile))
         checks.append(_openevolve_config_check(profile))
-    managed_checkouts = [("frontier_engineering", UPSTREAM_ROOT, "main")]
+    managed_checkouts = [(UPSTREAM_KEY, UPSTREAM_ROOT, registered_upstream_branch(UPSTREAM_KEY, repository_root=ROOT))]
     if any(method.startswith("goal-plus-") for method in profile["methods"]):
         external = external_goal_plus_source()
         if external is not None:
@@ -649,6 +690,14 @@ def doctor(
                 "frontier-v1-main", ["numpy", "scipy", "qiskit", "job_shop_lib", "pybullet"]
             )
         )
+    if "frontier-quantum" in required_envs:
+        checks.append(
+            _runtime_probe("frontier-quantum", ["numpy", "scipy", "qiskit", "mqt.bench", "qiskit_qasm3_import"])
+        )
+        checks.append({"kind": "executable", "name": "bwrap", "path": shutil.which("bwrap"),
+                       "passed": shutil.which("bwrap") is not None})
+        if inventory["passed"]:
+            checks.append(_quantum_diagnostic_probe())
     if "frontier-v1-summit" in required_envs:
         checks.append(_runtime_probe("frontier-v1-summit", ["summit"]))
     if profile["doctor_seed_evaluation"] and all(item["passed"] for item in checks):

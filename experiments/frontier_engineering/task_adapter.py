@@ -33,6 +33,7 @@ from adapters.portable import (  # noqa: E402
 from bench_runtime_paths import configure_temp_environment  # noqa: E402
 from experiments.frontier_engineering.config import (  # noqa: E402
     TaskContract,
+    UPSTREAM_KEY,
     V1_LITE_TASKS,
 )
 
@@ -40,7 +41,6 @@ from experiments.frontier_engineering.config import (  # noqa: E402
 CONTROLLER_PATH = Path(__file__).resolve()
 BRIDGE_PATH = Path(__file__).resolve().with_name("evaluator_bridge.py")
 SHELL_PATH = Path(__file__).resolve().with_name("evaluator_shell.sh")
-UPSTREAM_KEY = "frontier_engineering"
 BENCHMARK_NAME = "Frontier-Engineering v1-lite"
 PRIMARY_METRIC = "combined_score"
 DIRECTION = "maximize"
@@ -52,6 +52,48 @@ TASK_ID = "ComputerSystems/MallocLab"
 ARTIFACT_NAME = "mm.c"
 CASE_SET_DESCRIPTION = "Frontier-Engineering v1-lite official UnifiedTask evaluator"
 VERIFIER_TIMEOUT_SECONDS = 300
+QUANTUM_TASK = "QuantumComputing/task_01_routing_qftentangled"
+
+
+def evaluator_inputs(upstream_root: Path, task: TaskContract) -> list[Path]:
+    """Freeze executable scoring and sandbox inputs, not just the outer bridge."""
+    task_dir = upstream_root / "benchmarks" / task.task_id
+    paths = {
+        upstream_root / "frontier_eval/tasks/unified/evaluator/python.py",
+        upstream_root / "frontier_eval/tasks/unified/spec.py",
+        BRIDGE_PATH,
+        SHELL_PATH,
+        CONTROLLER_PATH,
+        *[task_dir / "frontier_eval" / name for name in (
+            "initial_program.txt", "candidate_destination.txt", "eval_command.txt",
+            "copy_files.txt", "readonly_files.txt",
+        )],
+    }
+    paths.update((upstream_root / "frontier_eval/tasks/unified").rglob("*.py"))
+    paths.update((task_dir / "verification").rglob("*.py"))
+    paths.update((task_dir / "tests").glob("case_*.json"))
+    paths.update((task_dir / "frontier_eval").glob("*.txt"))
+    paths.update((task_dir / "frontier_eval").rglob("*.sh"))
+    for relative in metadata_list(task_dir, "agent_files.txt"):
+        path = task_dir / relative
+        if path.is_file():
+            paths.add(path)
+    if task.task_id == QUANTUM_TASK:
+        paths.update((upstream_root / "benchmarks/_shared").glob("*.py"))
+        paths.add(task_dir / "baseline/structural_optimizer.py")
+    return sorted(paths, key=str)
+
+
+def validate_runtime_assets(upstream_root: Path) -> None:
+    if TASK_ID != QUANTUM_TASK:
+        return
+    for relative in (
+        "benchmarks/_shared/candidate_sandbox.py",
+        "benchmarks/_shared/qiskit_candidate_runner.py",
+        f"benchmarks/{QUANTUM_TASK}/verification/utils.py",
+    ):
+        if not (upstream_root / relative).is_file():
+            raise ValueError(f"corrected official Quantum evaluator asset missing: {relative}")
 
 
 def configure_task(task_id: str) -> None:
@@ -144,6 +186,7 @@ def materialize_workspace(upstream_root: Path, workspace: Path) -> dict[str, Any
     task = task_contract()
     upstream_root = upstream_root.expanduser().absolute()
     workspace = workspace.expanduser().absolute()
+    validate_runtime_assets(upstream_root)
     task_dir = upstream_root / "benchmarks" / task.task_id
     initial_relative = safe_relative(
         metadata_scalar(task_dir, "initial_program.txt"), label="initial_program"
@@ -173,6 +216,31 @@ def materialize_workspace(upstream_root: Path, workspace: Path) -> dict[str, Any
     workspace.mkdir(parents=True)
     (workspace / task.artifact_name).write_bytes(seed.read_bytes())
     (workspace / "TASK.md").write_text(task_text(task_dir, task), encoding="utf-8")
+    if task.task_id == QUANTUM_TASK:
+        # A relative command survives the Pi workspace guard and fork worktrees.
+        # Both Plain and GP use the same task interpreter and read-only helper.
+        python = upstream_root / ".venvs" / task.runtime_env / "bin/python"
+        (workspace / "task_python.py").write_text(
+            "\"\"\"Read-only entry to the benchmark's quantum Python runtime.\"\"\"\n"
+            "import os, sys\n"
+            f"python = {str(python)!r}\n"
+            "os.environ['PYTHONPATH'] = os.getcwd() + os.pathsep + os.environ.get('PYTHONPATH', '')\n"
+            "os.execv(python, [python, *sys.argv[1:]])\n",
+            encoding="utf-8",
+        )
+        (workspace / "structural_optimizer.py").write_bytes(
+            (task_dir / "baseline/structural_optimizer.py").read_bytes()
+        )
+        with (workspace / "TASK.md").open("a", encoding="utf-8") as context:
+            context.write(
+                "\n## Local quantum diagnostics\n\n"
+                "Use `python3 task_python.py .tmp/script.py` or `python3 task_python.py -` "
+                "for Qiskit/MQT/Statevector experiments in this workspace. "
+                "This is the same locked runtime used by the evaluator. "
+                "`structural_optimizer.py` is a read-only copy of the official helper. "
+                "Only `solve.py` is editable. Diagnostics do not produce official scores; "
+                "use `python3 evaluate.py` for scoring.\n"
+            )
     (workspace / "AGENTS.md").write_text(
         f"# Frontier-Engineering task rules\n\n- Only edit `{task.artifact_name}`.\n"
         "- Use `python3 evaluate.py` for official feedback.\n"
@@ -192,9 +260,8 @@ def materialize_workspace(upstream_root: Path, workspace: Path) -> dict[str, Any
         ".bench-runtime/\n.gp/\n.codex-log/\n.pi-log/\n__pycache__/\n*.pyc\n",
         encoding="utf-8",
     )
-    evaluator_hash = combined_sha256(
-        [official_evaluator, official_spec, BRIDGE_PATH, SHELL_PATH, *metadata_paths]
-    )
+    frozen_inputs = evaluator_inputs(upstream_root, task)
+    evaluator_hash = combined_sha256(frozen_inputs)
     metadata = {
         "schema_version": 1,
         "adapter": "frontier-engineering-v1-lite-native-task",
@@ -208,6 +275,8 @@ def materialize_workspace(upstream_root: Path, workspace: Path) -> dict[str, Any
         "seed_sha256": sha256_file(seed),
         "evaluator": str(official_evaluator),
         "evaluator_sha256": evaluator_hash,
+        "evaluator_inputs": [str(path) for path in frozen_inputs],
+        "evaluation_protocol": "official-main-unitary" if task.task_id == QUANTUM_TASK else "official-main",
         "primary_metric": PRIMARY_METRIC,
         "direction": DIRECTION,
         "runtime_env": task.runtime_env,
@@ -226,7 +295,10 @@ def evaluate_workspace(workspace: Path, upstream_root: Path, mode: str) -> dict[
     started = time.monotonic()
     workspace = workspace.expanduser().absolute()
     upstream_root = upstream_root.expanduser().absolute()
-    destination, budget = claim_evaluator_call(workspace, mode)
+    # Goal Plus checkpoints ignored Git files with -f; its runtime exclusion
+    # contract covers .tmp, so public feedback must keep bookkeeping there.
+    # An explicit controller GOAL_PLUS_VERIFIER_TMPDIR still takes precedence.
+    destination, budget = claim_evaluator_call(workspace / ".tmp", mode)
     metadata = json.loads((workspace / "task.json").read_text(encoding="utf-8"))
     task = task_contract(str(metadata["task_id"]))
     candidate = workspace / task.artifact_name
@@ -246,7 +318,7 @@ def evaluate_workspace(workspace: Path, upstream_root: Path, mode: str) -> dict[
         raise RuntimeError("pinned Frontier-Engineering checkout changed")
     else:
         task_dir = upstream_root / "benchmarks" / task.task_id
-        pinned_paths = [
+        pinned_paths = evaluator_inputs(upstream_root, task) if "evaluator_inputs" in metadata else [
             upstream_root / "frontier_eval/tasks/unified/evaluator/python.py",
             upstream_root / "frontier_eval/tasks/unified/spec.py",
             BRIDGE_PATH,
@@ -317,6 +389,9 @@ def evaluate_workspace(workspace: Path, upstream_root: Path, mode: str) -> dict[
         "benchmark": "frontier-engineering",
         "suite": "v1-lite",
         "task_id": task.task_id,
+        "evaluation_protocol": metadata.get("evaluation_protocol", "legacy-frozen"),
+        "source_revision": metadata["upstream_commit"],
+        "evaluator_sha256": metadata["evaluator_sha256"],
         "mode": mode,
         "valid": valid,
         "primary_metric": {

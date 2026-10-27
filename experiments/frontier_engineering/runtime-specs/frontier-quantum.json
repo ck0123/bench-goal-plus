@@ -1,0 +1,11 @@
+{
+  "name": "frontier-quantum",
+  "python": "3.12",
+  "requirements": ["frontier_eval/requirements.txt"],
+  "packages": ["mqt.bench==2.3.0", "qiskit==2.3.1", "qiskit-qasm3-import==0.6.0"],
+  "notes": [
+    "Task-specific runtime for QuantumComputing/task_01_routing_qftentangled.",
+    "Uses the corrected official UnifiedTask evaluator, QASM3 candidate transport, and arbitrary-input equivalence gate.",
+    "Separates the quantum task from unrelated optics Qt and robotics CUDA dependencies on ARM64."
+  ]
+}

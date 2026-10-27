@@ -37,6 +37,13 @@ class GoalPlusCommandTests(unittest.TestCase):
         )
         self.assertNotIn(" -- ", command)
 
+        fork_command = render_goal_plus_command(
+            "pi", max_parallel=4, strategy="agent_guided",
+            worker_model="bench-openai/gpt-5.6-sol", spawn_mode="fork",
+        )
+        self.assertIn(" spawn_mode=fork ", fork_command)
+        self.assertNotIn("spawn_mode=fresh", fork_command)
+
     def test_config_matches_manifest_shape(self) -> None:
         self.assertEqual(
             goal_plus_command_config(

@@ -134,7 +134,7 @@
     },
     {
       "id": "frontier-engineering-lite",
-      "display_name": "Frontier-Engineering v1-lite",
+      "display_name": "Frontier-Engineering v1-lite (legacy protocol evidence)",
       "kind": "benchmark",
       "gate_set": "benchmark_search_methods",
       "priority": 3,
@@ -193,12 +193,13 @@
           "evidence/runs/2026-08-07-frontier-engineering-energy-storage-goal-plus-pi/official-report.json"
         ]
       },
-      "next_action": "Complete the registered 100-iteration OpenEvolve EnergyStorage acceptance run, then validate Plain Pi and Goal Plus + Codex on the same CPU task.",
+      "next_action": "Validate the corrected official main protocol through the native runner; legacy fork evidence remains historical and does not qualify the corrected Quantum evaluator or Agent methods.",
       "blockers": [
         "The OpenEvolve paper-protocol path is registered as partial until its 100-iteration EnergyStorage campaign is archived as method-specific evidence.",
         "The native Plain Codex and Goal Plus + Pi K=1 EnergyStorage paths have real E2E evidence, but Plain Pi and Goal Plus + Codex still require separate real E2E evidence.",
         "K>1 and matched-method comparisons remain unproven; current native profiles use K=1 and C=1.",
-        "The full 10-task v1-lite profile includes CUDA-backed RobotArm and remains explicit opt-in; default inventory and campaigns use the 9-task CPU subset."
+        "The full 10-task v1-lite profile includes CUDA-backed RobotArm and remains explicit opt-in; default inventory and campaigns use the 9-task CPU subset.",
+        "Corrected official-main Quantum readiness is separate from historical v1-arxiv-derived evidence; requires isolated verifier and method-specific acceptance."
       ]
     },
     {
@@ -759,6 +760,66 @@
         "The native SWE-agent acceptance path still lacks a real-model Linux+bwrap campaign; macOS OrbStack is not the upstream native host.",
         "The upstream SWE-agent launcher does not expose an explicit reasoning-effort control, so its results are not yet eligible for reasoning-matched method comparisons.",
         "A clean source checkout for the pinned project revision and the clean pinned SWE-agent 1.0.1 checkout must be locally inventoried before execution."
+      ]
+    },
+    {
+      "id": "frontier-engineering-quantum-official",
+      "display_name": "Frontier-Engineering Quantum (corrected official main)",
+      "kind": "benchmark",
+      "gate_set": "benchmark_search_methods",
+      "priority": 3,
+      "repositories": [
+        {
+          "role": "official-benchmark-and-evaluator",
+          "upstream_url": "https://github.com/Einsia/Frontier-Engineering",
+          "fork_url": "https://github.com/Einsia/Frontier-Engineering",
+          "tracking_branch": "main",
+          "license": "NOASSERTION"
+        }
+      ],
+      "data_url": "https://github.com/Einsia/Frontier-Engineering",
+      "local_path": "third_party/frontier-engineering-official",
+      "docker_requirement": "not_required",
+      "docker_scope": "Linux ARM64 Quantum routing only, using managed uv runtimes and the unchanged official QASM3/bubblewrap candidate runner. Other v1-lite tasks are not qualified by this evidence.",
+      "stages": {
+        "source_forked": "partial",
+        "environment": "pass",
+        "official_verifier": "pass",
+        "native_baseline": "pass",
+        "openevolve": "partial",
+        "plain_codex": "partial",
+        "goal_plus_codex": "partial",
+        "plain_pi": "pass",
+        "goal_plus_pi": "pass",
+        "matched_baseline": "todo",
+        "campaign_ready": "partial"
+      },
+      "evidence": [
+        "evidence/environment/2026-10-27-frontier-quantum-official-protocol.json",
+        "evidence/runs/2026-10-27-frontier-quantum-official-smokes.json",
+        "evidence/runs/2026-10-27-frontier-quantum-official-adaptation.md",
+        "evidence/runs/2026-10-27-frontier-quantum-official-1h.json"
+      ],
+      "stage_evidence": {
+        "official_verifier": [
+          "evidence/environment/2026-10-27-frontier-quantum-official-protocol.json"
+        ],
+        "native_baseline": [
+          "evidence/environment/2026-10-27-frontier-quantum-official-protocol.json"
+        ],
+        "plain_pi": [
+          "evidence/runs/2026-10-27-frontier-quantum-official-1h.json"
+        ],
+        "goal_plus_pi": [
+          "evidence/runs/2026-10-27-frontier-quantum-official-1h.json"
+        ]
+      },
+      "next_action": "Use the accepted one-hour Plain Pi and Goal Plus Pi fork profiles for new experiments; establish matched wall-time coverage separately before performance comparisons.",
+      "blockers": [
+        "The official source is used unchanged rather than maintaining a new benchmark-specific fork.",
+        "Short smokes remain diagnostic and partial. One-hour Plain Pi and Goal Plus Pi fork lifecycle acceptance passed; Plain naturally ended after 676.8 seconds, so wall-time-matched performance comparison remains unproven.",
+        "Codex and OpenEvolve methods and other tasks have not been accepted on this corrected source.",
+        "The full repository suite has unresolved failures outside Frontier; focused Frontier tests and official evaluator controls pass."
       ]
     }
   ]

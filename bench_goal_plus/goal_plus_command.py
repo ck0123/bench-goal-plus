@@ -82,6 +82,7 @@ def render_goal_plus_command(
     workspace_provider: GoalPlusWorkspaceProvider = "git_worktree",
     promotion_mode: GoalPlusPromotionMode = "apply",
     mode: Literal["autonomous", "probe"] = "autonomous",
+    spawn_mode: Literal["fresh", "fork"] = "fresh",
 ) -> str:
     """Render ``$goal-plus``/``/goal-plus`` plus leading typed config tokens."""
 
@@ -93,6 +94,7 @@ def render_goal_plus_command(
         workspace_provider=workspace_provider,
         promotion_mode=promotion_mode,
         mode=mode,
+        spawn_mode=spawn_mode,
     )
     tokens = [goal_plus_entrypoint(agent_harness)]
     tokens.extend(f"{name}={value}" for name, value in config.items())

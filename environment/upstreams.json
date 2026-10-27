@@ -112,6 +112,11 @@
         "/benchmarks/vulnerability/zsoft-l1/",
         "/benchmarks/vulnerability/zsoft-detect/"
       ]
+    },
+    "frontier_engineering_official": {
+      "repository": "https://github.com/Einsia/Frontier-Engineering.git",
+      "checkout_dir": "frontier-engineering-official",
+      "tracking_branch": "main"
     }
   }
 }

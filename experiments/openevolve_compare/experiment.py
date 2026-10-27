@@ -950,8 +950,14 @@ def render_goal(
     outer_deadline_at: str | None = None,
     public_feedback_command: str = "python3 evaluate.py",
     candidate_judge_mode: str = MODE_OFF,
+    spawn_mode: str = "fresh",
+    continuous_parallelism: bool = False,
 ) -> str:
     """Add the host-native Goal Plus entrypoint and config to the common prompt."""
+    if spawn_mode not in {"fresh", "fork"}:
+        raise ValueError("spawn_mode must be fresh or fork")
+    if spawn_mode == "fork" and (agent_harness != "pi" or concurrency < 2):
+        raise ValueError("fork requires Pi with K >= 2")
     if evaluation_mode is None:
         evaluation_mode = (
             "blind" if controller_only_official_evaluation else "visible"
@@ -989,6 +995,7 @@ def render_goal(
         agent_harness,
         max_parallel=concurrency,
         strategy="agent_guided",
+        spawn_mode=spawn_mode,
         worker_model=worker_model,
         annotator_model=(
             None if candidate_judge_mode != MODE_OFF else worker_model
@@ -1014,6 +1021,18 @@ def render_goal(
             "AtomicPlan before each material edit or evaluator call and close an accepted plan "
             f"with its verifier result. {mode_behavior}"
         )
+    context_contract = (
+        '- Set `strategy.initial_context="fresh"`; candidates start from the frozen source.\n'
+        if spawn_mode == "fresh" else
+        '- Set `strategy.initial_context="fork"`. This is the preparation turn of the full '
+        'task Goal. Complete freeze/create/plan/start_batch with exactly K proposals. '
+        'Do not call goal_plus_search_fork or any candidate session tool in this turn. '
+        'After the batch succeeds, wait at least one second, then call goal_plus_set_status '
+        'with status=blocked, reason=fork_checkpoint_ready, evidence=[{"run_id":"<actual run ID>"}]. '
+        'Immediately end this turn. The host continues this same Main session at its completed '
+        'native checkpoint. On resume, call goal_plus_search_fork for the existing run, '
+        'then start its bound candidate sessions. Do not recreate the Search or batch.\n'
+    )
     initial_launch_contract = (
         "- After `goal_plus_search_plan_next`, call `goal_plus_search_start_batch` "
         "once to materialize the candidates. Start each candidate with "
@@ -1024,6 +1043,32 @@ def render_goal(
         "while useful work and time remain. Close "
         "sessions with `goal_plus_session_close` before final selection or host closeout.\n"
     )
+    if spawn_mode == "fork":
+        initial_launch_contract = (
+            "- Only after the preparation handoff and explicit resume, call "
+            "goal_plus_search_fork and start all returned sessions before waiting. "
+            "Use goal_plus_session_wait_any (timeout_seconds <= 300). When one returns, "
+            "review its durable Evidence and continue the same session with a new call_id "
+            "while other workers run and useful exploration time remains.\n"
+        )
+    if continuous_parallelism:
+        initial_launch_contract += (
+            f"- Maintain {concurrency} live candidate invocations throughout exploration. "
+            "Use working windows of about 5-10 minutes, with time for verification; "
+            "workers choose their own experiment/turn cadence within each window. "
+            "When any call returns, review its Evidence and immediately issue a new "
+            "session_run call_id for the SAME candidate and session before waiting "
+            "for other lanes. Do not sum previous invocation runtimes against the "
+            "next invocation's budget. The outer deadline alone limits cumulative "
+            "exploration. A valid/improved score or a finished invocation does not "
+            "satisfy an open-ended optimization objective. Continue exploring until "
+            f"the outer deadline minus {closeout_seconds} seconds, then settle all "
+            "calls and select/promote. Use actual UTC, never invocation counts or "
+            "requested working windows, to decide whether that deadline has arrived. "
+            "Do not interrupt, stop, or close healthy sessions before then. "
+            "Earlier termination requires user stop/pause "
+            "or a genuine dependency blocker; do not invent a success threshold.\n"
+        )
     minimum_planning = (
         f"- Exploration target: about {worker_min_runtime_seconds} seconds per worker "
         "and at least one worker verifier result, subject to the remaining deadline. "
@@ -1075,7 +1120,9 @@ def render_goal(
     worker_verification_text = (
         "- Each candidate worker must submit its own final process verifier result. After a "
         "worker returns with that durable result, do not run a duplicate parent-side process "
-        "verification for the same candidate; wait for all workers before closeout.\n"
+        "verification for the same artifact. Review the result and immediately resume that "
+        "same candidate/session while the other workers continue; do not wait for the whole "
+        "batch. Only AFTER exploration ends, settle all remaining calls before closeout.\n"
     )
     early_stop_text = ""
     if early_stop_contract is not None:
@@ -1115,7 +1162,7 @@ def render_goal(
             "- Honor every leading typed command field in the SearchSpec.\n"
             "- Set `strategy.inner_agent=\"autoresearch\"`.\n"
             + '- Set `strategy.orchestration_mode="parallel_loops"`; set `strategy.selection.ranking_keys=["hard_score"]` and `ranking_tolerance=[0.0]`. Do not use `metric_name` as a ranking key.\n'
-            + "- Set `strategy.initial_context=\"fresh\"` — candidates start from the frozen source; do not use fork spawn mode (the benchmark host spawns workers by session RPC and has no Main checkpoint to fork).\n"
+            + context_contract
             + "- Use the Goal's linked Search lifecycle for this optimization.\n"
             + "- Set `strategy.config.global_evidence_mode=\"manual\"` so every worker can "
             "read settled public-verifier Evidence from the other candidates as reference.\n"
@@ -1206,7 +1253,7 @@ def render_goal(
         "- Honor every leading typed command field in the SearchSpec.\n"
         "- Set `strategy.inner_agent=\"autoresearch\"`.\n"
         + '- Set `strategy.orchestration_mode="parallel_loops"`; set `strategy.selection.ranking_keys=["hard_score"]` and `ranking_tolerance=[0.0]`. Do not use `metric_name` as a ranking key.\n'
-        + "- Set `strategy.initial_context=\"fresh\"` — candidates start from the frozen source; do not use fork spawn mode (the benchmark host spawns workers by session RPC and has no Main checkpoint to fork).\n"
+        + context_contract
         + "- Use the Goal's linked Search lifecycle for this optimization.\n"
         + (
             "- Set top-level `shared_dir.enabled=true`.\n"
@@ -1224,8 +1271,10 @@ def render_goal(
             else ""
         )
         + f"- `strategy.worker_budget.max_runtime_seconds={dispatch_seconds}` and "
-        "`strategy.worker_budget.on_exceed=\"interrupt\"`; continue the same candidate "
-        "lineages while useful work and outer time remain.\n"
+        "`strategy.worker_budget.on_exceed=\"interrupt\"`. This is a PER-INVOCATION limit, "
+        "not a cumulative candidate/session lifetime: previous calls do not consume the "
+        "next call's allowance. Continue the same candidate lineages with new call_ids, "
+        "bounded by the remaining outer exploration time.\n"
         + minimum_planning
         + "- Keep `strategy.worker_launch.model` aligned with "
         "`command_config.workers` and set "
@@ -3243,6 +3292,7 @@ def run_controlled(
     hard_kill_grace_seconds: int,
     recorded_command: list[str] | None = None,
     stop_predicate: Callable[[], bool] | None = None,
+    append_output: bool = False,
 ) -> dict[str, Any]:
     started_at = utc_now()
     started = time.monotonic()
@@ -3251,7 +3301,8 @@ def run_controlled(
     early_stop_triggered = False
     hard_killed = False
     controller_interrupted = False
-    with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
+    output_mode = "a" if append_output else "w"
+    with stdout_path.open(output_mode) as stdout, stderr_path.open(output_mode) as stderr:
         process = subprocess.Popen(
             command,
             cwd=cwd,

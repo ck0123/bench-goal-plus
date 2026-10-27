@@ -70,7 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({
             "schema_version": 1,
             "runtime_sources": {"goal_plus": runtime_source()},
-            "runtime_configuration": {"pi_provider": pi_provider_config(resolved)},
+            "runtime_configuration": {"pi_provider": pi_provider_config(resolved),
+                                      "goal_plus_spawn_mode": resolved.get("goal_plus_spawn_mode", "fresh")},
         }))
         return 0
     if args.command in {"provision", "doctor", "prepare"}:

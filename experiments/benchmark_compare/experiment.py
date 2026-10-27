@@ -310,6 +310,7 @@ PI_MAIN_TOOL_SHIM = (
 class PrepareConfig:
     benchmark: str
     method: str
+    goal_plus_spawn_mode: str = "fresh"
     task_id: str | None = None
     shared_dir: bool = False
     shared_cache: bool = False
@@ -363,6 +364,7 @@ def add_runtime_prepare_arguments(
     parser.add_argument("--pi-provider-id", default=PI_PROVIDER_ID)
     parser.add_argument("--pi-api", choices=PI_APIS, default="openai-responses")
     parser.add_argument("--pi-api-key-env", default=PI_API_KEY_ENV)
+    parser.add_argument("--goal-plus-spawn-mode", choices=("fresh", "fork"), default="fresh")
     parser.add_argument("--shared-dir", action="store_true")
     parser.add_argument("--shared-cache", action="store_true")
     parser.add_argument(
@@ -696,6 +698,11 @@ def prepare(args: argparse.Namespace) -> int:
         module_name=getattr(args, "adapter_module", None),
     )
     validate_controller_only_method(args.method)
+    spawn_mode = getattr(args, "goal_plus_spawn_mode", "fresh")
+    if spawn_mode not in {"fresh", "fork"}:
+        raise ValueError("goal_plus_spawn_mode must be fresh or fork")
+    if spawn_mode == "fork" and (args.method != "goal-plus-pi" or args.concurrency < 2):
+        raise ValueError("fork requires Goal Plus Pi with K >= 2")
     is_sky = sky_backend.is_method(args.method)
     condition = resolve_condition(
         method=args.method,
@@ -875,6 +882,12 @@ def prepare(args: argparse.Namespace) -> int:
         ):
             require_goal_plus_runtime_capabilities(run_dir)
         task_text = (workspace / "TASK.md").read_text()
+        parallel_execution = (
+            {"mode": "continuous", "max_idle_seconds": 180,
+             "invocation_budget_scope": "per_invocation"}
+            if agent_harness == "pi" and args.concurrency > 1
+            and GOAL_PLUS_EARLY_STOP_CONTRACT is None else None
+        )
         goal_prompt = render_goal(
             task_text=task_text,
             public_feedback_command=PUBLIC_FEEDBACK_COMMAND,
@@ -886,6 +899,8 @@ def prepare(args: argparse.Namespace) -> int:
             closeout_seconds=args.soft_closeout_seconds,
             concurrency=args.concurrency,
             agent_harness=agent_harness,
+            spawn_mode=spawn_mode,
+            continuous_parallelism=parallel_execution is not None,
             worker_model=worker_model,
             reasoning_effort=args.reasoning_effort,
             worker_runtime_seconds=args.worker_runtime_seconds,
@@ -932,6 +947,7 @@ def prepare(args: argparse.Namespace) -> int:
             "command_config": goal_plus_command_config(
                 max_parallel=args.concurrency,
                 strategy="agent_guided",
+                spawn_mode=spawn_mode,
                 worker_model=worker_model,
                 annotator_model=(
                     None if candidate_judge["mode"] != MODE_OFF else worker_model
@@ -945,6 +961,7 @@ def prepare(args: argparse.Namespace) -> int:
             ),
             "agent_harness": agent_harness,
             "runtime_provider": "direct",
+            "parallel_execution": parallel_execution,
             "worker_model": worker_model,
             "metric_name": GOAL_PLUS_PROCESS_METRIC,
             "metric_direction": DIRECTION,
@@ -1095,6 +1112,8 @@ def prepare(args: argparse.Namespace) -> int:
                     in {
                         "evaluator",
                         "evaluator_sha256",
+                        "evaluator_inputs",
+                        "evaluation_protocol",
                         "source_revision",
                         "suite",
                     }
@@ -1148,7 +1167,11 @@ def prepare(args: argparse.Namespace) -> int:
 
 
 def evaluator_budget(workspace: Path) -> dict[str, Any]:
-    return load_json(workspace / ".bench-runtime/budget.json")
+    local_scratch_budget = workspace / ".tmp/.bench-runtime/budget.json"
+    return load_json(
+        local_scratch_budget if local_scratch_budget.is_file()
+        else workspace / ".bench-runtime/budget.json"
+    )
 
 
 def evaluate(
@@ -2498,7 +2521,14 @@ def execute_goal_plus(
             ),
             api_base=None if is_pi else args.api_base,
         )
+    spawn_mode = prepared_goal_config.get("command_config", {}).get("spawn_mode", "fresh")
+    parallel_execution = prepared_goal_config.get("parallel_execution")
+    if parallel_execution:
+        exploration_deadline = deadline - timedelta(seconds=budget["soft_closeout_seconds"])
+        environment["BENCH_GOAL_PLUS_EXPLORATION_DEADLINE_AT"] = exploration_deadline.isoformat()
     prompt = render_goal(
+        spawn_mode=spawn_mode,
+        continuous_parallelism=parallel_execution is not None,
         task_text=(workspace / "TASK.md").read_text(),
         public_feedback_command=PUBLIC_FEEDBACK_COMMAND,
         artifact_name=ARTIFACT_NAME,
@@ -2571,6 +2601,8 @@ def execute_goal_plus(
             "--no-skills",
             "--no-prompt-templates",
             "--no-context-files",
+            *(["--extension", str(ROOT / "bench_goal_plus/pi_parallel_extension.mjs")]
+              if parallel_execution else []),
             prompt,
         ]
         stdin_text = None
@@ -2594,6 +2626,11 @@ def execute_goal_plus(
         budget, controller_only
     )
     bind_goal_plus_environment(environment, run_dir)
+    agent_started = time.monotonic()
+    agent_deadline = agent_started + min(
+        agent_wall_time_seconds,
+        max(0, (deadline - datetime.now(timezone.utc)).total_seconds()),
+    )
     control = run_controlled(
         command,
         cwd=workspace,
@@ -2601,7 +2638,7 @@ def execute_goal_plus(
         stdin_text=stdin_text,
         stdout_path=run_dir / "events.jsonl",
         stderr_path=run_dir / "stderr.log",
-        wall_time_seconds=agent_wall_time_seconds,
+        wall_time_seconds=max(0, agent_deadline - time.monotonic()),
         hard_kill_grace_seconds=budget["hard_kill_grace_seconds"],
         recorded_command=recorded_command,
         stop_predicate=(
@@ -2610,6 +2647,67 @@ def execute_goal_plus(
             else None
         ),
     )
+    if is_pi and spawn_mode == "fork" and control.get("returncode") == 0 and not any(
+        control.get(flag) for flag in ("deadline_reached", "early_stop_triggered", "controller_interrupted")
+    ):
+        preparation_control = dict(control)
+        remaining = agent_deadline - time.monotonic()
+        probe = None
+        if remaining > 1:
+            try:
+                probe = subprocess.run(
+                    [environment["GOAL_PLUS_PYTHON"], "-I", str(ROOT / "bench_goal_plus/pi_fork.py"),
+                     "--root", str(workspace / ".gp"), "--sessions", str(run_dir / "pi-main-session")],
+                    cwd=workspace, env=environment, capture_output=True, text=True,
+                    timeout=min(30, remaining),
+                )
+            except subprocess.TimeoutExpired:
+                control["fork_preparation_error"] = "fork checkpoint admission timed out"
+                control["result_incomplete_reason"] = "fork preparation checkpoint was rejected"
+        remaining = agent_deadline - time.monotonic()
+        if remaining <= 1:
+            control["deadline_reached"] = True
+        elif probe is None:
+            pass
+        elif probe.returncode != 0:
+            control["fork_preparation_error"] = probe.stderr.strip()
+            control["result_incomplete_reason"] = "fork preparation checkpoint was rejected"
+        else:
+            ticket = json.loads(probe.stdout)
+            write_json(run_dir / "fork-preparation-resume.json", ticket)
+            resume_environment = {**environment, "GOAL_PLUS_RESUME_EXPECTATION": json.dumps(ticket)}
+            native_files = list((run_dir / "pi-main-session").glob(f"*_{ticket['session_id']}.jsonl"))
+            if len(native_files) != 1:
+                raise RuntimeError("prepared Main session file changed before continuation")
+            # Reuse the same native Main; the extension validates the exact resume ticket.
+            resume_command = command[:-1]
+            identity_index = resume_command.index("--session-id")
+            del resume_command[identity_index:identity_index + 2]
+            resume_command.extend([
+                "--session", str(native_files[0]),
+                "/goal-plus resume Continue the existing prepared fork Search. Call "
+                "goal_plus_search_fork for that run, then launch all bound candidates. "
+                "Do not repeat freeze/create/plan/start_batch. Use wait_any and continue "
+                "returned workers while other calls run. Preserve the original Goal, Search, "
+                "verifiers and outer deadline; finish selection, promotion/apply, final audit "
+                "and reports within that deadline.",
+            ])
+            control = run_controlled(
+                resume_command, cwd=workspace, environment=resume_environment, stdin_text=None,
+                stdout_path=run_dir / "events.jsonl", stderr_path=run_dir / "stderr.log",
+                wall_time_seconds=max(0, agent_deadline - time.monotonic()),
+                hard_kill_grace_seconds=budget["hard_kill_grace_seconds"],
+                recorded_command=[*resume_command[:-1], "<fork-resume-prompt>"],
+                append_output=True,
+                stop_predicate=(
+                    (lambda: goal_plus_early_stop_reached(workspace, early_stop))
+                    if early_stop is not None else None
+                ),
+            )
+            control["fork_preparation_segment"] = preparation_control
+            control["fork_preparation_ticket"] = ticket
+            control["started_at"] = preparation_control["started_at"]
+        control["duration_seconds"] = time.monotonic() - agent_started
     control["agent_wall_time_seconds"] = agent_wall_time_seconds
     control["controller_closeout_reserve_seconds"] = (
         budget["soft_closeout_seconds"] if controller_only else 0
@@ -2765,6 +2863,17 @@ def execute_goal_plus(
     )
     if reason:
         control["result_incomplete_reason"] = reason
+    if parallel_execution:
+        from bench_goal_plus.parallel_execution import audit_pi_parallel_execution
+        audit = audit_pi_parallel_execution(
+            run_dir / "pi-main-session", workspace=workspace, expected_workers=budget["concurrency"],
+            exploration_deadline=exploration_deadline.isoformat(),
+            max_idle_seconds=parallel_execution["max_idle_seconds"],
+        )
+        write_json(run_dir / "parallel-execution.json", audit)
+        control["parallel_execution"] = audit
+        if not audit["passed"]:
+            control["result_incomplete_reason"] = "continuous parallel execution: " + "; ".join(audit["errors"])
     condition_reason = condition_incomplete_reason(
         control["goal_plus"], manifest.get("condition")
     )
@@ -3270,6 +3379,25 @@ def repair_closeout(args: argparse.Namespace) -> int:
         expected_concurrency=budget["concurrency"],
         minimum_worker_verified_candidates=1,
     )
+    parallel_execution = prepared_goal_config.get("parallel_execution")
+    if parallel_execution:
+        from bench_goal_plus.parallel_execution import audit_pi_parallel_execution
+        old_audit = control.get("parallel_execution") or {}
+        exploration_deadline = old_audit.get("exploration_deadline")
+        if exploration_deadline is None:
+            exploration_deadline = (
+                datetime.fromisoformat(control["started_at"])
+                + timedelta(seconds=budget["wall_time_seconds"] - budget["soft_closeout_seconds"])
+            ).isoformat()
+        audit = audit_pi_parallel_execution(
+            run_dir / "pi-main-session", workspace=workspace,
+            expected_workers=budget["concurrency"], exploration_deadline=exploration_deadline,
+            max_idle_seconds=parallel_execution["max_idle_seconds"],
+        )
+        write_json(run_dir / "parallel-execution.json", audit)
+        control["parallel_execution"] = audit
+        if not audit["passed"]:
+            reason = "continuous parallel execution: " + "; ".join(audit["errors"])
     if not control["goal_plus_controller_closeout_repair"].get("completed"):
         reason = (
             "Goal Plus controller closeout failed: "

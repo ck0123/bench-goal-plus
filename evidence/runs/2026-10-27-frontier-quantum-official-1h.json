@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-27",
+  "benchmark": "frontier-engineering",
+  "scope": "Linux ARM64 corrected official Quantum verifier and Plain Pi / Goal Plus Pi fork completed lifecycle acceptance; not a matched comparison",
+  "commands": [
+    "python3 scripts/bench.py check --benchmark frontier-engineering --profile <profile>",
+    "python3 scripts/bench.py setup --benchmark frontier-engineering --profile <profile> --skip-provision",
+    "python3 scripts/bench.py plan --benchmark frontier-engineering --profile <profile>",
+    "python3 scripts/bench.py launch --benchmark frontier-engineering --profile <profile> --skip-provision",
+    "python3 scripts/bench.py status --campaign <campaign>",
+    "python3 scripts/bench.py finish --campaign <campaign>"
+  ],
+  "goal_plus_source": {
+    "repository": "https://github.com/ck0123/muyuan.git",
+    "branch": "fix/frontier-fork-preparation-resume",
+    "commit": "3b2cfa89a7a45b71d2574de9650668003e8f9e61",
+    "plugin_path": "plugins/goal-plus"
+  },
+  "records": [
+    {
+      "campaign": "runs/frontier-engineering/frontier-engineering-quantum-official-gp-pi-sol-1h-k4-fork-c1-r1-20261027",
+      "method": "goal-plus-pi",
+      "state": "completed",
+      "manifest_status": "finished",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "medium",
+      "budget": {
+        "wall_time_seconds": 3600,
+        "live_search_concurrency": 4,
+        "cell_concurrency": 1,
+        "attempts": 1,
+        "soft_closeout_seconds": 120,
+        "hard_kill_grace_seconds": 60,
+        "worker_runtime_seconds": 1800,
+        "worker_min_runtime_seconds": null,
+        "iterations": null
+      },
+      "valid": true,
+      "primary_metric": {
+        "name": "combined_score",
+        "value": 4.021314277529203,
+        "direction": "maximize"
+      },
+      "protocol": "official-main-unitary",
+      "source_commit": "bafa7d53162a3b1f128fec396bbde22fe972bf24",
+      "evaluator_sha256": "471767878afa12ca12c6b7177a6a5dfb726cdbc0b51cfa9f6ff7d8f03cf70284",
+      "duration_seconds": 3602.2668346227147,
+      "deadline_reached": true,
+      "hard_killed": false,
+      "evaluator_calls": {
+        "total_claimed": 31,
+        "setup_claimed_before_t": 1,
+        "process_verifier_commands": 28,
+        "promotion_verifier_commands": 1,
+        "controller_final_claimed": 1,
+        "coverage": "seed + Goal Plus verifier command logs + controller final ledger"
+      },
+      "method_readiness": "pass",
+      "artifacts": {
+        "campaign-summary.json": "77dc2ed1a78c10d50089165f64aeffc0422e5c7b27e8ec16d943a64913514c29",
+        "report.md": "cbb88ebd5ed75b5791cb617cadb308d67eb35708f5ec1b4c6acb702915125dc6",
+        "frontier-engineering-quantum-official-gp-pi-sol-1h-k4-fork-c1-r1-20261027.xlsx": "7f82ab7f9405a3555d1dff072ef277712c0ae631f9d539eb8fab4e5c281c838d"
+      },
+      "parallel_evidence": {
+        "schema_version": 2,
+        "passed": true,
+        "errors": [],
+        "expected_workers": 4,
+        "lanes": [
+          {
+            "run_id": "run_0001",
+            "candidate_id": "c001",
+            "session_ids": [
+              "agent_0001_01"
+            ],
+            "invocation_count": 5,
+            "continuations": 4,
+            "max_idle_seconds": 114.944946
+          },
+          {
+            "run_id": "run_0001",
+            "candidate_id": "c002",
+            "session_ids": [
+              "agent_0001_02"
+            ],
+            "invocation_count": 5,
+            "continuations": 4,
+            "max_idle_seconds": 107.357402
+          },
+          {
+            "run_id": "run_0001",
+            "candidate_id": "c003",
+            "session_ids": [
+              "agent_0001_03"
+            ],
+            "invocation_count": 6,
+            "continuations": 5,
+            "max_idle_seconds": 157.532632
+          },
+          {
+            "run_id": "run_0001",
+            "candidate_id": "c004",
+            "session_ids": [
+              "agent_0001_04"
+            ],
+            "invocation_count": 5,
+            "continuations": 4,
+            "max_idle_seconds": 98.244424
+          }
+        ],
+        "max_allowed_idle_seconds": 180,
+        "coverage": "native Main launch/wait receipts and persisted native dispatches; not API request overlap",
+        "concurrency": {
+          "interval_count": 21,
+          "invalid_interval_count": 0,
+          "candidate_ids": [
+            "c001",
+            "c002",
+            "c003",
+            "c004"
+          ],
+          "max_live_workers": 4
+        }
+      },
+      "worker_verified_candidate_count": 4,
+      "reaudit": {
+        "previous_reason": "continuous parallel execution: unsettled invocation: agent_0001_02/c002-w5; unsettled invocation: agent_0001_03/c003-w6",
+        "backups_preserved": 8,
+        "reaudited_at": "2026-10-27T06:55:27.231839+00:00",
+        "new_model_calls": false,
+        "final_score_recomputed": false
+      }
+    },
+    {
+      "campaign": "runs/frontier-engineering/frontier-engineering-quantum-official-plain-pi-sol-1h-k1-c1-r1-20261027",
+      "method": "plain-pi",
+      "state": "completed",
+      "manifest_status": "finished",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "medium",
+      "budget": {
+        "wall_time_seconds": 3600,
+        "live_search_concurrency": 1,
+        "cell_concurrency": 1,
+        "attempts": 1,
+        "soft_closeout_seconds": 120,
+        "hard_kill_grace_seconds": 60,
+        "worker_runtime_seconds": 1800,
+        "worker_min_runtime_seconds": null,
+        "iterations": null
+      },
+      "valid": true,
+      "primary_metric": {
+        "name": "combined_score",
+        "value": 3.908047300767494,
+        "direction": "maximize"
+      },
+      "protocol": "official-main-unitary",
+      "source_commit": "bafa7d53162a3b1f128fec396bbde22fe972bf24",
+      "evaluator_sha256": "471767878afa12ca12c6b7177a6a5dfb726cdbc0b51cfa9f6ff7d8f03cf70284",
+      "duration_seconds": 676.802542372141,
+      "deadline_reached": false,
+      "hard_killed": false,
+      "evaluator_calls": {
+        "lane_count": 1,
+        "total_claimed": 6,
+        "setup_claimed_before_t": 1,
+        "controller_final_claimed": 1
+      },
+      "method_readiness": "pass",
+      "artifacts": {
+        "campaign-summary.json": "c0e5c5afc86054c048387bd432222d1701e9f49c871dd12251f3d8ef8d51d42d",
+        "report.md": "b3f7c709d7a388c33ac1478dfd8ba90f0ccd8c58eb6174e79ef5fdaf1839d957",
+        "frontier-engineering-quantum-official-plain-pi-sol-1h-k1-c1-r1-20261027.xlsx": "be0ec4b1d7417c3a6abeb7f2041729d68e3b7508793a74f65144f602a689e4fc"
+      },
+      "limitation": "Budget was 3600 seconds, but the native Plain session naturally returned after 676.8 seconds; no continuation was observed."
+    }
+  ],
+  "limitations": [
+    "Plain did not consume the full wall-clock budget; K differs between methods. These runs do not establish a matched performance comparison.",
+    "Worker execution intervals prove actual worker concurrency, not instantaneous API request overlap.",
+    "Other Frontier tasks, hosts and methods require separate acceptance."
+  ],
+  "publication_validation": {
+    "isolated_from_unrelated_work": true,
+    "status_check": "pass",
+    "focused_tests": {
+      "count": 41,
+      "passed": true
+    },
+    "upstream_goal_control_tests": {
+      "count": 26,
+      "passed": true
+    },
+    "full_suite": {
+      "tests": 587,
+      "failures": 16,
+      "errors": 7,
+      "skipped": 1,
+      "passed": false
+    },
+    "same_environment_origin_main_baseline": {
+      "commit": "f460b9181ded593e5337c5e959186ceac8fcdff8",
+      "tests": 578,
+      "failures": 16,
+      "errors": 7,
+      "skipped": 1
+    },
+    "new_failure_cases": []
+  }
+}

@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-27",
+  "benchmark": "frontier-engineering",
+  "scope": "Corrected official Quantum acceptance diagnostics; partial campaigns, not matched comparison",
+  "records": [
+    {
+      "campaign": "runs/frontier-engineering/frontier-engineering-quantum-official-plain-pi-smoke-20261027",
+      "state": "partial",
+      "method": "plain-pi",
+      "budget": {
+        "wall_time_seconds": 300,
+        "live_search_concurrency": 1,
+        "cell_concurrency": 1,
+        "attempts": 1,
+        "soft_closeout_seconds": 60,
+        "hard_kill_grace_seconds": 60,
+        "worker_runtime_seconds": 120,
+        "worker_min_runtime_seconds": null,
+        "iterations": null
+      },
+      "source_commit": "bafa7d53162a3b1f128fec396bbde22fe972bf24",
+      "protocol": "official-main-unitary",
+      "evaluator_sha256": "07deed03452b0ec5c740d7cd01724939862230c662830ec05d194b50b3670c75",
+      "valid": true,
+      "combined_score": 3.8019253949585052,
+      "deadline_reached": true,
+      "returncode": null,
+      "duration_seconds": 300.2011350323446,
+      "incomplete_reason": "plain-pi lanes did not exit cleanly: lane-00",
+      "artifacts": {
+        "campaign-summary.json": "8eeb0411c968c00f919c01c28627376d2670181adb033580148c7cc33f62cb64",
+        "report.md": "b0980497b7128e80055734957353f4e9dd97748df852a8d49c274480c7e84e1d",
+        "frontier-engineering-quantum-official-plain-pi-smoke-20261027.xlsx": "59aaab7c7a8aa59df70cc439c055678c23ae2f12c1ed46368c581431bee436bb"
+      },
+      "method_readiness": "partial",
+      "workspace_runtime_receipt": {
+        "session": "cells/quantumcomputing-task-01-routing-qftentangled-plain-pi-seed-1/lanes/lane-00/pi-session/2026-10-27T03-19-21-865Z_bench-quantumcomputing-task-01-routing-qftentangled-plain-pi-seed-1-lane-00.jsonl",
+        "timestamp": "2026-10-27T03:19:41.813Z",
+        "command": "python3 task_python.py -",
+        "imports": [
+          "qiskit",
+          "mqt.bench"
+        ],
+        "is_error": false,
+        "qiskit_version": "2.3.1",
+        "scope": "Actual Plain Agent tool result; GP runtime entry separately exercised by the derived-worktree regression and doctor, not yet by a completed GP worker in this short smoke."
+      }
+    },
+    {
+      "campaign": "runs/frontier-engineering/frontier-engineering-quantum-official-gp-k4-fork-smoke-20261027",
+      "state": "partial",
+      "method": "goal-plus-pi",
+      "budget": {
+        "wall_time_seconds": 600,
+        "live_search_concurrency": 4,
+        "cell_concurrency": 1,
+        "attempts": 1,
+        "soft_closeout_seconds": 120,
+        "hard_kill_grace_seconds": 60,
+        "worker_runtime_seconds": 180,
+        "worker_min_runtime_seconds": null,
+        "iterations": null
+      },
+      "source_commit": "bafa7d53162a3b1f128fec396bbde22fe972bf24",
+      "protocol": "official-main-unitary",
+      "evaluator_sha256": "07deed03452b0ec5c740d7cd01724939862230c662830ec05d194b50b3670c75",
+      "valid": true,
+      "combined_score": 0.20898716119828828,
+      "deadline_reached": true,
+      "returncode": 143,
+      "duration_seconds": 601.866278172005,
+      "incomplete_reason": "continuous parallel execution: unsettled invocation: agent_0001_01/c001-window1; unsettled invocation: agent_0001_02/c002-window1; unsettled invocation: agent_0001_04/c004-window1; observed 1 worker lanes; expected 4; observed peak 1; expected 4",
+      "artifacts": {
+        "campaign-summary.json": "053e1c890f48b4aaf06f3a353486181863293bdba29f4830277c994bc4be93a8",
+        "report.md": "d6d7d37ee5c488bf6be1ac6aa3398570152eaee5ae4a21524a63b02a8ed121e8",
+        "frontier-engineering-quantum-official-gp-k4-fork-smoke-20261027.xlsx": "638289fb28e86d4242505ea57ff5d6c0c990a14abea55f586fe0317fae3a6025"
+      },
+      "method_readiness": "partial",
+      "fork_preparation_seconds": 377.87951699411497,
+      "parallel_evidence": {
+        "schema_version": 1,
+        "passed": false,
+        "errors": [
+          "unsettled invocation: agent_0001_01/c001-window1",
+          "unsettled invocation: agent_0001_02/c002-window1",
+          "unsettled invocation: agent_0001_04/c004-window1",
+          "observed 1 worker lanes; expected 4",
+          "observed peak 1; expected 4"
+        ],
+        "expected_workers": 4,
+        "exploration_deadline": "2026-10-27T03:26:34.052462+00:00",
+        "steady_phase_started_at": "2026-10-27T03:27:26.128000+00:00",
+        "max_allowed_idle_seconds": 180,
+        "lanes": [
+          {
+            "run_id": "run_0001",
+            "candidate_id": "c003",
+            "session_ids": [
+              "agent_0001_03"
+            ],
+            "invocation_count": 1,
+            "continuations": 0,
+            "max_idle_seconds": 0
+          }
+        ],
+        "concurrency": {
+          "interval_count": 1,
+          "invalid_interval_count": 3,
+          "candidate_ids": [
+            "c003"
+          ],
+          "max_live_workers": 1,
+          "intervals": [
+            {
+              "candidate_id": "c003",
+              "started_at": "2026-10-27T03:27:26.128Z",
+              "ended_at": "2026-10-27T03:28:33.233Z"
+            }
+          ]
+        },
+        "invocations": [
+          {
+            "candidate_id": "c001",
+            "run_id": "run_0001",
+            "session_id": "agent_0001_01",
+            "call_id": "c001-window1",
+            "started_at": "2026-10-27T03:27:11.330Z",
+            "ended_at": null,
+            "start_source": "native_main_launch_receipt"
+          },
+          {
+            "candidate_id": "c002",
+            "run_id": "run_0001",
+            "session_id": "agent_0001_02",
+            "call_id": "c002-window1",
+            "started_at": "2026-10-27T03:27:18.615Z",
+            "ended_at": null,
+            "start_source": "native_main_launch_receipt"
+          },
+          {
+            "candidate_id": "c003",
+            "run_id": "run_0001",
+            "session_id": "agent_0001_03",
+            "call_id": "c003-window1",
+            "started_at": "2026-10-27T03:27:26.128Z",
+            "ended_at": "2026-10-27T03:28:33.233Z",
+            "start_source": "native_main_launch_receipt",
+            "state": "failed"
+          },
+          {
+            "candidate_id": "c004",
+            "run_id": "run_0001",
+            "session_id": "agent_0001_04",
+            "call_id": "c004-window1",
+            "started_at": "2026-10-27T03:27:33.490Z",
+            "ended_at": null,
+            "start_source": "native_main_launch_receipt"
+          }
+        ],
+        "coverage": "native Main launch/wait receipts and worker observations; not API request overlap"
+      },
+      "limitation": "Four bound native worker launches were observed, but the short budget left unsettled invocations and incomplete K=4 interval evidence. Final score is the baseline; not a successful optimization or matched result."
+    }
+  ]
+}

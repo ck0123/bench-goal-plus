@@ -95,7 +95,7 @@
           "runtime_source_command": "runtime-source"
         },
         "openevolve": {
-          "bootstrap_targets": ["frontier_engineering"]
+          "bootstrap_targets": ["frontier_engineering_official"]
         }
       },
       "capabilities": {
@@ -303,7 +303,7 @@
       "id": "frontier-engineering-malloclab",
       "runner": "common-matrix",
       "adapter": "frontier-engineering-malloclab",
-      "bootstrap_targets": ["frontier_engineering"],
+      "bootstrap_targets": ["frontier_engineering_official"],
       "local_asset_inventory": false,
       "docker": {
         "requirement": "not_required",
@@ -316,7 +316,7 @@
       "id": "frontier-engineering",
       "runner": "frontier-engineering-native",
       "adapter": null,
-      "bootstrap_targets": ["frontier_engineering", "goal_plus"],
+      "bootstrap_targets": ["frontier_engineering_official", "goal_plus"],
       "local_asset_inventory": true,
       "default_inventory_profile": "v1-lite-cpu-codex-1h",
       "docker": {
@@ -778,6 +778,46 @@
         },
         "wall_time_seconds": 300,
         "concurrency": 1,
+        "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "frontier-engineering-quantum-routing-plain-pi-sol-smoke",
+      "description": "Corrected official Quantum evaluator and workspace runtime acceptance; diagnostic budget, not a one-hour comparison.",
+      "benchmarks": [
+        "frontier-engineering"
+      ],
+      "profile": "quantum-routing-plain-pi-sol-smoke",
+      "campaign_id_template": "frontier-engineering-quantum-routing-plain-pi-sol-smoke-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": [
+          "plain-pi"
+        ],
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "medium",
+        "wall_time_seconds": 300,
+        "concurrency": 1,
+        "cell_concurrency": 1
+      }
+    },
+    {
+      "id": "frontier-engineering-quantum-routing-goal-plus-pi-sol-k4-fork-smoke",
+      "description": "Corrected official Quantum evaluator and workspace runtime acceptance; diagnostic budget, not a one-hour comparison.",
+      "benchmarks": [
+        "frontier-engineering"
+      ],
+      "profile": "quantum-routing-goal-plus-pi-sol-k4-fork-smoke",
+      "campaign_id_template": "frontier-engineering-quantum-routing-goal-plus-pi-sol-k4-fork-smoke-{timestamp}",
+      "expected_profile": {
+        "task_count": 1,
+        "methods": [
+          "goal-plus-pi"
+        ],
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "medium",
+        "wall_time_seconds": 600,
+        "concurrency": 4,
         "cell_concurrency": 1
       }
     }

@@ -49,6 +49,20 @@ recorded in task metadata and shared by doctor, process and final evaluation.
 Unit tests use small local protocol fixtures; the full upstream checkout and
 seed evaluator remain mandatory doctor gates for a real campaign.
 
+Public feedback keeps its budget and history under `.tmp/.bench-runtime` in
+each workspace. Goal Plus excludes this scratch directory from checkpoints;
+Git ignore rules alone are insufficient because its checkpoint uses `git add -f`.
+An explicit controller verifier directory still takes precedence. The native
+stop path signals the detached Main process group as well as the controller,
+so closeout can terminate owned workers before the original time limit.
+
+Quantum routing uses the task-specific `frontier-quantum` uv environment from
+`runtime-specs/frontier-quantum.json`, provisioned by the upstream env installer.
+It pins Qiskit 2.3.1 and MQT Bench 2.3.0 and preserves the official UnifiedTask
+evaluator. This separates quantum dependencies from the optics Qt and robotics
+packages in `frontier-v1-main`, whose PyQt5 build requires unavailable qmake on
+the ARM64 host. Doctor verifies imports and runs the official seed evaluation.
+
 The EnergyStorage preset is the primary acceptance smoke: its editable policy is
 small, its shipped candidate is feasible, and its official evaluator is fast
 enough for repeated feedback inside a five-minute Agent budget. The JobShop
@@ -72,3 +86,32 @@ the same initial program, verifier, model configuration, and OpenEvolve search
 path with five evolution iterations. It is diagnostic rather than a paper
 result. Completion requires one initial-program record, exactly five evolved
 candidates, a saved best program, and a valid controller final evaluation.
+## Corrected official Quantum protocol
+
+New native campaigns resolve `frontier_engineering_official` from the managed
+upstream registry (`Einsia/Frontier-Engineering`, tracking `main`). The separate
+checkout preserves the old fork and historical runs. The Quantum evaluator is
+called unchanged through UnifiedTask, including QASM3 transport, candidate PID
+namespaces and the official arbitrary-input unitary correctness gate.
+
+Both Plain and GP workspaces provide `python3 task_python.py` with the same
+Qiskit/MQT dependencies and a read-only official structural helper. Doctor
+exercises this entry, then runs the official seed. Prepare freezes the actual
+native verifier, cases and shared candidate runner in addition to the bridge.
+
+Use `quantum-routing-plain-pi-sol-1h` or
+`quantum-routing-goal-plus-pi-sol-1h-k4-fork` through `scripts/bench.py`.
+The registered 5/10-minute smoke presets establish execution evidence only;
+deadline-interrupted runs retain valid scores but remain partial. See the
+benchmark-run Frontier reference for the full lifecycle and protocol boundary.
+
+The tested GP fork dependency and complete reproduction commands are published
+in the [Frontier run reference](../../.agents/skills/benchmark-run/references/benchmarks/frontier-engineering.md#corrected-quantum-profiles).
+It pins Goal Plus commit `3b2cfa89a7a45b71d2574de9650668003e8f9e61` from the
+GitHub `ck0123/muyuan` branch `fix/frontier-fork-preparation-resume`.
+The one-hour Plain and GP fork runs completed with valid scores 3.9080 and 4.0213;
+see the [reviewed acceptance evidence](../../evidence/runs/2026-10-27-frontier-quantum-official-1h.json).
+The revised interval audit joins persisted native dispatches with Main receipts,
+so an unpolled terminal worker does not produce a false partial classification.
+`finish` can re-audit affected legacy partial campaigns while preserving `_bak`
+evidence and all other completion gates.

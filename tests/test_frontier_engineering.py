@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -129,6 +132,10 @@ class FrontierEngineeringTest(unittest.TestCase):
         self.assertEqual(cpu_profile["accelerator_policy"], "cpu-only")
         self.assertEqual(tuple(config.V1_LITE_TASKS), EXPECTED_V1_LITE_TASKS)
         self.assertEqual(config.V1_LITE_CPU_TASKS, EXPECTED_V1_LITE_CPU_TASKS)
+        self.assertEqual(
+            config.V1_LITE_TASKS["QuantumComputing/task_01_routing_qftentangled"].runtime_env,
+            "frontier-quantum",
+        )
         self.assertEqual(
             config.V1_LITE_TASKS["JobShop/abz"].runtime_env,
             "frontier-eval-driver",
@@ -321,6 +328,103 @@ class FrontierEngineeringTest(unittest.TestCase):
             )
             command = observed["command"]
             self.assertIn("frontier-v1-main", command)
+            from goal_plus.infrastructure.artifacts.git import candidate_git_pathspecs, git_changed_files
+            from goal_plus.workspaces import LocalGitWorkspace
+            base = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=workspace, text=True
+            ).strip()
+            checkpoint = LocalGitWorkspace("git_worktree").checkpoint(
+                workspace, "verify candidate", candidate_git_pathspecs()
+            )
+            self.assertIsNotNone(checkpoint)
+            self.assertEqual(git_changed_files(workspace, base, checkpoint.id), ["solution.py"])
+            self.assertEqual(
+                runtime.standalone.evaluator_budget(workspace)["total_claimed"], 1
+            )
+
+    def test_task_bridge_rejects_changed_native_verifier_after_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            upstream, workspace = root / "upstream", root / "workspace"
+            task_id = "JobShop/abz"
+            make_upstream(upstream, task_id, "baseline/init.py")
+            verifier = upstream / "benchmarks" / task_id / "verification/evaluate.py"
+            verifier.parent.mkdir()
+            verifier.write_text("score = 1\n")
+            task_adapter.configure_task(task_id)
+            task_adapter.materialize_workspace(upstream, workspace)
+            verifier.write_text("score = 1000000\n")
+            with self.assertRaisesRegex(RuntimeError, "evaluator inputs changed"):
+                task_adapter.evaluate_workspace(workspace, upstream, "final")
+
+    def test_quantum_diagnostic_python_works_in_a_derived_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            upstream, workspace = root / "upstream", root / "workspace"
+            task_id = "QuantumComputing/task_01_routing_qftentangled"
+            make_upstream(upstream, task_id, "baseline/solve.py")
+            task_dir = upstream / "benchmarks" / task_id
+            for path in (
+                upstream / "benchmarks/_shared/candidate_sandbox.py",
+                upstream / "benchmarks/_shared/qiskit_candidate_runner.py",
+                task_dir / "verification/utils.py",
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# official boundary fixture\n")
+            (task_dir / "baseline/structural_optimizer.py").write_text("VALUE = 42\n")
+            python = upstream / ".venvs/frontier-quantum/bin/python"
+            python.parent.mkdir(parents=True)
+            python.symlink_to(sys.executable)
+            task_adapter.configure_task(task_id)
+            task_adapter.materialize_workspace(upstream, workspace)
+            derived = root / "worker"
+            subprocess.run(["git", "-C", str(workspace), "worktree", "add", "--detach", str(derived)],
+                           check=True, capture_output=True)
+            completed = subprocess.run(
+                [sys.executable, "task_python.py", "-"], cwd=derived,
+                input="from structural_optimizer import VALUE\nprint(VALUE)\n",
+                text=True, capture_output=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.strip(), "42")
+            (derived / ".tmp").mkdir()
+            (derived / ".tmp/probe.py").write_text("from structural_optimizer import VALUE\nprint(VALUE)\n")
+            completed = subprocess.run(
+                [sys.executable, "task_python.py", ".tmp/probe.py"], cwd=derived,
+                text=True, capture_output=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.strip(), "42")
+            self.assertFalse((workspace / ".gp").exists())
+
+    @unittest.skipUnless(os.name == "posix", "requires process groups")
+    def test_stop_reaches_detached_main_and_allows_controller_to_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            code = (
+                "import signal,subprocess,sys\n"
+                "signal.signal(signal.SIGTERM, lambda *_: None)\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True)\n"
+                "print(child.pid,flush=True)\n"
+                "child.wait()\n"
+            )
+            controller = subprocess.Popen(
+                [sys.executable, "-c", code], start_new_session=True,
+                stdout=subprocess.PIPE, text=True,
+            )
+            child_pid = int(controller.stdout.readline())
+            (destination / "controller.json").write_text(json.dumps({"pid": controller.pid}))
+            try:
+                runtime.stop_campaign(destination)
+                controller.wait(timeout=3)
+            finally:
+                for pid in (child_pid, controller.pid):
+                    try:
+                        os.killpg(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                controller.wait()
+                controller.stdout.close()
 
     def test_inventory_is_read_only_and_does_not_duplicate_missing_seed(self) -> None:
         _, profile = config.load_profile("jobshop-codex-smoke")
@@ -468,7 +572,7 @@ class FrontierEngineeringTest(unittest.TestCase):
             if "scripts/repro_env.py" in command
         ]
         self.assertTrue(repro_commands)
-        self.assertTrue(all("--only frontier_engineering" in item for item in repro_commands))
+        self.assertTrue(all("--only frontier_engineering_official" in item for item in repro_commands))
         self.assertTrue(all("--exact-only" in item for item in repro_commands))
         self.assertTrue(all("goal_plus" not in item for item in repro_commands))
         energy_spec = agent.resolve_spec(
@@ -795,6 +899,23 @@ class FrontierEngineeringTest(unittest.TestCase):
             campaign = json.loads((destination / "campaign.json").read_text())
             self.assertEqual(campaign["state"], "prepared")
             self.assertEqual(campaign["budget"]["live_search_concurrency"], 1)
+
+    def test_fork_profile_freezes_context_mode_and_rejects_incompatible_method(self) -> None:
+        profile_path, profile = config.load_profile("quantum-routing-goal-plus-pi-sol-1h-k4-fork")
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                mock.patch.object(config, "RUNS_ROOT", Path(temporary)),
+                mock.patch.object(runtime.standalone, "prepare", return_value=0) as prepare,
+            ):
+                destination = runtime.prepare("quantum-fork", profile, profile_path)
+            self.assertEqual(prepare.call_args.args[0].goal_plus_spawn_mode, "fork")
+            campaign = json.loads((destination / "campaign.json").read_text())
+            self.assertEqual(campaign["goal_plus_spawn_mode"], "fork")
+        for changes in ({"methods": ["plain-pi"], "concurrency": 1}, {"concurrency": 1}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(
+                config.FrontierEngineeringContractError, "fork requires"
+            ):
+                config.validate_profile(profile["id"], {**profile, **changes})
 
     def test_prepare_routes_openevolve_without_agent_runner(self) -> None:
         _, profile = config.load_profile("energy-storage-openevolve-paper-100")

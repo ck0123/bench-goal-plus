@@ -1,0 +1,610 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-27",
+  "benchmark": "frontier-engineering",
+  "task_id": "QuantumComputing/task_01_routing_qftentangled",
+  "evaluation_protocol": "official-main-unitary",
+  "platform": "linux/arm64",
+  "source": {
+    "repository": "https://github.com/Einsia/Frontier-Engineering",
+    "tracking_branch": "main",
+    "commit": "bafa7d53162a3b1f128fec396bbde22fe972bf24",
+    "checkout": "third_party/frontier-engineering-official",
+    "dirty": false
+  },
+  "upstream_diff": "none; official evaluator, transport and sandbox sources are unchanged",
+  "runtime": {
+    "python": "3.12",
+    "qiskit": "2.3.1",
+    "mqt.bench": "2.3.0",
+    "qiskit-qasm3-import": "0.6.0"
+  },
+  "isolation": "official candidate subprocess and bubblewrap PID namespace; upstream compatibility filesystem mode",
+  "checks": {
+    "local_inventory": "pass",
+    "public_setup_doctor": "pass",
+    "workspace_quantum_diagnostics": "pass",
+    "official_seed": {
+      "valid": true,
+      "combined_score": 0.20898716119828828
+    },
+    "verifier_positive_and_negative_controls": "pass"
+  },
+  "commands": [
+    "python3 scripts/bench.py check --benchmark frontier-engineering --profile quantum-routing-goal-plus-pi-sol-1h-k4-fork",
+    "python3 scripts/bench.py setup --benchmark frontier-engineering --profile quantum-routing-goal-plus-pi-sol-1h-k4-fork --skip-provision",
+    ".bench-env/venv/bin/python .tmp/frontier-official-adapt-20261027/verifier-acceptance.py"
+  ],
+  "goal_plus_runtime_source": {
+    "selection": "existing clean source via BENCH_GOAL_PLUS_SOURCE_DIR and BENCH_GOAL_PLUS_EXPECTED_REF; no credential values",
+    "commit": "3b2cfa89a7a45b71d2574de9650668003e8f9e61"
+  },
+  "tests": {
+    "focused": {
+      "tests": 33,
+      "passed": true,
+      "log": ".tmp/frontier-official-adapt-20261027/frontier-tests-final.log"
+    },
+    "regression_baseline": {
+      "new_regressions": 2,
+      "both_fail_before_fix": true,
+      "log": ".tmp/quantum-six-audit-20261027/official-regression-baseline.log"
+    },
+    "repository_gate": {
+      "status_check": "pass",
+      "full_suite": {
+        "tests": 595,
+        "failures": 12,
+        "errors": 7,
+        "skipped": 1,
+        "passed": false,
+        "log": ".tmp/frontier-official-adapt-20261027/full-tests-final.log",
+        "scope": "Unresolved fixed_search, EdgeBench, OpenEvolve, repro-env, SWE-bench and ZSoft contracts; no Frontier test failed.",
+        "same_failure_set_on_final_run": true
+      }
+    },
+    "registry": {
+      "tests": 7,
+      "passed": true
+    },
+    "unified_lifecycle": {
+      "tests": 35,
+      "passed": true
+    }
+  },
+  "verifier_controls": [
+    {
+      "label": "transpile-control",
+      "valid": true,
+      "raw_combined_score": 3.0950238871070774,
+      "evaluator_sha256": "471767878afa12ca12c6b7177a6a5dfb726cdbc0b51cfa9f6ff7d8f03cf70284",
+      "cases": [
+        {
+          "case_id": "routing_case_01",
+          "valid": true,
+          "rejection_reason": null,
+          "equivalence": {
+            "ok": true,
+            "method": "sampled_state_fidelity",
+            "fidelity": 0.9999999999999958,
+            "threshold": 0.999999999,
+            "samples": 5,
+            "reason": null,
+            "details": {
+              "input_num_qubits": 9,
+              "candidate_num_qubits": 27,
+              "active_qubits": 9,
+              "initial_index_layout": [
+                3,
+                2,
+                0,
+                1,
+                4,
+                6,
+                7,
+                10,
+                12
+              ],
+              "final_index_layout": [
+                3,
+                0,
+                2,
+                1,
+                12,
+                6,
+                4,
+                10,
+                7
+              ],
+              "layout_declared": true,
+              "fidelities": [
+                0.9999999999999958,
+                0.999999999999998,
+                0.9999999999999973,
+                0.9999999999999973,
+                0.9999999999999973
+              ]
+            }
+          },
+          "candidate": {
+            "solve_runtime_s": 1.2001070976257324,
+            "canonicalize_runtime_s": 0.007765648886561394,
+            "total_runtime_s": 1.2078727465122938,
+            "cost": 182.0,
+            "score_0_to_3": 2.574874371859297,
+            "metrics": {
+              "depth": 165,
+              "size": 322,
+              "two_qubit_count": 149,
+              "cx_count": 149,
+              "ecr_count": 0,
+              "swap_count": 0,
+              "t_count": 0,
+              "tdg_count": 0
+            }
+          }
+        },
+        {
+          "case_id": "routing_case_02",
+          "valid": true,
+          "rejection_reason": null,
+          "equivalence": {
+            "ok": true,
+            "method": "sampled_state_fidelity",
+            "fidelity": 0.9999999999999947,
+            "threshold": 0.999999999,
+            "samples": 5,
+            "reason": null,
+            "details": {
+              "input_num_qubits": 11,
+              "candidate_num_qubits": 27,
+              "active_qubits": 11,
+              "initial_index_layout": [
+                13,
+                18,
+                15,
+                12,
+                10,
+                6,
+                7,
+                4,
+                0,
+                1,
+                2
+              ],
+              "final_index_layout": [
+                18,
+                13,
+                15,
+                12,
+                6,
+                10,
+                7,
+                0,
+                2,
+                4,
+                1
+              ],
+              "layout_declared": true,
+              "fidelities": [
+                0.9999999999999953,
+                0.9999999999999947,
+                0.9999999999999969,
+                0.9999999999999953,
+                0.9999999999999982
+              ]
+            }
+          },
+          "candidate": {
+            "solve_runtime_s": 1.2631504535675049,
+            "canonicalize_runtime_s": 0.008369082119315863,
+            "total_runtime_s": 1.2715195356868207,
+            "cost": 266.0,
+            "score_0_to_3": 3.269398430688754,
+            "metrics": {
+              "depth": 220,
+              "size": 518,
+              "two_qubit_count": 222,
+              "cx_count": 222,
+              "ecr_count": 0,
+              "swap_count": 0,
+              "t_count": 0,
+              "tdg_count": 0
+            }
+          }
+        },
+        {
+          "case_id": "routing_case_03",
+          "valid": true,
+          "rejection_reason": null,
+          "equivalence": {
+            "ok": true,
+            "method": "sampled_state_fidelity",
+            "fidelity": 0.99999999999999,
+            "threshold": 0.999999999,
+            "samples": 5,
+            "reason": null,
+            "details": {
+              "input_num_qubits": 13,
+              "candidate_num_qubits": 27,
+              "active_qubits": 13,
+              "initial_index_layout": [
+                18,
+                15,
+                12,
+                10,
+                6,
+                7,
+                4,
+                0,
+                1,
+                2,
+                3,
+                5,
+                8
+              ],
+              "final_index_layout": [
+                5,
+                3,
+                8,
+                2,
+                1,
+                4,
+                0,
+                7,
+                10,
+                6,
+                12,
+                15,
+                18
+              ],
+              "layout_declared": true,
+              "fidelities": [
+                0.9999999999999925,
+                0.9999999999999998,
+                0.9999999999999916,
+                0.9999999999999931,
+                0.99999999999999
+              ]
+            }
+          },
+          "candidate": {
+            "solve_runtime_s": 1.1560242176055908,
+            "canonicalize_runtime_s": 0.008361482061445713,
+            "total_runtime_s": 1.1643856996670365,
+            "cost": 375.4,
+            "score_0_to_3": 3.4407988587731815,
+            "metrics": {
+              "depth": 267,
+              "size": 767,
+              "two_qubit_count": 322,
+              "cx_count": 322,
+              "ecr_count": 0,
+              "swap_count": 0,
+              "t_count": 0,
+              "tdg_count": 0
+            }
+          }
+        }
+      ],
+      "raw_evidence": ".tmp/frontier-official-adapt-20261027/final-transpile-control.json",
+      "raw_sha256": "7d726dbbc313ff697fb66a86a5e7627ad5cea186b2468ff7dc4203adc19fc58f"
+    },
+    {
+      "label": "empty-circuit",
+      "valid": false,
+      "raw_combined_score": -1e+18,
+      "evaluator_sha256": "471767878afa12ca12c6b7177a6a5dfb726cdbc0b51cfa9f6ff7d8f03cf70284",
+      "cases": [
+        {
+          "case_id": "routing_case_01",
+          "valid": false,
+          "rejection_reason": "candidate circuit is not equivalent to the input circuit: candidate circuit is empty (0 operations)",
+          "equivalence": {
+            "ok": false,
+            "method": "sampled",
+            "fidelity": 0.0,
+            "threshold": 0.999999999,
+            "samples": 0,
+            "reason": "candidate circuit is empty (0 operations)",
+            "details": {}
+          },
+          "candidate": {
+            "cost": null,
+            "score_0_to_3": null,
+            "metrics": null
+          }
+        },
+        {
+          "case_id": "routing_case_02",
+          "valid": false,
+          "rejection_reason": "candidate circuit is not equivalent to the input circuit: candidate circuit is empty (0 operations)",
+          "equivalence": {
+            "ok": false,
+            "method": "sampled",
+            "fidelity": 0.0,
+            "threshold": 0.999999999,
+            "samples": 0,
+            "reason": "candidate circuit is empty (0 operations)",
+            "details": {}
+          },
+          "candidate": {
+            "cost": null,
+            "score_0_to_3": null,
+            "metrics": null
+          }
+        },
+        {
+          "case_id": "routing_case_03",
+          "valid": false,
+          "rejection_reason": "candidate circuit is not equivalent to the input circuit: candidate circuit is empty (0 operations)",
+          "equivalence": {
+            "ok": false,
+            "method": "sampled",
+            "fidelity": 0.0,
+            "threshold": 0.999999999,
+            "samples": 0,
+            "reason": "candidate circuit is empty (0 operations)",
+            "details": {}
+          },
+          "candidate": {
+            "cost": null,
+            "score_0_to_3": null,
+            "metrics": null
+          }
+        }
+      ],
+      "raw_evidence": ".tmp/frontier-official-adapt-20261027/final-empty-circuit.json",
+      "raw_sha256": "876ca9d01e7956836ebc5fdd89891eeb8fa3ffce153968d67068949348a2890f"
+    },
+    {
+      "label": "direct-state-preparation",
+      "valid": false,
+      "raw_combined_score": -1e+18,
+      "evaluator_sha256": "471767878afa12ca12c6b7177a6a5dfb726cdbc0b51cfa9f6ff7d8f03cf70284",
+      "cases": [
+        {
+          "case_id": "routing_case_01",
+          "valid": false,
+          "rejection_reason": "candidate circuit is not equivalent to the input circuit: worst-case state fidelity 0.000042026112 <= threshold 0.999999999000",
+          "equivalence": {
+            "ok": false,
+            "method": "sampled_state_fidelity",
+            "fidelity": 4.202611233269548e-05,
+            "threshold": 0.999999999,
+            "samples": 5,
+            "reason": "worst-case state fidelity 0.000042026112 <= threshold 0.999999999000",
+            "details": {
+              "input_num_qubits": 9,
+              "candidate_num_qubits": 27,
+              "active_qubits": 9,
+              "initial_index_layout": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8
+              ],
+              "final_index_layout": [
+                0,
+                2,
+                8,
+                5,
+                6,
+                3,
+                7,
+                4,
+                1
+              ],
+              "layout_declared": false,
+              "fidelities": [
+                0.9999999999999991,
+                0.0018287496824255936,
+                0.0012312480232427358,
+                4.202611233269548e-05,
+                0.005433853340727919
+              ]
+            }
+          },
+          "candidate": {
+            "cost": null,
+            "score_0_to_3": null,
+            "metrics": null
+          }
+        },
+        {
+          "case_id": "routing_case_02",
+          "valid": false,
+          "rejection_reason": "candidate circuit is not equivalent to the input circuit: worst-case state fidelity 0.000014103191 <= threshold 0.999999999000",
+          "equivalence": {
+            "ok": false,
+            "method": "sampled_state_fidelity",
+            "fidelity": 1.410319116639577e-05,
+            "threshold": 0.999999999,
+            "samples": 5,
+            "reason": "worst-case state fidelity 0.000014103191 <= threshold 0.999999999000",
+            "details": {
+              "input_num_qubits": 11,
+              "candidate_num_qubits": 27,
+              "active_qubits": 11,
+              "initial_index_layout": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10
+              ],
+              "final_index_layout": [
+                6,
+                0,
+                2,
+                7,
+                10,
+                3,
+                1,
+                4,
+                9,
+                8,
+                5
+              ],
+              "layout_declared": false,
+              "fidelities": [
+                0.9999999999999982,
+                1.410319116639577e-05,
+                0.00019328132512335481,
+                0.0010516056858470397,
+                2.858607246032555e-05
+              ]
+            }
+          },
+          "candidate": {
+            "cost": null,
+            "score_0_to_3": null,
+            "metrics": null
+          }
+        },
+        {
+          "case_id": "routing_case_03",
+          "valid": false,
+          "rejection_reason": "candidate circuit is not equivalent to the input circuit: worst-case state fidelity 0.000006524965 <= threshold 0.999999999000",
+          "equivalence": {
+            "ok": false,
+            "method": "sampled_state_fidelity",
+            "fidelity": 6.52496475999861e-06,
+            "threshold": 0.999999999,
+            "samples": 5,
+            "reason": "worst-case state fidelity 0.000006524965 <= threshold 0.999999999000",
+            "details": {
+              "input_num_qubits": 13,
+              "candidate_num_qubits": 27,
+              "active_qubits": 15,
+              "initial_index_layout": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12
+              ],
+              "final_index_layout": [
+                11,
+                8,
+                14,
+                9,
+                3,
+                7,
+                10,
+                1,
+                4,
+                5,
+                6,
+                2,
+                0
+              ],
+              "layout_declared": false,
+              "fidelities": [
+                1.0,
+                6.52496475999861e-06,
+                0.00032046151164357166,
+                3.167566613042628e-05,
+                0.00010161676540174305
+              ]
+            }
+          },
+          "candidate": {
+            "cost": null,
+            "score_0_to_3": null,
+            "metrics": null
+          }
+        }
+      ],
+      "raw_evidence": ".tmp/frontier-official-adapt-20261027/final-direct-state-preparation.json",
+      "raw_sha256": "49bf02c9a58e0ce6fca7f7505cbaa9635353c7c747e83d2cb956c3bd71fe9f80"
+    },
+    {
+      "label": "historical-six",
+      "valid": false,
+      "raw_combined_score": -1e+18,
+      "evaluator_sha256": "471767878afa12ca12c6b7177a6a5dfb726cdbc0b51cfa9f6ff7d8f03cf70284",
+      "cases": [
+        {
+          "case_id": "routing_case_01",
+          "valid": false,
+          "rejection_reason": "candidate circuit is not equivalent to the input circuit: candidate circuit is wider than the input (27 vs 9 qubits) but declares no initial layout; return the circuit produced by transpile() (or keep its .layout) so the scorer can tell which physical qubit holds which input qubit",
+          "equivalence": {
+            "ok": false,
+            "method": "sampled",
+            "fidelity": 0.0,
+            "threshold": 0.999999999,
+            "samples": 0,
+            "reason": "candidate circuit is wider than the input (27 vs 9 qubits) but declares no initial layout; return the circuit produced by transpile() (or keep its .layout) so the scorer can tell which physical qubit holds which input qubit",
+            "details": {}
+          },
+          "candidate": {
+            "cost": null,
+            "score_0_to_3": null,
+            "metrics": null
+          }
+        },
+        {
+          "case_id": "routing_case_02",
+          "valid": false,
+          "rejection_reason": "candidate circuit is not equivalent to the input circuit: candidate circuit is wider than the input (27 vs 11 qubits) but declares no initial layout; return the circuit produced by transpile() (or keep its .layout) so the scorer can tell which physical qubit holds which input qubit",
+          "equivalence": {
+            "ok": false,
+            "method": "sampled",
+            "fidelity": 0.0,
+            "threshold": 0.999999999,
+            "samples": 0,
+            "reason": "candidate circuit is wider than the input (27 vs 11 qubits) but declares no initial layout; return the circuit produced by transpile() (or keep its .layout) so the scorer can tell which physical qubit holds which input qubit",
+            "details": {}
+          },
+          "candidate": {
+            "cost": null,
+            "score_0_to_3": null,
+            "metrics": null
+          }
+        },
+        {
+          "case_id": "routing_case_03",
+          "valid": false,
+          "rejection_reason": "candidate circuit is not equivalent to the input circuit: candidate circuit is wider than the input (27 vs 13 qubits) but declares no initial layout; return the circuit produced by transpile() (or keep its .layout) so the scorer can tell which physical qubit holds which input qubit",
+          "equivalence": {
+            "ok": false,
+            "method": "sampled",
+            "fidelity": 0.0,
+            "threshold": 0.999999999,
+            "samples": 0,
+            "reason": "candidate circuit is wider than the input (27 vs 13 qubits) but declares no initial layout; return the circuit produced by transpile() (or keep its .layout) so the scorer can tell which physical qubit holds which input qubit",
+            "details": {}
+          },
+          "candidate": {
+            "cost": null,
+            "score_0_to_3": null,
+            "metrics": null
+          }
+        }
+      ],
+      "raw_evidence": ".tmp/frontier-official-adapt-20261027/final-historical-six.json",
+      "raw_sha256": "31e176476809064eb7d6e09c195818654ab3c68267fcb317700a962c48700ff5"
+    }
+  ],
+  "scope": "Corrected Quantum official verifier/runtime only; not whole v1-lite, paper-100, all Agent methods, or matched comparison readiness."
+}

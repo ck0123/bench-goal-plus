@@ -77,12 +77,18 @@ class OpenEvolveComparisonTest(unittest.TestCase):
 
         self.assertNotIn("search_routed", get_args(GoalPlusWorkEventKind))
         self.assertFalse(hasattr(FileGoalPlusRuntime, "upsert_work_items"))
-        for host in ("codex", "pi"):
+        for host, spawn_mode in (("codex", "fresh"), ("pi", "fresh"), ("pi", "fork")):
             prompt = experiment.render_goal(
                 task_text="Improve the score", artifact_name="solution.py",
                 metric_name="score", metric_direction="maximize", wall_seconds=300,
                 closeout_seconds=60, concurrency=2, agent_harness=host, worker_model="test-model",
+                spawn_mode=spawn_mode,
             )
+            self.assertIn(f"spawn_mode={spawn_mode}", prompt.splitlines()[0])
+            self.assertIn(f'strategy.initial_context="{spawn_mode}"', prompt)
+            if spawn_mode == "fork":
+                self.assertIn("reason=fork_checkpoint_ready", prompt)
+                self.assertIn("explicit resume", prompt)
             self.assertNotIn("goal_plus_upsert_work_items", prompt)
             self.assertNotIn("search_routed", prompt)
             self.assertNotIn("strategy.agent_harness", prompt)
@@ -1223,6 +1229,20 @@ class OpenEvolveComparisonTest(unittest.TestCase):
             self.assertTrue(result["deadline_reached"])
             self.assertFalse(result["hard_killed"])
             self.assertEqual(result["returncode"], 0)
+
+    def test_continuation_preserves_preparation_stdout_and_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            for index, stage in enumerate(("prepare", "resume")):
+                result = experiment.run_controlled(
+                    [sys.executable, "-c", "import sys; print(sys.argv[1]); print(sys.argv[1], file=sys.stderr)", stage],
+                    cwd=temp, environment=os.environ.copy(), stdin_text=None,
+                    stdout_path=temp / "events.jsonl", stderr_path=temp / "stderr.log",
+                    wall_time_seconds=5, hard_kill_grace_seconds=1, append_output=bool(index),
+                )
+                self.assertEqual(result["returncode"], 0)
+            self.assertEqual((temp / "events.jsonl").read_text().splitlines(), ["prepare", "resume"])
+            self.assertEqual((temp / "stderr.log").read_text().splitlines(), ["prepare", "resume"])
 
 
 class PublicGateSelectionRuleTest(unittest.TestCase):

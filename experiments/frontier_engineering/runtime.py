@@ -62,6 +62,7 @@ def prepare(campaign_id: str, profile: dict[str, Any], profile_path: Path) -> Pa
         "model": profile["model"],
         "reasoning_effort": profile["reasoning_effort"],
         "pi_provider": pi_provider,
+        "goal_plus_spawn_mode": profile.get("goal_plus_spawn_mode", "fresh"),
         "budget": {
             "wall_time_seconds": profile["wall_time_seconds"],
             "live_search_concurrency": profile["concurrency"],
@@ -114,6 +115,7 @@ def prepare(campaign_id: str, profile: dict[str, Any], profile_path: Path) -> Pa
                                 adapter_module=ADAPTER_MODULE,
                                 task_id=task_id,
                                 method=method,
+                                goal_plus_spawn_mode=profile.get("goal_plus_spawn_mode", "fresh"),
                                 model=profile["model"],
                                 pi_provider_id=pi_provider["id"],
                                 pi_api=pi_provider["api"],
@@ -299,6 +301,20 @@ def stop_campaign(destination: Path) -> int:
     pid = controller.get("pid")
     if not isinstance(pid, int) or pid < 1:
         raise RuntimeError("campaign has no controller PID")
+    # Main runs in its own process group. Stopping only the controller leaves
+    # its blocking execute() call alive until T expires. Wake that call first;
+    # normal closeout then shuts down the owned candidate sessions.
+    children = subprocess.run(
+        ["ps", "-e", "-o", "pid=,ppid=,pgid="],
+        capture_output=True, text=True, check=True,
+    )
+    for line in children.stdout.splitlines():
+        child, parent, group = map(int, line.split())
+        if parent == pid and group == child:
+            try:
+                os.killpg(group, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
     try:
         process_group = os.getpgid(pid)
     except ProcessLookupError:
