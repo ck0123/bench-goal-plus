@@ -329,6 +329,55 @@
       ]
     },
     {
+      "id": "frontier-cs-2",
+      "display_name": "Frontier-CS 2",
+      "kind": "benchmark",
+      "gate_set": "benchmark",
+      "priority": 6,
+      "repositories": [
+        {
+          "role": "benchmark-and-data",
+          "upstream_url": "https://github.com/FrontierCS/FrontierCS-2",
+          "tracking_branch": "main",
+          "license": "CC-BY-4.0"
+        }
+      ],
+      "data_url": "https://github.com/FrontierCS/FrontierCS-2",
+      "local_path": "third_party/frontier-cs-2",
+      "docker_requirement": "required",
+      "docker_scope": "Task-level verifier and agent-base images build locally from each task tree (ubuntu:24.04, linux/amd64); CPU-only tasks verify with Docker alone and no AWS EKS site. GPU tasks are out of local scope.",
+      "stages": {
+        "source_forked": "todo",
+        "environment": "partial",
+        "official_verifier": "partial",
+        "legacy_agent_smoke": "todo",
+        "plain_codex": "partial",
+        "goal_plus_codex": "todo",
+        "matched_baseline": "todo",
+        "campaign_ready": "todo"
+      },
+      "evidence": [
+        "evidence/environment/2026-10-27-frontier-cs-2-local-verifier-smoke.json"
+      ],
+      "stage_evidence": {
+        "environment": [
+          "evidence/environment/2026-10-27-frontier-cs-2-local-verifier-smoke.json"
+        ],
+        "official_verifier": [
+          "evidence/environment/2026-10-27-frontier-cs-2-local-verifier-smoke.json"
+        ],
+        "plain_codex": [
+          "evidence/environment/2026-10-27-frontier-cs-2-local-verifier-smoke.json"
+        ]
+      },
+      "next_action": "Fork FrontierCS-2 into the managed namespace; extend the validated local path beyond binary_fuse_filter to the other CPU-only tasks; add the multi-round train-feedback loop and agent-selected final submission.",
+      "blockers": [
+        "Only binary_fuse_filter validated end to end; the other CPU tasks and all GPU tasks are unverified locally.",
+        "Protocol deviations vs official runs: host-networked single-round agent, no train-feedback iteration, no agent-selected final patch, no 5h budget enforcement.",
+        "Timing thresholds were calibrated on AWS hardware; same-CPU paired measurement partially compensates but cross-host comparisons stay approximate."
+      ]
+    },
+    {
       "id": "edgebench",
       "display_name": "EdgeBench open-source subset",
       "kind": "benchmark",

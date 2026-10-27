@@ -95,6 +95,15 @@
         "/algorithmic/README.md"
       ]
     },
+    "frontier_cs2": {
+      "repository": "https://github.com/FrontierCS/FrontierCS-2.git",
+      "checkout_dir": "frontier-cs-2",
+      "tracking_branch": "main",
+      "sparse_paths": [
+        "/tasks/frontier-cs-2.0-demo/",
+        "/tasks/metadata/"
+      ]
+    },
     "skydiscover": {
       "repository": "https://github.com/ck0123/skydiscover.git",
       "checkout_dir": "skydiscover",

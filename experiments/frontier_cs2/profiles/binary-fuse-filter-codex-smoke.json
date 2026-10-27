@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "binary-fuse-filter-codex-smoke",
+  "benchmark_id": "frontier-cs-2",
+  "suite": "frontier-cs-2.0-demo",
+  "accelerator_policy": "cpu-only",
+  "task_ids": [
+    "Theory/binary_fuse_filter"
+  ],
+  "methods": [
+    "plain-codex"
+  ],
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "medium",
+  "wall_time_seconds": 900,
+  "concurrency": 1,
+  "cell_concurrency": 1,
+  "seeds": [
+    1
+  ],
+  "verifier": {
+    "image": "local build from task tree verifier/Dockerfile",
+    "modes": ["train", "eval"],
+    "entrypoints": [
+      "/opt/frontier/verify.py",
+      "/opt/frontier/verify_reference.py"
+    ]
+  },
+  "reference_smoke": "evidence/environment/2026-10-27-frontier-cs-2-local-verifier-smoke.json"
+}

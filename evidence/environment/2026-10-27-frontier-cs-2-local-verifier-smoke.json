@@ -1,0 +1,88 @@
+{
+  "schema": "bench-goal-plus/frontier-cs-2-local-smoke/v1",
+  "recorded_at": "2026-10-27T15:10:00+08:00",
+  "benchmark": "frontier-cs-2",
+  "source": {
+    "repository": "https://github.com/FrontierCS/FrontierCS-2",
+    "commit": "57b97dcbf1793789dd30fe9667c2daa11b94d1ad",
+    "tracking_branch": "main",
+    "task": "Theory/binary_fuse_filter"
+  },
+  "environment": {
+    "host_class": "macOS Intel x86_64",
+    "docker": "OrbStack daemon, linux/amd64 containers",
+    "verifier_image": "built from tasks/frontier-cs-2.0-demo/problems/Theory/binary_fuse_filter/verifier/Dockerfile (ubuntu:24.04 base)",
+    "tar_toolchain": "ubuntu:24.04 container GNU tar with the official make_submission.sh flags"
+  },
+  "commands": [
+    "docker build -f verifier/Dockerfile -t <tag> <task_dir>",
+    "git diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ HEAD -- include > payload/solution.patch",
+    "tar --format=ustar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf answer.tar payload/solution.patch",
+    "docker run --rm -v <run_dir>:/work -e FRONTIER_PAYLOAD_PATH=/work/answer.tar -e FRONTIER_DATASET_PATH=/work/eval.json -e FRONTIER_VERIFICATION_MODE=eval -e FRONTIER_RESULT_PATH=/work/result-eval.json -e FRONTIER_EVIDENCE_PATH=/work/evidence-eval.tar.zst --entrypoint python3 <image> /opt/frontier/verify.py"
+  ],
+  "runs": [
+    {
+      "kind": "reference-parity",
+      "mode": "eval",
+      "entrypoint": "/opt/frontier/verify_reference.py",
+      "score_unbounded": 50.7202,
+      "reference_score": 50.0,
+      "margin": 0.7202,
+      "beats_reference": 0,
+      "summary": "valid; strict FAIL",
+      "note": "reference patch reproduced its expected anchored score; strict FAIL is by design because thresholds sit at reference statistics",
+      "workloads": 144
+    },
+    {
+      "kind": "plain-codex-train",
+      "mode": "train",
+      "model": "gpt-6.1-sol",
+      "harness": "codex-cli 0.164.0, reasoning medium, sandbox workspace-write",
+      "score_unbounded": 52.612,
+      "summary": "valid; strict FAIL",
+      "beat_spec_progress": {
+        "build_ns": "72/72",
+        "effective_fpr": "72/72",
+        "lookup_ns": "33/72",
+        "resident_bytes": "72/72",
+        "space_overhead_pct": "72/72"
+      }
+    },
+    {
+      "kind": "plain-codex-final",
+      "mode": "eval",
+      "model": "gpt-6.1-sol",
+      "harness": "codex-cli 0.164.0, reasoning medium, sandbox workspace-write",
+      "score_unbounded": 51.9609,
+      "reference_score": 50.0,
+      "margin": 1.9609,
+      "beats_reference": 0,
+      "summary": "valid; strict FAIL",
+      "beat_spec_progress": {
+        "build_ns": "140/144",
+        "effective_fpr": "144/144",
+        "lookup_ns": "59/144",
+        "resident_bytes": "144/144",
+        "space_overhead_pct": "144/144"
+      }
+    }
+  ],
+  "official_comparison": {
+    "source": "huggingface.co/datasets/FrontierCS2/FrontierCS-2-runs metadata/formal-results.json",
+    "same_model_official_score": 53.91,
+    "same_model_official_verdict": "FAIL",
+    "delta_vs_official_pp": -1.95,
+    "note": "the official sol run used the full 5h protocol with train-feedback iterations; this smoke was a single round"
+  },
+  "protocol_deviations": [
+    "agent ran on the host with network access; the official agent sandbox is offline",
+    "single-round submission; no train-feedback iteration and no agent-selected final patch",
+    "no 5h budget enforcement (agent stopped early after a provider capacity error)",
+    "host CPU differs from the official AWS c6i.4xlarge; the verifier's paired same-CPU measurement partially compensates"
+  ],
+  "stage_updates": {
+    "environment": "partial",
+    "official_verifier": "partial",
+    "plain_codex": "partial"
+  }
+}
