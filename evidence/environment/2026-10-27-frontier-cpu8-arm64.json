@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-27",
+  "scope": "Eight CPU tasks excluding Quantum and CUDA RobotArm; model-free environment and official seed acceptance only",
+  "upstream": {
+    "repository": "https://github.com/ck0123/Frontier-Engineering",
+    "branch": "fix/malloc-wasm-arm64",
+    "commit": "2a7cecae56dfdebba1b64686965353ea18db1554",
+    "official_base": "bafa7d53162a3b1f128fec396bbde22fe972bf24",
+    "changes": [
+      "select same-version official ARM64 Wasm toolchains with SHA256 verification",
+      "preserve no-bytecode environment policy through sampler subprocess allowlist"
+    ]
+  },
+  "profile": "v1-lite-cpu8-plain-pi-sol-1h",
+  "command": "python3 scripts/bench.py setup --benchmark frontier-engineering --profile v1-lite-cpu8-plain-pi-sol-1h --skip-bootstrap --skip-provision",
+  "official_seed_evaluations": [
+    {
+      "kind": "official-seed-evaluation",
+      "task_id": "ComputerSystems/MallocLab",
+      "passed": true,
+      "returncode": 0,
+      "metrics": {
+        "combined_score": 18.25755543638746,
+        "valid": 1.0,
+        "timeout": 0.0,
+        "runtime_s": 6.413671016693115,
+        "timeout_budget_s": 300.0,
+        "benchmark_returncode": 0.0,
+        "score_100": 18.25755543638746,
+        "score_ratio": 0.1825755543638746,
+        "testcases_passed": 6.0,
+        "testcases_total": 11.0,
+        "testcase_pass_rate": 0.5454545454545454,
+        "errors": 5.0,
+        "util_points": 11.599483421416364,
+        "thru_points": 21.872701545293978,
+        "throughput_ops_s": 5468175.386323495,
+        "allocator_runtime_s": 0.010893944650896,
+        "isolated_candidate": 1.0
+      },
+      "error": null
+    },
+    {
+      "kind": "official-seed-evaluation",
+      "task_id": "JobShop/abz",
+      "passed": true,
+      "returncode": 0,
+      "metrics": {
+        "combined_score": 80.50421052827963,
+        "valid": 1.0,
+        "timeout": 0.0,
+        "runtime_s": 38.814863204956055,
+        "timeout_budget_s": 300.0,
+        "benchmark_returncode": 0.0,
+        "baseline_failures": 0.0,
+        "baseline_runtime_avg_s": 0.47683370457962154,
+        "baseline_success_rate": 1.0,
+        "baseline_successes": 5.0,
+        "evaluation_wall_time_s": 37.692549651023,
+        "instances": 5.0,
+        "optimality_gap_avg_baseline": 21.534987018387262,
+        "optimality_gap_avg_reference": 1.3066362687963162,
+        "reference_failures": 0.0,
+        "reference_runtime_avg_s": 6.582781656458974,
+        "reference_success_rate": 1.0,
+        "reference_successes": 5.0,
+        "reference_time_limit_s": 10.0,
+        "score_best_avg_baseline": 80.50421052827963,
+        "score_best_avg_reference": 98.54161234000327,
+        "score_lb_avg_baseline": 80.07364002235929,
+        "score_lb_avg_reference": 97.95337704588562
+      },
+      "error": null
+    },
+    {
+      "kind": "official-seed-evaluation",
+      "task_id": "InventoryOptimization/disruption_eoqd",
+      "passed": true,
+      "returncode": 0,
+      "metrics": {
+        "combined_score": 0.36423022249600623,
+        "valid": 1.0,
+        "timeout": 0.0,
+        "runtime_s": 4.133768320083618,
+        "timeout_budget_s": 300.0,
+        "benchmark_returncode": 0.0,
+        "eval_returncode": 0.0,
+        "candidate_score": 0.36423022249600623,
+        "reference_score": 0.603055104472446,
+        "gap_to_reference": 0.2388248819764398
+      },
+      "error": null
+    },
+    {
+      "kind": "official-seed-evaluation",
+      "task_id": "EnergyStorage/BatteryFastChargingSPMe",
+      "passed": true,
+      "returncode": 0,
+      "metrics": {
+        "combined_score": 66.16356426696784,
+        "valid": 1.0,
+        "timeout": 0.0,
+        "runtime_s": 0.30224084854125977,
+        "timeout_budget_s": 30.0,
+        "benchmark_returncode": 0.0,
+        "charge_time_s": 1341.0,
+        "max_temp_c": 31.310248757208466,
+        "max_voltage_v": 4.166611315249771,
+        "min_plating_margin_v": 0.24333477387255456,
+        "plating_loss_ah": 0.0,
+        "aging_loss_ah": 2.435403372345407e-06,
+        "time_score": 0.2520507053511909,
+        "aging_score": 0.8432614421168085,
+        "plating_score": 1.0,
+        "thermal_score": 1.0,
+        "voltage_score": 1.0,
+        "soft_temp_violation": 0.0,
+        "soft_voltage_violation": 0.0,
+        "soft_plating_violation": 0.0,
+        "final_soc": 0.9003333333333041
+      },
+      "error": null
+    },
+    {
+      "kind": "official-seed-evaluation",
+      "task_id": "Optics/holographic_multiplane_focusing",
+      "passed": true,
+      "returncode": 0,
+      "metrics": {
+        "combined_score": 0.3301705437622305,
+        "valid": 1.0,
+        "timeout": 0.0,
+        "runtime_s": 40.47932481765747,
+        "timeout_budget_s": 600.0,
+        "benchmark_returncode": 0.0,
+        "eval_returncode": 0.0,
+        "candidate_score": 0.3301705437622305,
+        "candidate_score_pct": 33.01705437622305,
+        "oracle_score": 0.46085370620416405,
+        "oracle_score_pct": 46.085370620416406,
+        "score_gap_oracle_minus_candidate": 0.13068316244193356,
+        "candidate_mean_ratio_mae": 0.11867404256257752,
+        "candidate_mean_efficiency": 0.02204078869034969,
+        "reference_better_than_baseline": 1.0
+      },
+      "error": null
+    },
+    {
+      "kind": "official-seed-evaluation",
+      "task_id": "WirelessChannelSimulation/HighReliableSimulation",
+      "passed": true,
+      "returncode": 0,
+      "metrics": {
+        "combined_score": 71.38122419785094,
+        "valid": 1.0,
+        "timeout": 0.0,
+        "runtime_s": 32.33950710296631,
+        "timeout_budget_s": 300.0,
+        "benchmark_returncode": 0.0,
+        "error_log_ratio": 0.014479127573890693,
+        "err_rate_log_median": -14.121059331144622,
+        "err_ratio_median": 0.0767,
+        "actual_samples_median": 100000.0,
+        "actual_std_median": 0.0,
+        "target_std_attainment_rate": 1.0,
+        "converged_rate": 0.0,
+        "sigma": 0.268,
+        "decoder_chase_t": 3.0,
+        "trusted_canonical_loop": 1.0,
+        "isolated_candidate": 1.0,
+        "candidate_wall_s": 31.106776237487793,
+        "self_reported_total_s": 30.242659078445286,
+        "runtime_s_total": 31.130268335342407
+      },
+      "error": null
+    },
+    {
+      "kind": "official-seed-evaluation",
+      "task_id": "ReactionOptimisation/snar_multiobjective",
+      "passed": true,
+      "returncode": 0,
+      "metrics": {
+        "combined_score": 57.523363292468865,
+        "valid": 1.0,
+        "timeout": 0.0,
+        "runtime_s": 58.07506227493286,
+        "timeout_budget_s": 600.0,
+        "benchmark_returncode": 0.0,
+        "candidate_score_mean": 57.523363292468865,
+        "candidate_score_std": 25.480715265314515,
+        "reference_score_mean": 86.13204927029467,
+        "score_gap": 28.608685977825807
+      },
+      "error": "/data/disk/yiyanzhi/bench-goal-plus/third_party/frontier-engineering-official/.venvs/frontier-v1-summit/lib/python3.9/site-packages/GPy/kern/src/symmetric.py:56: SyntaxWarning: \"is\" with a literal. Did you mean \"==\"?\n  if symmetry_type is 'odd':\n/data/disk/yiyanzhi/bench-goal-plus/third_party/frontier-engineering-official/.venvs/frontier-v1-summit/lib/python3.9/site-packages/GPy/kern/src/symmetric.py:58: SyntaxWarning: \"is\" with a literal. Did you mean \"==\"?\n  elif symmetry_type is 'even':\n /data/disk/yiyanzhi/bench-goal-plus/third_party/frontier-engineering-official/.venvs/frontier-v1-summit/lib/python3.9/site-packages/GPy/models/mrd.py:307: SyntaxWarning:\"is not\" with a literal. Did you mean \"!=\"?\n /data/disk/yiyanzhi/bench-goal-plus/third_party/frontier-engineering-official/.venvs/frontier-v1-summit/lib/python3.9/site-packages/GPyOpt/core/task/space.py:146: SyntaxWarning:\"is not\" with a literal. Did you mean \"!=\"?\n"
+    },
+    {
+      "kind": "official-seed-evaluation",
+      "task_id": "StructuralOptimization/TopologyOptimization",
+      "passed": true,
+      "returncode": 0,
+      "metrics": {
+        "combined_score": -195.91526210515661,
+        "valid": 1.0,
+        "timeout": 0.0,
+        "runtime_s": 16.529331922531128,
+        "timeout_budget_s": 300.0,
+        "benchmark_returncode": 0.0,
+        "compliance": 195.91526210515661,
+        "volume_fraction": 0.4999578573493245,
+        "feasible": 1.0,
+        "program_returncode": 0.0,
+        "candidate_runtime_s": 13.290872812271118
+      },
+      "error": null
+    }
+  ],
+  "cold_wireless_validation": "runtime/__pycache__ moved to retained .tmp/wireless-bytecode_bak before this successful eight-task doctor; no new source bytecode produced",
+  "tests": {
+    "frontier_focused": "34 passed",
+    "upstream_regressions": "2 passed; each reproduced red before repair, including a real isolated sampler child",
+    "status_check": "16 registry items / 8 datasets passed",
+    "full_suite": "588 run; 16 failures and 7 errors and 1 skipped, identical failure set to the unmodified publish baseline"
+  },
+  "readiness": {
+    "environment": "pass",
+    "official_seed_evaluator": "pass",
+    "cpu8_plain_pi_campaign": "pending"
+  }
+}

@@ -114,9 +114,9 @@
       ]
     },
     "frontier_engineering_official": {
-      "repository": "https://github.com/Einsia/Frontier-Engineering.git",
-      "checkout_dir": "frontier-engineering-official",
-      "tracking_branch": "main"
+      "repository": "https://github.com/ck0123/Frontier-Engineering.git",
+      "checkout_dir": "frontier-engineering-arm64",
+      "tracking_branch": "fix/malloc-wasm-arm64"
     }
   }
 }

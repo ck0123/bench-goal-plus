@@ -115,3 +115,12 @@ The revised interval audit joins persisted native dispatches with Main receipts,
 so an unpolled terminal worker does not produce a false partial classification.
 `finish` can re-audit affected legacy partial campaigns while preserving `_bak`
 evidence and all other completion gates.
+
+### CPU8 Plain rerun
+
+Profile `v1-lite-cpu8-plain-pi-sol-1h` runs the eight non-Quantum CPU cases
+with Plain Pi, gpt-5.6-sol medium, T=3600/K=1/C=1/R=1. Use the unified
+check → setup → plan → launch lifecycle. The managed ARM64 fork preserves
+official scoring and adds host architecture selection for the pinned Malloc
+Wasm toolchain. CPU dependencies and diagnostics are recorded in the
+[runner reference](../../.agents/skills/benchmark-run/references/benchmarks/frontier-engineering.md#cpu8-official-protocol-rerun-on-arm64).

@@ -3,7 +3,7 @@
 Target `frontier-engineering` preserves the upstream `v1_lite.yaml` task
 contracts and UnifiedTask evaluator. New native campaigns use the corrected
 official `Einsia/Frontier-Engineering` `main` checkout at
-`third_party/frontier-engineering-official` (managed key
+`third_party/frontier-engineering-arm64` (managed key
 `frontier_engineering_official`). The old `frontier-engineering` checkout and
 its historical evidence remain available to the legacy MallocLab adapter;
 they do not qualify the corrected protocol. Its default `v1-lite-cpu-codex-1h`
@@ -177,3 +177,31 @@ these are lifecycle acceptance runs, not wall-time-matched performance results.
 Reviewed evidence: `evidence/runs/2026-10-27-frontier-quantum-official-1h.json`.
 Do not substitute `--skip-bootstrap` for source validation or reset an existing
 checkout to obtain this source.
+
+## CPU8 official-protocol rerun on ARM64
+
+`v1-lite-cpu8-plain-pi-sol-1h` excludes Quantum and CUDA RobotArm, selects Plain Pi
+with gpt-5.6-sol medium, T=3600/K=1/C=1/R=1, seed 1. Each cell has one outer
+trajectory. Natural Agent completion may precede T.
+
+The managed checkout now follows `ck0123/Frontier-Engineering` branch
+`fix/malloc-wasm-arm64`, derived from official main
+`bafa7d53162a3b1f128fec396bbde22fe972bf24`. Its production changes select
+same-version official ARM64 wasi-sdk 34.0 / Wasmtime 48.0.2 assets with pinned
+SHA256 and preserve PYTHONDONTWRITEBYTECODE through the sampler child environment
+allowlist to avoid self-induced source fingerprint violations; it preserves the Wasm64 allocator, trusted scorer and all other evaluators.
+The original official checkout and previous Quantum evidence remain intact.
+
+CPU setup uses `runtime-specs/frontier-v1-main-cpu.json`, includes slmsuite's
+reference solver with same-version headless OpenCV, and constrains SUMMIT's
+ARM source builds to NumPy 1.x headers. Evaluator subprocesses discard host
+PYTHONPATH and disable bytecode writes before official source fingerprints.
+Every task exposes the same read-only `task_python.py` diagnostic entry in
+Plain and Goal Plus workspaces, respecting interpreter overrides.
+
+Reaction uses AF_UNIX sockets under repository-local scratch. A long checkout
+path can exceed the OS socket-name limit; use a short repository/worktree path
+(such as `.worktrees/f8`) rather than system temporary directories.
+Malloc's hash-verified toolchain is provisioned under repository-local `.tmp/`.
+Historical scores must be reported separately from historical-code replays under
+the new official evaluator and the new model trajectories.

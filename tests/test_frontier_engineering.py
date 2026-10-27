@@ -357,45 +357,51 @@ class FrontierEngineeringTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "evaluator inputs changed"):
                 task_adapter.evaluate_workspace(workspace, upstream, "final")
 
-    def test_quantum_diagnostic_python_works_in_a_derived_worktree(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            upstream, workspace = root / "upstream", root / "workspace"
-            task_id = "QuantumComputing/task_01_routing_qftentangled"
-            make_upstream(upstream, task_id, "baseline/solve.py")
-            task_dir = upstream / "benchmarks" / task_id
-            for path in (
-                upstream / "benchmarks/_shared/candidate_sandbox.py",
-                upstream / "benchmarks/_shared/qiskit_candidate_runner.py",
-                task_dir / "verification/utils.py",
-            ):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("# official boundary fixture\n")
-            (task_dir / "baseline/structural_optimizer.py").write_text("VALUE = 42\n")
-            python = upstream / ".venvs/frontier-quantum/bin/python"
-            python.parent.mkdir(parents=True)
-            python.symlink_to(sys.executable)
-            task_adapter.configure_task(task_id)
-            task_adapter.materialize_workspace(upstream, workspace)
-            derived = root / "worker"
-            subprocess.run(["git", "-C", str(workspace), "worktree", "add", "--detach", str(derived)],
-                           check=True, capture_output=True)
-            completed = subprocess.run(
-                [sys.executable, "task_python.py", "-"], cwd=derived,
-                input="from structural_optimizer import VALUE\nprint(VALUE)\n",
-                text=True, capture_output=True,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stdout.strip(), "42")
-            (derived / ".tmp").mkdir()
-            (derived / ".tmp/probe.py").write_text("from structural_optimizer import VALUE\nprint(VALUE)\n")
-            completed = subprocess.run(
-                [sys.executable, "task_python.py", ".tmp/probe.py"], cwd=derived,
-                text=True, capture_output=True,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stdout.strip(), "42")
-            self.assertFalse((workspace / ".gp").exists())
+    def test_task_diagnostic_python_works_in_a_derived_worktree(self) -> None:
+        for task_id, initial in (
+            ("QuantumComputing/task_01_routing_qftentangled", "baseline/solve.py"),
+            ("JobShop/abz", "baseline/init.py"),
+        ):
+            with self.subTest(task_id=task_id), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                upstream, workspace = root / "upstream", root / "workspace"
+                make_upstream(upstream, task_id, initial)
+                task_dir = upstream / "benchmarks" / task_id
+                for path in (
+                    upstream / "benchmarks/_shared/candidate_sandbox.py",
+                    upstream / "benchmarks/_shared/qiskit_candidate_runner.py",
+                    task_dir / "verification/utils.py",
+                ):
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("# official boundary fixture\n")
+                (task_dir / "baseline/structural_optimizer.py").write_text("VALUE = 42\n")
+                task = config.V1_LITE_TASKS[task_id]
+                python = upstream / ".venvs" / (task.runtime_python_env or task.runtime_env) / "bin/python"
+                python.parent.mkdir(parents=True)
+                python.symlink_to(sys.executable)
+                task_adapter.configure_task(task_id)
+                task_adapter.materialize_workspace(upstream, workspace)
+                probe = ("from structural_optimizer import VALUE\nprint(VALUE)\n"
+                         if task_id.startswith("QuantumComputing/") else "print(42)\n")
+                derived = root / "worker"
+                subprocess.run(["git", "-C", str(workspace), "worktree", "add", "--detach", str(derived)],
+                               check=True, capture_output=True)
+                completed = subprocess.run(
+                    [sys.executable, "task_python.py", "-"], cwd=derived,
+                    input=probe,
+                    text=True, capture_output=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stdout.strip(), "42")
+                (derived / ".tmp").mkdir()
+                (derived / ".tmp/probe.py").write_text(probe)
+                completed = subprocess.run(
+                    [sys.executable, "task_python.py", ".tmp/probe.py"], cwd=derived,
+                    text=True, capture_output=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stdout.strip(), "42")
+                self.assertFalse((workspace / ".gp").exists())
 
     @unittest.skipUnless(os.name == "posix", "requires process groups")
     def test_stop_reaches_detached_main_and_allows_controller_to_exit(self) -> None:
@@ -519,6 +525,24 @@ class FrontierEngineeringTest(unittest.TestCase):
             [item["kind"] for item in checks],
             ["host-accelerator", "runtime-accelerator"],
         )
+
+    def test_cpu_provision_avoids_unselected_full_runtime_dependencies(self) -> None:
+        _, cpu = config.load_profile("jobshop-codex-smoke")
+        _, cuda = config.load_profile("v1-lite-codex-1h")
+        for profile, expected_spec in (
+            (cpu, "runtime-specs/frontier-v1-main-cpu.json"),
+            (cuda, "scripts/env/specs/frontier-v1-main.json"),
+        ):
+            with self.subTest(profile=profile["id"]), mock.patch.object(
+                environment.subprocess, "run"
+            ) as install:
+                result = environment.provision(profile)
+                main = [cmd for cmd in result["commands"]
+                        if cmd[2].endswith("/frontier-v1-main.json")
+                        or cmd[2].endswith("/frontier-v1-main-cpu.json")]
+                self.assertEqual(len(main), 1)
+                self.assertTrue(main[0][2].endswith(expected_spec), main[0])
+                self.assertEqual(install.call_count, len(result["commands"]))
 
     def test_catalog_and_preset_select_native_runner(self) -> None:
         catalog = Catalog()
@@ -781,7 +805,10 @@ class FrontierEngineeringTest(unittest.TestCase):
             mock.patch.object(environment, "_pi_agent_checks", return_value=[{"passed": True}]),
             mock.patch.object(environment, "_runtime_probe", return_value={"passed": True}),
             mock.patch.object(environment, "_seed_probe", return_value={"passed": True}),
-            mock.patch.object(environment, "git_value", side_effect=["main", None, "upstream-commit"]),
+            mock.patch.object(environment, "git_value", side_effect=[
+                environment.registered_upstream_branch(config.UPSTREAM_KEY, repository_root=ROOT),
+                None, "upstream-commit",
+            ]),
             mock.patch("builtins.print") as output,
         ):
             self.assertEqual(environment.doctor(profile), 0)
@@ -992,7 +1019,10 @@ class FrontierEngineeringTest(unittest.TestCase):
             mock.patch.object(
                 environment,
                 "git_value",
-                side_effect=["main", "", "frontier-commit"],
+                side_effect=[
+                    environment.registered_upstream_branch(config.UPSTREAM_KEY, repository_root=ROOT),
+                    "", "frontier-commit",
+                ],
             ) as git_value,
         ):
             self.assertEqual(environment.doctor(profile), 0)

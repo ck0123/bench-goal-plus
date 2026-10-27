@@ -33,6 +33,7 @@ from adapters.portable import (  # noqa: E402
 from bench_runtime_paths import configure_temp_environment  # noqa: E402
 from experiments.frontier_engineering.config import (  # noqa: E402
     TaskContract,
+    MALLOC_TOOLCHAIN_ROOT,
     UPSTREAM_KEY,
     V1_LITE_TASKS,
 )
@@ -216,27 +217,34 @@ def materialize_workspace(upstream_root: Path, workspace: Path) -> dict[str, Any
     workspace.mkdir(parents=True)
     (workspace / task.artifact_name).write_bytes(seed.read_bytes())
     (workspace / "TASK.md").write_text(task_text(task_dir, task), encoding="utf-8")
-    if task.task_id == QUANTUM_TASK:
-        # A relative command survives the Pi workspace guard and fork worktrees.
-        # Both Plain and GP use the same task interpreter and read-only helper.
-        python = upstream_root / ".venvs" / task.runtime_env / "bin/python"
-        (workspace / "task_python.py").write_text(
-            "\"\"\"Read-only entry to the benchmark's quantum Python runtime.\"\"\"\n"
-            "import os, sys\n"
-            f"python = {str(python)!r}\n"
-            "os.environ['PYTHONPATH'] = os.getcwd() + os.pathsep + os.environ.get('PYTHONPATH', '')\n"
-            "os.execv(python, [python, *sys.argv[1:]])\n",
-            encoding="utf-8",
+    # A relative command survives the Pi workspace guard and fork worktrees.
+    # Respect the task's interpreter override (e.g. JobShop), as the bridge does.
+    python = upstream_root / ".venvs" / (task.runtime_python_env or task.runtime_env) / "bin/python"
+    (workspace / "task_python.py").write_text(
+        "\"\"\"Read-only entry to the benchmark's task Python runtime.\"\"\"\n"
+        "import os, sys\n"
+        f"python = {str(python)!r}\n"
+        "os.environ['PYTHONPATH'] = os.getcwd()\n"
+        "os.environ['PYTHONNOUSERSITE'] = '1'\n"
+        "os.environ['PYTHONDONTWRITEBYTECODE'] = '1'\n"
+        "os.execv(python, [python, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    with (workspace / "TASK.md").open("a", encoding="utf-8") as context:
+        context.write(
+            "\n## Local task diagnostics\n\n"
+            "Use `python3 task_python.py .tmp/script.py` or `python3 task_python.py -` "
+            "for experiments with the same Python dependencies used by the evaluator. "
+            f"Only `{task.artifact_name}` is editable. Diagnostics do not produce official scores; "
+            "use `python3 evaluate.py` for scoring.\n"
         )
+    if task.task_id == QUANTUM_TASK:
         (workspace / "structural_optimizer.py").write_bytes(
             (task_dir / "baseline/structural_optimizer.py").read_bytes()
         )
         with (workspace / "TASK.md").open("a", encoding="utf-8") as context:
             context.write(
-                "\n## Local quantum diagnostics\n\n"
-                "Use `python3 task_python.py .tmp/script.py` or `python3 task_python.py -` "
-                "for Qiskit/MQT/Statevector experiments in this workspace. "
-                "This is the same locked runtime used by the evaluator. "
+                "\nThe task runtime includes Qiskit/MQT/Statevector. "
                 "`structural_optimizer.py` is a read-only copy of the official helper. "
                 "Only `solve.py` is editable. Diagnostics do not produce official scores; "
                 "use `python3 evaluate.py` for scoring.\n"
@@ -352,11 +360,14 @@ def evaluate_workspace(workspace: Path, upstream_root: Path, mode: str) -> dict[
         if task.runtime_python_env:
             command.extend(["--runtime-python-env", task.runtime_python_env])
         environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
         environment["FRONTIER_ENGINEERING_ROOT"] = str(upstream_root)
         environment["FRONTIER_EVAL_EVALUATOR_TIMEOUT_S"] = str(
             task.evaluator_timeout_seconds
         )
         environment["PYTHONNOUSERSITE"] = "1"
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["FRONTIER_MALLOC_TOOLCHAIN"] = str(MALLOC_TOOLCHAIN_ROOT)
         try:
             completed = subprocess.run(
                 command,

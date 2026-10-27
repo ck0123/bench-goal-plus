@@ -764,7 +764,7 @@
     },
     {
       "id": "frontier-engineering-quantum-official",
-      "display_name": "Frontier-Engineering Quantum (corrected official main)",
+      "display_name": "Frontier-Engineering (official protocol, ARM64 toolchain fork)",
       "kind": "benchmark",
       "gate_set": "benchmark_search_methods",
       "priority": 3,
@@ -772,17 +772,17 @@
         {
           "role": "official-benchmark-and-evaluator",
           "upstream_url": "https://github.com/Einsia/Frontier-Engineering",
-          "fork_url": "https://github.com/Einsia/Frontier-Engineering",
-          "tracking_branch": "main",
+          "fork_url": "https://github.com/ck0123/Frontier-Engineering",
+          "tracking_branch": "fix/malloc-wasm-arm64",
           "license": "NOASSERTION"
         }
       ],
       "data_url": "https://github.com/Einsia/Frontier-Engineering",
-      "local_path": "third_party/frontier-engineering-official",
+      "local_path": "third_party/frontier-engineering-arm64",
       "docker_requirement": "not_required",
-      "docker_scope": "Linux ARM64 Quantum routing only, using managed uv runtimes and the unchanged official QASM3/bubblewrap candidate runner. Other v1-lite tasks are not qualified by this evidence.",
+      "docker_scope": "Linux ARM64 CPU paths using managed uv runtimes and the official evaluator protocol. The fork selects official ARM Malloc toolchains and preserves sampler no-bytecode environment forwarding. Previous Quantum method evidence remains task-scoped; CPU8 environment acceptance does not qualify untested methods or CUDA tasks.",
       "stages": {
-        "source_forked": "partial",
+        "source_forked": "pass",
         "environment": "pass",
         "official_verifier": "pass",
         "native_baseline": "pass",
@@ -798,9 +798,13 @@
         "evidence/environment/2026-10-27-frontier-quantum-official-protocol.json",
         "evidence/runs/2026-10-27-frontier-quantum-official-smokes.json",
         "evidence/runs/2026-10-27-frontier-quantum-official-adaptation.md",
-        "evidence/runs/2026-10-27-frontier-quantum-official-1h.json"
+        "evidence/runs/2026-10-27-frontier-quantum-official-1h.json",
+        "evidence/environment/2026-10-27-frontier-cpu8-arm64.json"
       ],
       "stage_evidence": {
+        "source_forked": [
+          "evidence/environment/2026-10-27-frontier-cpu8-arm64.json"
+        ],
         "official_verifier": [
           "evidence/environment/2026-10-27-frontier-quantum-official-protocol.json"
         ],
@@ -812,13 +816,15 @@
         ],
         "goal_plus_pi": [
           "evidence/runs/2026-10-27-frontier-quantum-official-1h.json"
+        ],
+        "environment": [
+          "evidence/environment/2026-10-27-frontier-cpu8-arm64.json"
         ]
       },
-      "next_action": "Use the accepted one-hour Plain Pi and Goal Plus Pi fork profiles for new experiments; establish matched wall-time coverage separately before performance comparisons.",
+      "next_action": "Run the CPU8 Plain Pi official-protocol profile, compare archived-code replays and paper history, then decide whether further Goal Plus reruns are needed.",
       "blockers": [
-        "The official source is used unchanged rather than maintaining a new benchmark-specific fork.",
         "Short smokes remain diagnostic and partial. One-hour Plain Pi and Goal Plus Pi fork lifecycle acceptance passed; Plain naturally ended after 676.8 seconds, so wall-time-matched performance comparison remains unproven.",
-        "Codex and OpenEvolve methods and other tasks have not been accepted on this corrected source.",
+        "CPU8 official seed checks pass on the ARM toolchain fork; CPU8 model trajectories and all CUDA tasks are not yet accepted. Codex and OpenEvolve acceptance remains separate.",
         "The full repository suite has unresolved failures outside Frontier; focused Frontier tests and official evaluator controls pass."
       ]
     }

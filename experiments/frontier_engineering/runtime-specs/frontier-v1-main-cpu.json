@@ -1,0 +1,28 @@
+{
+  "name": "frontier-v1-main",
+  "python": "3.12",
+  "requirements": [
+    "frontier_eval/requirements.txt"
+  ],
+  "packages": [
+    "numpy==1.26.4",
+    "scipy==1.17.1",
+    "pandas==2.3.3",
+    "stockpyl==1.0.2",
+    "job-shop-lib==1.7.1",
+    "torch==2.14.0",
+    "torchoptics==1.0.2",
+    "opencv-python-headless==4.11.0.86",
+    "h5py==3.16.0",
+    "tqdm==4.70.1"
+  ],
+  "notes": [
+    "CPU v1-lite dependencies, pinned to the historical Plain batch's scientific package versions.",
+    "Preserves the official evaluator. Unselected robotics, portfolio, and other optics-family GUI packages are excluded.",
+    "CUDA opt-in profiles continue to use the upstream full frontier-v1-main spec.",
+    "slmsuite uses the same-version headless OpenCV wheel on this non-GUI host; all its numerical dependencies are pinned above."
+  ],
+  "packages_no_deps": [
+    "slmsuite==0.3.0"
+  ]
+}

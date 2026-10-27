@@ -16,6 +16,7 @@ from bench_goal_plus.upstreams import external_goal_plus_source, registered_upst
 
 from .config import (
     GOAL_PLUS_ROOT,
+    MALLOC_TOOLCHAIN_ROOT,
     ROOT,
     UPSTREAM_KEY,
     UPSTREAM_ROOT,
@@ -420,10 +421,13 @@ def provision(profile: dict[str, Any]) -> dict[str, Any]:
     commands = []
     environment = configure_temp_environment(os.environ.copy())
     environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     for env_name in env_names:
         spec = (
             Path(__file__).resolve().parent / "runtime-specs/frontier-quantum.json"
             if env_name == "frontier-quantum"
+            else Path(__file__).resolve().parent / "runtime-specs/frontier-v1-main-cpu.json"
+            if env_name == "frontier-v1-main" and not profile_nvidia_cuda_tasks(profile)
             else UPSTREAM_ROOT / "scripts/env/specs" / f"{env_name}.json"
         )
         command = [
@@ -435,6 +439,29 @@ def provision(profile: dict[str, Any]) -> dict[str, Any]:
             "--envs-dir",
             str(UPSTREAM_ROOT / ".venvs"),
         ]
+        install_environment = environment
+        if env_name == "frontier-v1-summit":
+            # GPy 1.x builds against NumPy's 1.x C API. Isolated ARM64 builds
+            # otherwise select NumPy 2 even though SUMMIT requires NumPy < 2.
+            install_environment = {
+                **environment,
+                "UV_BUILD_CONSTRAINT": str(Path(__file__).resolve().parent
+                                           / "runtime-specs/summit-build-constraints.txt"),
+            }
+        subprocess.run(command, cwd=UPSTREAM_ROOT, env=install_environment, check=True)
+        commands.append(command)
+        # slmsuite declares GUI OpenCV, but this CPU runtime uses the same
+        # OpenCV version's headless build. Its other dependencies are pinned.
+        no_deps = json.loads(spec.read_text()).get("packages_no_deps", [])
+        if no_deps:
+            command = ["uv", "pip", "install", "--python",
+                       str(UPSTREAM_ROOT / ".venvs" / env_name / "bin/python"),
+                       "--no-deps", *no_deps]
+            subprocess.run(command, cwd=UPSTREAM_ROOT, env=environment, check=True)
+            commands.append(command)
+    if "ComputerSystems/MallocLab" in profile["task_ids"]:
+        command = ["python3", str(UPSTREAM_ROOT / "benchmarks/_shared/malloc_wasm/setup.py"),
+                   "--install", "--root", str(MALLOC_TOOLCHAIN_ROOT)]
         subprocess.run(command, cwd=UPSTREAM_ROOT, env=environment, check=True)
         commands.append(command)
     return {
@@ -448,7 +475,12 @@ def provision(profile: dict[str, Any]) -> dict[str, Any]:
 def _runtime_probe(env_name: str, modules: list[str]) -> dict[str, Any]:
     python = UPSTREAM_ROOT / ".venvs" / env_name / "bin/python"
     code = "; ".join(f"import {module}" for module in modules)
-    ok, output = command_output([str(python), "-c", code], cwd=UPSTREAM_ROOT)
+    environment = configure_temp_environment(os.environ.copy())
+    environment.pop("PYTHONPATH", None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    ok, output = command_output([str(python), "-c", code], cwd=UPSTREAM_ROOT,
+                                environment=environment)
     return {
         "kind": "runtime-import",
         "name": env_name,
@@ -571,6 +603,10 @@ def _seed_probe(task_id: str) -> dict[str, Any]:
     if task.runtime_python_env:
         command.extend(["--runtime-python-env", task.runtime_python_env])
     probe_environment = os.environ.copy()
+    probe_environment.pop("PYTHONPATH", None)
+    probe_environment["PYTHONNOUSERSITE"] = "1"
+    probe_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    probe_environment["FRONTIER_MALLOC_TOOLCHAIN"] = str(MALLOC_TOOLCHAIN_ROOT)
     probe_environment["FRONTIER_EVAL_EVALUATOR_TIMEOUT_S"] = str(
         task.evaluator_timeout_seconds
     )
@@ -685,11 +721,16 @@ def doctor(
             modules.extend(["openevolve", "openai"])
         checks.append(_runtime_probe("frontier-eval-driver", modules))
     if "frontier-v1-main" in required_envs:
-        checks.append(
-            _runtime_probe(
-                "frontier-v1-main", ["numpy", "scipy", "qiskit", "job_shop_lib", "pybullet"]
-            )
-        )
+        modules = {"numpy", "scipy"}
+        for task_id, imports in {
+            "JobShop/abz": {"job_shop_lib"},
+            "InventoryOptimization/disruption_eoqd": {"stockpyl"},
+            "Optics/holographic_multiplane_focusing": {"torch", "torchoptics", "slmsuite", "cv2"},
+            "Robotics/RobotArmCycleTimeOptimization": {"pybullet"},
+        }.items():
+            if task_id in profile["task_ids"]:
+                modules.update(imports)
+        checks.append(_runtime_probe("frontier-v1-main", sorted(modules)))
     if "frontier-quantum" in required_envs:
         checks.append(
             _runtime_probe("frontier-quantum", ["numpy", "scipy", "qiskit", "mqt.bench", "qiskit_qasm3_import"])

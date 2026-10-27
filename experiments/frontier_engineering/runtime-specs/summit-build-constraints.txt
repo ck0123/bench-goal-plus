@@ -1,0 +1,3 @@
+# GPy's Cython extensions require NumPy 1.x headers on Python 3.9 / ARM64.
+numpy==1.22.4
+setuptools<81

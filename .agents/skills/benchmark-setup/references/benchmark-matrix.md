@@ -218,3 +218,9 @@ Because the Codex binary executes from this mount, `/opt/codex` must explicitly 
 remaining `nosuid,nodev`; otherwise full doctor must fail with `Permission denied`. Only registered
 runtime mounts that execute binaries or load native libraries receive this exception; ordinary task
 scratch tmpfs mounts do not inherit it.
+
+Frontier CPU8 ARM64 setup uses the explicit `fix/malloc-wasm-arm64` upstream
+fork; CPU scientific dependencies, SUMMIT build constraints, headless OpenCV,
+and local Wasm toolchain are described in the
+[Frontier runner reference](../../benchmark-run/references/benchmarks/frontier-engineering.md#cpu8-official-protocol-rerun-on-arm64).
+Do not reuse old native Malloc scores as new Wasm64 scores.

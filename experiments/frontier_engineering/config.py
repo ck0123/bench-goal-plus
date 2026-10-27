@@ -14,6 +14,7 @@ from bench_goal_plus.upstreams import registered_upstream_source_path
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE_DIR = Path(__file__).resolve().parent / "profiles"
 RUNS_ROOT = ROOT / "runs" / "frontier-engineering"
+MALLOC_TOOLCHAIN_ROOT = ROOT / ".tmp" / "frontier-malloc-wasm-arm64"
 UPSTREAM_KEY = "frontier_engineering_official"
 UPSTREAM_ROOT = registered_upstream_source_path(UPSTREAM_KEY, repository_root=ROOT)
 GOAL_PLUS_ROOT = registered_upstream_source_path(

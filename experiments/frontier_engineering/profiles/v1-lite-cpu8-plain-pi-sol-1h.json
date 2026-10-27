@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "v1-lite-cpu8-plain-pi-sol-1h",
+  "benchmark_id": "frontier-engineering",
+  "suite": "v1-lite",
+  "accelerator_policy": "cpu-only",
+  "task_ids": [
+    "ComputerSystems/MallocLab",
+    "JobShop/abz",
+    "InventoryOptimization/disruption_eoqd",
+    "EnergyStorage/BatteryFastChargingSPMe",
+    "Optics/holographic_multiplane_focusing",
+    "WirelessChannelSimulation/HighReliableSimulation",
+    "ReactionOptimisation/snar_multiobjective",
+    "StructuralOptimization/TopologyOptimization"
+  ],
+  "methods": [
+    "plain-pi"
+  ],
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "medium",
+  "wall_time_seconds": 3600,
+  "concurrency": 1,
+  "cell_concurrency": 1,
+  "seeds": [
+    1
+  ],
+  "soft_closeout_seconds": 120,
+  "hard_kill_grace_seconds": 60,
+  "worker_runtime_seconds": 1800,
+  "worker_min_runtime_seconds": null,
+  "doctor_seed_evaluation": true
+}
