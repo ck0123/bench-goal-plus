@@ -1475,6 +1475,25 @@ def write_pi_models_config(
     models_path = target / "models.json"
     models_path.write_text(json.dumps(payload, indent=2) + "\n")
     models_path.chmod(0o600)
+    settings_path = target / "settings.json"
+    if not settings_path.exists():
+        # Benchmark relays are intermittently unavailable; Pi's default three
+        # provider retries kill long sessions on the first burst. Raise the
+        # retry budget so a flaky upstream is waited out instead of ending
+        # the run with hours of budget left.
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "retry": {
+                        "maxRetries": 10,
+                        "provider": {"maxRetryDelayMs": 30000},
+                    }
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        settings_path.chmod(0o600)
 
 
 def write_openevolve_config(
