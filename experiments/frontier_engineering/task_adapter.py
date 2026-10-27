@@ -155,8 +155,24 @@ def task_text(task_dir: Path, task: TaskContract) -> str:
         "",
         f"Optimize `{task.artifact_name}` for Frontier-Engineering task `{task.task_id}`.",
         "Preserve feasibility and maximize the official `combined_score`.",
+        "",
+        "## Editable artifact (authoritative)",
+        "",
+        f"- The single editable artifact in this workspace is the top-level `{task.artifact_name}`,",
+        "  materialized from the official initial program.",
+        "- `python3 evaluate.py` scores the top-level artifact only; changes anywhere else",
+        "  are ignored or rejected.",
+        "- Upstream context embedded below may reference other entrypoints such as",
+        "  `baseline/solve.py`; that path belongs to the original Frontier harness and does",
+        f"  not exist in this workspace. Do not create or edit `baseline/` — implement every",
+        f"  change in the top-level `{task.artifact_name}`.",
     ]
     for relative in metadata_list(task_dir, "agent_files.txt"):
+        # The upstream task descriptions duplicate this TASK.md and declare the
+        # original harness entrypoint (baseline/solve.py) as the only editable
+        # file, which contradicts the materialized workspace contract above.
+        if relative.name in ("TASK.md", "TASK_zh-CN.md"):
+            continue
         path = task_dir / relative
         if path.is_file():
             sections.extend(
