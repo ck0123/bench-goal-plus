@@ -132,8 +132,12 @@ def _is_knowledge_content(value: Any) -> bool:
     """Shared knowledge entries carry structured content (str→str dict).
 
     The shared-cache era used a flat content string; the board stores a
-    dict keyed by the frozen section template's content keys.
+    dict keyed by the frozen section template's content keys. Both shapes
+    are accepted so a legacy-format runtime projection still reaches the
+    workers instead of being swallowed by the closed-field check.
     """
+    if isinstance(value, str):
+        return bool(value.strip())
     return (
         isinstance(value, dict)
         and bool(value)
