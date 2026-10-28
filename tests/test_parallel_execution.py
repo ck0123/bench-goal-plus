@@ -79,8 +79,54 @@ class ParallelExecutionTest(unittest.TestCase):
                     elif corruption == "native": ds[-1]["native_session_id"] = "other"
                     elif corruption == "ambiguous": ds.append({**ds[-1], "invocation_id": "extra"})
                     elif corruption == "invocation": ds[0]["invocation_id"] = "unrelated"
-                    elif corruption == "idle": ds[-1]["ended_at"] = "2026-10-27T00:00:30Z"
+                    # A mid-run idle stretch (last dispatch starts late, after a
+                    # >max_idle gap since the previous one ended) must still fail.
+                    elif corruption == "idle":
+                        ds[-1]["started_at"] = "2026-10-27T00:00:20Z"
                     self.assertFalse(audit(bad)["passed"])
+
+    def test_continued_lane_tail_idle_is_natural_completion(self):
+        """A continued lane that stops minutes before the deadline has
+        finished early, not stalled: the trailing idle is recorded but does
+        not fail the audit (regression for the libxml2 20261028 false
+        partial, where both lanes settled ~194s before the deadline)."""
+        with tempfile.TemporaryDirectory(dir=ensure_temp_root("parallel-tests")) as directory:
+            folder = Path(directory)
+            entries = []
+
+            def receipt(second, tool, args, result):
+                call_id = f"tool-{len(entries)}"
+                stamp = f"2026-10-27T00:00:{second:02d}+00:00"
+                entries.extend([
+                    {"timestamp": stamp, "message": {"role": "assistant", "content": [
+                        {"type": "toolCall", "id": call_id, "arguments": args}]}},
+                    {"timestamp": stamp, "message": {"role": "toolResult",
+                        "toolName": tool, "toolCallId": call_id, "details": result}},
+                ])
+
+            def launch(second, candidate, window):
+                receipt(second, "goal_plus_session_run",
+                        {"run_id": "run", "candidate_id": candidate},
+                        {"session_id": candidate, "call_id": window, "state": "running"})
+
+            def finish(second, candidate, window):
+                receipt(second, "goal_plus_session_wait_any", {}, {"finished": [
+                    {"session_id": candidate, "call_id": window, "state": "completed"}]})
+
+            # Two invocations per lane, last one settles at t=30; deadline 60.
+            for candidate in ("a", "b"):
+                launch(0 if candidate == "a" else 1, candidate, "one")
+                finish(9 if candidate == "a" else 10, candidate, "one")
+                launch(10 if candidate == "a" else 11, candidate, "two")
+            for candidate in ("a", "b"):
+                finish(30, candidate, "two")
+            (folder / "main.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
+            result = audit_pi_parallel_execution(folder, expected_workers=2,
+                exploration_deadline="2026-10-27T00:01:00Z", max_idle_seconds=5)
+            self.assertTrue(result["passed"], result["errors"])
+            for lane in result["lanes"]:
+                self.assertGreaterEqual(lane["tail_idle_seconds"], 29)
+                self.assertLessEqual(lane["max_idle_seconds"], 5)
 
     def test_native_receipts_distinguish_initial_k_from_continued_execution(self):
         with tempfile.TemporaryDirectory(dir=ensure_temp_root("parallel-tests")) as directory:
