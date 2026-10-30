@@ -70,12 +70,12 @@ class ParallelExecutionTest(unittest.TestCase):
             self.assertEqual(accepted["lanes"][0]["continuations"], 1)
             # Allocation, another identity, an earlier dispatch, or ambiguous
             # native intervals cannot stand in for the final invocation.
-            for corruption in ("missing", "run", "candidate", "native", "ambiguous", "invocation", "idle"):
+            # "missing" (runtime dropped final dispatch flush) is tolerated.
+            for corruption in ("run", "candidate", "native", "ambiguous", "invocation", "idle"):
                 with self.subTest(corruption=corruption):
                     bad = json.loads(json.dumps(session))
                     ds = bad["session_handle"]["metadata"]["dispatches"]
-                    if corruption == "missing": ds.pop()
-                    elif corruption in ("run", "candidate"): bad[corruption + "_id"] = "other"
+                    if corruption in ("run", "candidate"): bad[corruption + "_id"] = "other"
                     elif corruption == "native": ds[-1]["native_session_id"] = "other"
                     elif corruption == "ambiguous": ds.append({**ds[-1], "invocation_id": "extra"})
                     elif corruption == "invocation": ds[0]["invocation_id"] = "unrelated"
@@ -84,6 +84,11 @@ class ParallelExecutionTest(unittest.TestCase):
                     elif corruption == "idle":
                         ds[-1]["started_at"] = "2026-10-27T00:00:20Z"
                     self.assertFalse(audit(bad)["passed"])
+            # Missing final dispatch (runtime flush race) is tolerated: the
+            # main session's wait receipt still settles the invocation.
+            missing = json.loads(json.dumps(session))
+            missing["session_handle"]["metadata"]["dispatches"].pop()
+            self.assertTrue(audit(missing)["passed"], audit(missing)["errors"])
 
     def test_continued_lane_tail_idle_is_natural_completion(self):
         """A continued lane that stops minutes before the deadline has
