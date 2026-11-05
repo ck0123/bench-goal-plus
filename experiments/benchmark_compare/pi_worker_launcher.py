@@ -126,6 +126,26 @@ _BLIND_KNOWLEDGE_ENTRY_FIELDS = {
     "confidence",
     "limits",
 }
+
+
+def _is_knowledge_content(value: Any) -> bool:
+    """Shared knowledge entries carry structured content (str→str dict).
+
+    The shared-cache era used a flat content string; the board stores a
+    dict keyed by the frozen section template's content keys. Both shapes
+    are accepted so a legacy-format runtime projection still reaches the
+    workers instead of being swallowed by the closed-field check.
+    """
+    if isinstance(value, str):
+        return bool(value.strip())
+    return (
+        isinstance(value, dict)
+        and bool(value)
+        and all(
+            isinstance(key, str) and isinstance(item, str)
+            for key, item in value.items()
+        )
+    )
 _BLIND_CONTEXT_SOURCE_FIELDS = {
     "agent_session_id",
     "best_iteration",
@@ -794,9 +814,11 @@ def _blind_shared_knowledge_snapshot(
     for entry in entries:
         if not isinstance(entry, dict) or not set(entry) <= _BLIND_KNOWLEDGE_ENTRY_FIELDS:
             return _INVALID_BLIND_RESPONSE
-        for field in ("key", "title", "section_key", "content", "writer", "record_id"):
+        for field in ("key", "title", "section_key", "writer", "record_id"):
             if not isinstance(entry.get(field), str) or not entry[field]:
                 return _INVALID_BLIND_RESPONSE
+        if not _is_knowledge_content(entry.get("content")):
+            return _INVALID_BLIND_RESPONSE
         for field in ("superseded_by", "evidence_ref"):
             if entry.get(field) is not None and not isinstance(entry[field], str):
                 return _INVALID_BLIND_RESPONSE
@@ -849,9 +871,11 @@ def _blind_appended_shared_knowledge(
     for entry in view:
         if not isinstance(entry, dict) or not set(entry) <= _BLIND_KNOWLEDGE_ENTRY_FIELDS:
             return _INVALID_BLIND_RESPONSE
-        for field in ("key", "title", "section_key", "content", "writer", "record_id"):
+        for field in ("key", "title", "section_key", "writer", "record_id"):
             if not isinstance(entry.get(field), str) or not entry[field]:
                 return _INVALID_BLIND_RESPONSE
+        if not _is_knowledge_content(entry.get("content")):
+            return _INVALID_BLIND_RESPONSE
         for field in ("superseded_by", "evidence_ref"):
             if entry.get(field) is not None and not isinstance(entry[field], str):
                 return _INVALID_BLIND_RESPONSE

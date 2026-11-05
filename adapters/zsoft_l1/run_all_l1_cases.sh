@@ -37,12 +37,11 @@ resolve_work_dir() {
 readonly WORK_DIR="$(resolve_work_dir)"
 [[ -n "$WORK_DIR" && -f "$WORK_DIR/scripts/bench.py" ]] \
     || { printf '错误: 无法定位 bench-goal-plus 仓库根 (设置 BENCH_GOAL_PLUS_WORK_DIR 可覆盖)\n' >&2; exit 1; }
-# Base directory (relative to WORK_DIR) that benchmarks write their campaign runs to.
-# Isolated from the historical "runs/benchmark-campaigns" so new data does not mix with
-# prior runs; the Python side must receive --campaign-dir explicitly or it would fall
-# back to runs/benchmark-campaigns (common_matrix). Keep this under runs/ so the
-# ensure_under(RUNS_ROOT) guard in common_matrix passes.
-readonly CAMPAIGN_BASE="runs/benchmark-campaigns-v3"
+readonly CAMPAIGN_BASE="${L1_CAMPAIGN_BASE:-runs/l1-deepseek-v4.1-flash-1017-withboard}"
+if [[ "$CAMPAIGN_BASE" != runs/* || "$CAMPAIGN_BASE" =~ \.\.|/./|// ]]; then
+    printf '错误: L1_CAMPAIGN_BASE 必须是 WORK_DIR 下以 runs/ 开头且不含 .. 的相对路径(当前: %s);跨盘存储请用软链接(见脚本头部注释)\n' "$CAMPAIGN_BASE" >&2
+    exit 1
+fi
 readonly ZSOFT_CHECKOUT="$WORK_DIR/third_party/zsoft-bench"
 readonly ZSOFT_ROOT="$WORK_DIR/third_party/zsoft-bench/benchmarks/vulnerability/zsoft-l1"
 readonly TASKS_DIR="$ZSOFT_ROOT/tasks"
@@ -81,6 +80,16 @@ CELL_CONCURRENCY=1
 REPEAT_COUNT=1
 MAX_INFRA_ATTEMPTS="${L1_MAX_INFRA_ATTEMPTS:-2}"
 STATUS_INTERVAL_SECONDS="${L1_STATUS_INTERVAL_SECONDS:-60}"
+# REA 逆向分析工具（沙箱内只读挂载 + workspace 内 rea-analysis Skill）。
+# 开关与 detect 侧一致：L1_REA=1 时导出 BENCH_GOAL_PLUS_REA_ROOT，
+# 由 Pi worker launcher 把 REA 包只读挂载到沙箱 /opt/rea，
+# 并通过 BENCH_GOAL_PLUS_ZSOFT_L1_REA_TOOLS=1 让 adapter 复制 rea-analysis Skill。
+readonly L1_REA_ENABLED="${L1_REA:-0}"
+# Shared Knowledge Board(opt-in):开启后 bench 传 --shared-cache,执行期由
+# shared_knowledge_template() 按 benchmark 导出 PoC 专用模板
+# (target_facts / trigger_hypotheses / poc_verdicts,判定条目强制锚定已结算迭代)。
+readonly L1_SHARED_KNOWLEDGE_ENABLED="${L1_SHARED_KNOWLEDGE:-0}"
+readonly L1_REA_ROOT="${L1_REA_ROOT:-/home/tangzhiyun/workspace/rea}"
 ACTIVE_HEARTBEAT_PID=""
 SOURCE_CACHE_RESOLVED=""
 SOURCE_CACHE_STORAGE_MODE="unconfigured"
@@ -115,19 +124,36 @@ CASE_ID 示例（完整列表请使用 --list-cases）:
   umdk-001-get-lock-request-preauth-crash
 
 可选环境变量:
-  DEEPSEEK_API_KEY              已设置时不再交互读取
+  L1_PROVIDER                   模型提供方: deepseek(默认) 或 glm
+  L1_MODEL                      覆盖默认模型(deepseek→DeepSeek-V4.1-Flash-1017, glm→glm-4.6)
+  L1_PI_API                     Pi API 协议: openai-completions(默认) 或 anthropic-messages
+  DEEPSEEK_API_KEY / GLM_API_KEY   按 provider 二选一,已设置时不再交互读取
+  L1_REA                        1 时在 worker 沙箱内启用 rea CLI（默认 0）
+  L1_SHARED_KNOWLEDGE           1 时开启 Shared Knowledge Board（PoC 模板，默认 0；
+                                需 BENCH_GOAL_PLUS_SOURCE_DIR 指向含 PR !86 的检出）
+  L1_REA_ROOT                   REA 包根目录路径（默认 /home/tangzhiyun/workspace/rea）
   L1_SOURCE_CACHE_DIR           明确指定的额外 .cache/sources 目录；不会自动扫描磁盘
   L1_STORAGE_ROOT               prepare 脚本使用的明确外置存储根目录
   L1_MAX_INFRA_ATTEMPTS         基础设施失败最大尝试次数
   L1_STATUS_INTERVAL_SECONDS    实验运行心跳间隔，默认 60 秒
   L1_CAMPAIGN_MIN_FREE_GIB      本地磁盘可用空间低于该 GiB 时把 campaign 输出迁到外置磁盘，默认 80
   L1_STORAGE_ROOT              外置存储根目录（源码缓存/迁出的 campaign），默认 /srv/zsoft-l1
+  L1_CAMPAIGN_BASE              campaign 输出的基路径(默认 runs/benchmark-campaigns-v3;
+                                必须以 runs/ 开头;跨盘请用软链接,见脚本头部注释)
   L1_CAMPAIGN_EXTERNAL_ROOT     磁盘不足时的外置 campaign 目录，默认 $L1_STORAGE_ROOT/campaigns/... ；会在当前目录留软链接
 
 环境复用:
   仅复用通过版本指纹校验的 L1 Docker judge 环境。
   锁定源码缓存按 source-lock 元数据单独校验和复用。
   campaign、实验 workspace 和 Goal Plus 状态始终重新创建。
+
+断网契约:
+  每个 Pi worker 在 bwrap 沙箱内运行（仅 loopback 网络 + 桩 DNS），唯一
+  出口是 api-only LLM 中继，模型无法访问外部源码仓库。运行前脚本会校验
+  bwrap/node 可用；跑后可用 scripts/audit_network_access.py 复核出网记录。
+  设置 BENCH_GOAL_PLUS_SOURCE_DIR 可改用外部 goal-plus 检出（与 detect 相同
+  做法,如 /data/disk/tangzhiyun/muyuan/plugins/goal-plus）;BENCH_GOAL_PLUS_
+  EXPECTED_REF 为可选 pin,设置时 HEAD 必须精确匹配。
 USAGE
 }
 
@@ -593,15 +619,72 @@ esac
 
 readonly TOTAL_TASK_CELLS=$((${#CASE_IDS[@]} * REPEAT_COUNT))
 
-if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
-    [[ -t 0 ]] || die "非交互运行前必须先 export DEEPSEEK_API_KEY"
-    read -rsp '请输入 DEEPSEEK_API_KEY: ' DEEPSEEK_API_KEY
+readonly L1_PROVIDER="${L1_PROVIDER:-deepseek}"
+case "$L1_PROVIDER" in
+    deepseek)
+        PROVIDER_KEY_ENV="DEEPSEEK_API_KEY"
+        PROVIDER_BASE_ENV="DEEPSEEK_BASE_URL"
+        # 与 detect 完全一致:走 113 网关(pool key 只放行该网关的模型池),
+        # 官方 api.deepseek.com 会以 key_model_access_denied 拒绝此 key。
+        PROVIDER_BASE_DEFAULT="http://113.46.219.251:8080/v1"
+        PROVIDER_MODEL_DEFAULT="DeepSeek-V4.1-Flash-1017"
+        ;;
+    glm)
+        PROVIDER_KEY_ENV="GLM_API_KEY"
+        PROVIDER_BASE_ENV="GLM_BASE_URL"
+        PROVIDER_BASE_DEFAULT="https://open.bigmodel.cn/api/paas/v4"
+        PROVIDER_MODEL_DEFAULT="glm-4.6"
+        ;;
+    *)
+        die "L1_PROVIDER 只能是 deepseek 或 glm(当前: $L1_PROVIDER)"
+        ;;
+esac
+readonly L1_MODEL="${L1_MODEL:-$PROVIDER_MODEL_DEFAULT}"
+readonly PROVIDER_KEY_ENV PROVIDER_BASE_ENV
+readonly L1_PI_API="${L1_PI_API:-openai-completions}"
+case "$L1_PI_API" in
+    openai-completions|anthropic-messages) ;;
+    *) die "L1_PI_API 只能是 openai-completions 或 anthropic-messages(当前: $L1_PI_API)" ;;
+esac
+
+if [[ -z "${!PROVIDER_KEY_ENV:-}" ]]; then
+    [[ -t 0 ]] || die "非交互运行前必须先 export $PROVIDER_KEY_ENV"
+    read -rsp "请输入 $PROVIDER_KEY_ENV: " PROVIDER_KEY_VALUE
     printf '\n'
+    export "$PROVIDER_KEY_ENV=$PROVIDER_KEY_VALUE"
 fi
-[[ -n "$DEEPSEEK_API_KEY" ]] || die "DEEPSEEK_API_KEY 不能为空"
-export DEEPSEEK_API_KEY
-export DEEPSEEK_BASE_URL='https://api.deepseek.com'
+[[ -n "${!PROVIDER_KEY_ENV:-}" ]] || die "$PROVIDER_KEY_ENV 不能为空"
+export "$PROVIDER_BASE_ENV=${!PROVIDER_BASE_ENV:-$PROVIDER_BASE_DEFAULT}"
 unset OPENAI_BASE_URL OPENAI_API_BASE_URL OPENAI_API_BASE
+# 只保留所选 provider 的 base URL,避免断网中继因检测到多个上游而拒绝启动
+if [[ "$L1_PROVIDER" == "glm" ]]; then
+    unset DEEPSEEK_BASE_URL
+else
+    unset GLM_BASE_URL
+fi
+
+# Shared Knowledge Board 依赖含 PR !86 的 goal-plus 运行时;默认受管检出
+# (third_party/muyuan, 2026-09-24) 早于 board 合入,静默回退会拿到旧共享行为。
+if [[ "$L1_SHARED_KNOWLEDGE_ENABLED" == "1" ]]; then
+    if [[ -z "${BENCH_GOAL_PLUS_SOURCE_DIR:-}" ]]; then
+        die "L1_SHARED_KNOWLEDGE=1 需要含 knowledge board 的 goal-plus 运行时:请 export BENCH_GOAL_PLUS_SOURCE_DIR=<检出>(如 /data/disk/tangzhiyun/muyuan/plugins/goal-plus,含 PR !86)"
+    fi
+    [[ -f "$BENCH_GOAL_PLUS_SOURCE_DIR/src/goal_plus/domain/shared_knowledge.py" ]] \
+        || die "L1_SHARED_KNOWLEDGE=1 但检出不含 shared knowledge board(缺 src/goal_plus/domain/shared_knowledge.py): $BENCH_GOAL_PLUS_SOURCE_DIR"
+fi
+
+# REA 工具开关：启用时校验包完整性并导出两个环境变量——
+#   BENCH_GOAL_PLUS_REA_ROOT            Pi worker launcher 据此把 REA 只读挂载到沙箱 /opt/rea
+#   BENCH_GOAL_PLUS_ZSOFT_L1_REA_TOOLS  adapter 据此在 workspace 物化 .agents/skills/rea-analysis
+# 默认（L1_REA=0）两个变量都不导出，保持既有 campaign 契约不变。
+if [[ "$L1_REA_ENABLED" == "1" ]]; then
+    [[ -f "$L1_REA_ROOT/scripts/rea.mjs" && -d "$L1_REA_ROOT/node_modules" ]] \
+        || die "L1_REA=1 但 REA 包不完整（需要 scripts/rea.mjs 和 node_modules）: $L1_REA_ROOT"
+    export BENCH_GOAL_PLUS_REA_ROOT="$L1_REA_ROOT"
+    export BENCH_GOAL_PLUS_ZSOFT_L1_REA_TOOLS=1
+else
+    unset BENCH_GOAL_PLUS_REA_ROOT BENCH_GOAL_PLUS_ZSOFT_L1_REA_TOOLS
+fi
 
 cleanup_runtime() {
     if [[ -n "$ACTIVE_HEARTBEAT_PID" ]]; then
@@ -609,7 +692,8 @@ cleanup_runtime() {
         wait "$ACTIVE_HEARTBEAT_PID" 2>/dev/null || true
         ACTIVE_HEARTBEAT_PID=""
     fi
-    unset DEEPSEEK_API_KEY
+    unset "$PROVIDER_KEY_ENV"
+    unset BENCH_GOAL_PLUS_REA_ROOT BENCH_GOAL_PLUS_ZSOFT_L1_REA_TOOLS
 }
 
 handle_interrupt() {
@@ -654,13 +738,19 @@ fi
 {
     printf 'L1 Case 运行汇总\n'
     printf '开始时间: %s\n' "$(date --iso-8601=seconds)"
-    printf '配置: model=deepseek-v4-flash reasoning=high T=%d K=%d C=%d R=%d\n' \
-        "$WALL_TIME_SECONDS" "$LIVE_SEARCH_CONCURRENCY" \
+    printf '配置: provider=%s model=%s reasoning=high T=%d K=%d C=%d R=%d\n' \
+        "$L1_PROVIDER" "$L1_MODEL" "$WALL_TIME_SECONDS" \
+        "$LIVE_SEARCH_CONCURRENCY" \
         "$CELL_CONCURRENCY" "$REPEAT_COUNT"
     printf '运行心跳间隔: %s 秒\n' "$STATUS_INTERVAL_SECONDS"
     printf '锁定源码缓存: %s\n' "$CURRENT_SOURCE_CACHE"
     printf '锁定源码缓存实际位置: %s\n' "$SOURCE_CACHE_RESOLVED"
     printf '锁定源码缓存模式: %s\n' "$SOURCE_CACHE_STORAGE_MODE"
+    printf 'worker 断网: bwrap loopback-only + api-only LLM 中继\n'
+    printf 'Shared Knowledge Board: %s\n' "$([[ "$L1_SHARED_KNOWLEDGE_ENABLED" == "1" ]] && printf 'enabled(PoC 模板)' || printf 'disabled')"
+    printf 'goal-plus 运行时来源: %s\n' \
+        "$([[ -n "${BENCH_GOAL_PLUS_SOURCE_DIR:-}" ]] && printf 'external %s @ %s' "${BENCH_GOAL_PLUS_EXPECTED_REF:-?}" "$BENCH_GOAL_PLUS_SOURCE_DIR" || printf 'managed checkout (third_party/muyuan)')"
+    printf 'REA 工具: %s\n' "$([[ "$L1_REA_ENABLED" == "1" ]] && printf 'enabled root=%s' "$L1_REA_ROOT" || printf 'disabled')"
     printf '计划 case 数: %d\n' "${#CASE_IDS[@]}"
     printf '计划 task cell 数: %d\n' "$TOTAL_TASK_CELLS"
     printf 'case_id\tseed\tstatus\tattempts\tcampaign_id\treason\tcase_log\n'
@@ -671,9 +761,71 @@ status_message "INIT log_dir=$LOG_DIR progress_file=$PROGRESS_FILE"
 status_message \
     "INIT l1_state_dir=$STATE_DIR source_cache=$CURRENT_SOURCE_CACHE source_cache_resolved=$SOURCE_CACHE_RESOLVED storage_mode=$SOURCE_CACHE_STORAGE_MODE"
 status_message \
-    "CONFIG model=deepseek-v4-flash reasoning=high T=$WALL_TIME_SECONDS K=$LIVE_SEARCH_CONCURRENCY C=$CELL_CONCURRENCY R=$REPEAT_COUNT"
+    "INIT rea_tools enabled=$L1_REA_ENABLED root=$L1_REA_ROOT"
+status_message \
+    "INIT shared_knowledge enabled=$L1_SHARED_KNOWLEDGE_ENABLED template=poc(target_facts/trigger_hypotheses/poc_verdicts)"
+status_message \
+    "CONFIG provider=$L1_PROVIDER model=$L1_MODEL api=$L1_PI_API reasoning=high T=$WALL_TIME_SECONDS K=$LIVE_SEARCH_CONCURRENCY C=$CELL_CONCURRENCY R=$REPEAT_COUNT"
 status_message \
     "QUEUE cases=${#CASE_IDS[@]} task_cells=$TOTAL_TASK_CELLS execution=serial"
+
+# —— worker 断网契约预检（与 zsoft-detect 相同机制，参考 run_all_detect_cases.sh）——
+# goal-plus-pi 的每个 Pi worker 都由共享 launcher 放入 bwrap 沙箱：
+#   独立 network namespace（仅 loopback）+ 桩 DNS；唯一出口是 api-only LLM
+#   中继（沙箱内 127.0.0.1:8787 → 私有 unix socket → 宿主 → 单一模型 API
+#   上游）。模型因此无法访问 GitHub 等外部站点，也就无法直接检索上游源码
+#   仓库或现成 PoC。manifest 中的 network_isolation=loopback-relay-api-only
+#   标注该契约；跑后可用 scripts/audit_network_access.py 复核 worker 出网。
+# 下面三段预检保证该机制在本机成立，失败时立刻终止而不是带网运行。
+
+# 启动前校验外部 goal-plus 检出停留在期望 ref 上(如共享平面组件分支),
+# 避免静默回退到不含 worker 沙箱/断网中继契约的默认运行时。
+# 启动前校验外部 goal-plus 检出身份。EXPECTED_REF 为可选 pin：
+# 设置时 HEAD 必须精确匹配（可复现实验）；未设置时直接使用当前 HEAD，
+# 下游 upstreams 层仍会校验工作树干净并锁定 prepare↔run 一致性。
+if [[ -n "${BENCH_GOAL_PLUS_SOURCE_DIR:-}" ]]; then
+    gp_head="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" rev-parse HEAD 2>/dev/null)" \
+        || die "BENCH_GOAL_PLUS_SOURCE_DIR 不是可用的 git 检出: $BENCH_GOAL_PLUS_SOURCE_DIR"
+    if [[ -n "${BENCH_GOAL_PLUS_EXPECTED_REF:-}" ]]; then
+        gp_want="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" rev-parse --verify --end-of-options "${BENCH_GOAL_PLUS_EXPECTED_REF}^{commit}" 2>/dev/null)" \
+            || die "goal-plus 检出中找不到 ref: $BENCH_GOAL_PLUS_EXPECTED_REF"
+        if [[ "$gp_head" != "$gp_want" ]]; then
+            gp_branch="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" branch --show-current 2>/dev/null || true)"
+            die "goal-plus 检出 HEAD 与 BENCH_GOAL_PLUS_EXPECTED_REF=$BENCH_GOAL_PLUS_EXPECTED_REF 不一致(当前: ${gp_branch:-detached} $gp_head)。二选一: 精确复现请 git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" checkout $BENCH_GOAL_PLUS_EXPECTED_REF;直接使用当前 HEAD 请 unset BENCH_GOAL_PLUS_EXPECTED_REF"
+        fi
+        status_message "GOAL_PLUS_SOURCE dir=$BENCH_GOAL_PLUS_SOURCE_DIR ref=$BENCH_GOAL_PLUS_EXPECTED_REF commit=$gp_head"
+    else
+        status_message "GOAL_PLUS_SOURCE dir=$BENCH_GOAL_PLUS_SOURCE_DIR ref=<current HEAD> commit=$gp_head"
+    fi
+else
+    status_message \
+        "GOAL_PLUS_SOURCE mode=managed_checkout(third_party/muyuan;设置 BENCH_GOAL_PLUS_SOURCE_DIR 可改用外部检出,BENCH_GOAL_PLUS_EXPECTED_REF 可选 pin)"
+fi
+
+# 宿主机环境加固（无 systemd 用户会话的主机需要）：
+# 1) Pi worker 的 Unix socket 要求私有的短路径 XDG_RUNTIME_DIR（本机无 /run/user/<uid>）
+# 2) pi-shim 的 `#!/usr/bin/env python3` 必须解析到仓库锁定的 Python 3.12
+#    （系统 python 3.9 无法运行 launcher 代码）
+# 3) bwrap 沙箱内只能看到 /usr 与 runtime root；断网中继 llm-relay 与 pi 运行时
+#    都是 `#!/usr/bin/env node`，沙箱内可用的现代 node 需以真实二进制形式放在
+#    ~/.local/bin/node（v22，勿用符号链接——指向 ~/.nvm 的符号链接在沙箱内不可见）
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+    export XDG_RUNTIME_DIR="$HOME/.xdg-runtime"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+fi
+export PATH="$WORK_DIR/.bench-env/venv/bin:$HOME/.local/bin:$PATH"
+
+command -v bwrap >/dev/null 2>&1 \
+    || die "worker 断网沙箱需要 bwrap（当前 PATH 未找到；正确路径示例: ~/.local/bin/bwrap）"
+node_path="$(command -v node 2>/dev/null || true)"
+[[ -n "$node_path" ]] || die "worker 断网沙箱需要 node（llm-relay 与 pi 运行时均为 node 程序）"
+node_real="$(readlink -f "$node_path")"
+if [[ "$node_real" != /usr/* && "$node_real" != "$HOME"/.local/* ]]; then
+    die "node 必须以真实二进制位于 /usr 或 ~/.local/bin（当前: $node_path -> $node_real）；nvm 符号链接在沙箱内不可见，断网中继无法启动。请复制真实二进制: cp \"$(readlink -f "$node_path")\" ~/.local/bin/node"
+fi
+status_message \
+    "NETWORK_ISOLATION worker_sandbox=bwrap-loopback-only llm_egress=api-only-relay bwrap=$(command -v bwrap) node=$node_real"
 
 ensure_campaign_storage
 
@@ -685,12 +837,12 @@ if {
     "$PYTHON" scripts/bench.py setup \
         --benchmark zsoft-l1 \
         --method goal-plus-pi \
-        --model deepseek-v4-flash \
+        --model "$L1_MODEL" \
         --reasoning-effort high \
-        --pi-provider-id deepseek \
-        --pi-api openai-completions \
-        --pi-api-key-env DEEPSEEK_API_KEY \
-        --pi-api-base-env DEEPSEEK_BASE_URL \
+        --pi-provider-id "$L1_PROVIDER" \
+        --pi-api "$L1_PI_API" \
+        --pi-api-key-env "$PROVIDER_KEY_ENV" \
+        --pi-api-base-env "$PROVIDER_BASE_ENV" \
         --skip-bootstrap \
         --skip-provision
 } >"$PREFLIGHT_LOG" 2>&1; then
@@ -807,12 +959,12 @@ build_bench_args() {
         --campaign-dir "$WORK_DIR/$CAMPAIGN_BASE/$campaign_id"
         --method goal-plus-pi
         --seed "$seed"
-        --model deepseek-v4-flash
+        --model "$L1_MODEL"
         --reasoning-effort high
-        --pi-provider-id deepseek
-        --pi-api openai-completions
-        --pi-api-key-env DEEPSEEK_API_KEY
-        --pi-api-base-env DEEPSEEK_BASE_URL
+        --pi-provider-id "$L1_PROVIDER"
+        --pi-api "$L1_PI_API"
+        --pi-api-key-env "$PROVIDER_KEY_ENV"
+        --pi-api-base-env "$PROVIDER_BASE_ENV"
         --wall-time-seconds "$WALL_TIME_SECONDS"
         --live-search-concurrency "$LIVE_SEARCH_CONCURRENCY"
         --cell-concurrency "$CELL_CONCURRENCY"
@@ -822,6 +974,9 @@ build_bench_args() {
         --skip-provision
         --foreground
     )
+    if [[ "$L1_SHARED_KNOWLEDGE_ENABLED" == "1" ]]; then
+        BENCH_ARGS+=(--shared-cache)
+    fi
 }
 
 start_launch_heartbeat() {
@@ -902,13 +1057,14 @@ campaign_contract_valid() {
     jq -e \
         --arg case_id "$case_id" \
         --argjson seed "$seed" \
+        --arg model "$L1_MODEL" \
         --argjson wall_time "$WALL_TIME_SECONDS" \
         --argjson live_concurrency "$LIVE_SEARCH_CONCURRENCY" \
         --argjson cell_concurrency "$CELL_CONCURRENCY" '
         .task_id == $case_id and
         .methods == ["goal-plus-pi"] and
         .seeds == [$seed] and
-        .model == "deepseek-v4-flash" and
+        .model == $model and
         .reasoning_effort == "high" and
         .budget.wall_time_seconds == $wall_time and
         .budget.live_search_concurrency == $live_concurrency and
@@ -934,12 +1090,16 @@ experiment_base_contract_valid() {
     jq -e \
         --arg case_id "$case_id" \
         --argjson seed "$seed" \
+        --arg model "$L1_MODEL" \
+        --arg provider "$L1_PROVIDER" \
+        --arg pi_api "$L1_PI_API" \
+        --arg key_env "$PROVIDER_KEY_ENV" \
         --argjson wall_time "$WALL_TIME_SECONDS" \
         --argjson live_concurrency "$LIVE_SEARCH_CONCURRENCY" '
         .method == "goal-plus-pi" and
         .seed == $seed and
         .task_id == $case_id and
-        .model == "deepseek-v4-flash" and
+        .model == $model and
         .reasoning_effort == "high" and
         .budget.wall_time_seconds == $wall_time and
         .budget.concurrency == $live_concurrency and
@@ -952,9 +1112,9 @@ experiment_base_contract_valid() {
         .goal_plus_config.early_stop.metric_name == "success" and
         .goal_plus_config.early_stop.target_score == 1 and
         .task.evaluation_mode == "visible" and
-        .pi_provider.id == "deepseek" and
-        .pi_provider.api == "openai-completions" and
-        .pi_provider.api_key_env == "DEEPSEEK_API_KEY" and
+        .pi_provider.id == $provider and
+        .pi_provider.api == $pi_api and
+        .pi_provider.api_key_env == $key_env and
         .execution.goal_plus_controller_closeout.completed == true
     ' "$experiment" >/dev/null 2>&1
 }
