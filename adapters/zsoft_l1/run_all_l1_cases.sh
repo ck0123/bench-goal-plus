@@ -37,12 +37,11 @@ resolve_work_dir() {
 readonly WORK_DIR="$(resolve_work_dir)"
 [[ -n "$WORK_DIR" && -f "$WORK_DIR/scripts/bench.py" ]] \
     || { printf '错误: 无法定位 bench-goal-plus 仓库根 (设置 BENCH_GOAL_PLUS_WORK_DIR 可覆盖)\n' >&2; exit 1; }
-# Base directory (relative to WORK_DIR) that benchmarks write their campaign runs to.
-# Isolated from the historical "runs/benchmark-campaigns" so new data does not mix with
-# prior runs; the Python side must receive --campaign-dir explicitly or it would fall
-# back to runs/benchmark-campaigns (common_matrix). Keep this under runs/ so the
-# ensure_under(RUNS_ROOT) guard in common_matrix passes.
-readonly CAMPAIGN_BASE="runs/benchmark-campaigns-v3"
+readonly CAMPAIGN_BASE="${L1_CAMPAIGN_BASE:-runs/l1-deepseek-v4.1-flash-1017-withboard}"
+if [[ "$CAMPAIGN_BASE" != runs/* || "$CAMPAIGN_BASE" =~ \.\.|/./|// ]]; then
+    printf '错误: L1_CAMPAIGN_BASE 必须是 WORK_DIR 下以 runs/ 开头且不含 .. 的相对路径(当前: %s);跨盘存储请用软链接(见脚本头部注释)\n' "$CAMPAIGN_BASE" >&2
+    exit 1
+fi
 readonly ZSOFT_CHECKOUT="$WORK_DIR/third_party/zsoft-bench"
 readonly ZSOFT_ROOT="$WORK_DIR/third_party/zsoft-bench/benchmarks/vulnerability/zsoft-l1"
 readonly TASKS_DIR="$ZSOFT_ROOT/tasks"
@@ -86,6 +85,10 @@ STATUS_INTERVAL_SECONDS="${L1_STATUS_INTERVAL_SECONDS:-60}"
 # 由 Pi worker launcher 把 REA 包只读挂载到沙箱 /opt/rea，
 # 并通过 BENCH_GOAL_PLUS_ZSOFT_L1_REA_TOOLS=1 让 adapter 复制 rea-analysis Skill。
 readonly L1_REA_ENABLED="${L1_REA:-0}"
+# Shared Knowledge Board(opt-in):开启后 bench 传 --shared-cache,执行期由
+# shared_knowledge_template() 按 benchmark 导出 PoC 专用模板
+# (target_facts / trigger_hypotheses / poc_verdicts,判定条目强制锚定已结算迭代)。
+readonly L1_SHARED_KNOWLEDGE_ENABLED="${L1_SHARED_KNOWLEDGE:-0}"
 readonly L1_REA_ROOT="${L1_REA_ROOT:-/home/tangzhiyun/workspace/rea}"
 ACTIVE_HEARTBEAT_PID=""
 SOURCE_CACHE_RESOLVED=""
@@ -122,10 +125,12 @@ CASE_ID 示例（完整列表请使用 --list-cases）:
 
 可选环境变量:
   L1_PROVIDER                   模型提供方: deepseek(默认) 或 glm
-  L1_MODEL                      覆盖默认模型(deepseek→deepseek-v4-flash, glm→glm-4.6)
+  L1_MODEL                      覆盖默认模型(deepseek→DeepSeek-V4.1-Flash-1017, glm→glm-4.6)
   L1_PI_API                     Pi API 协议: openai-completions(默认) 或 anthropic-messages
   DEEPSEEK_API_KEY / GLM_API_KEY   按 provider 二选一,已设置时不再交互读取
   L1_REA                        1 时在 worker 沙箱内启用 rea CLI（默认 0）
+  L1_SHARED_KNOWLEDGE           1 时开启 Shared Knowledge Board（PoC 模板，默认 0；
+                                需 BENCH_GOAL_PLUS_SOURCE_DIR 指向含 PR !86 的检出）
   L1_REA_ROOT                   REA 包根目录路径（默认 /home/tangzhiyun/workspace/rea）
   L1_SOURCE_CACHE_DIR           明确指定的额外 .cache/sources 目录；不会自动扫描磁盘
   L1_STORAGE_ROOT               prepare 脚本使用的明确外置存储根目录
@@ -133,6 +138,8 @@ CASE_ID 示例（完整列表请使用 --list-cases）:
   L1_STATUS_INTERVAL_SECONDS    实验运行心跳间隔，默认 60 秒
   L1_CAMPAIGN_MIN_FREE_GIB      本地磁盘可用空间低于该 GiB 时把 campaign 输出迁到外置磁盘，默认 80
   L1_STORAGE_ROOT              外置存储根目录（源码缓存/迁出的 campaign），默认 /srv/zsoft-l1
+  L1_CAMPAIGN_BASE              campaign 输出的基路径(默认 runs/benchmark-campaigns-v3;
+                                必须以 runs/ 开头;跨盘请用软链接,见脚本头部注释)
   L1_CAMPAIGN_EXTERNAL_ROOT     磁盘不足时的外置 campaign 目录，默认 $L1_STORAGE_ROOT/campaigns/... ；会在当前目录留软链接
 
 环境复用:
@@ -144,8 +151,9 @@ CASE_ID 示例（完整列表请使用 --list-cases）:
   每个 Pi worker 在 bwrap 沙箱内运行（仅 loopback 网络 + 桩 DNS），唯一
   出口是 api-only LLM 中继，模型无法访问外部源码仓库。运行前脚本会校验
   bwrap/node 可用；跑后可用 scripts/audit_network_access.py 复核出网记录。
-  设置 BENCH_GOAL_PLUS_SOURCE_DIR + BENCH_GOAL_PLUS_EXPECTED_REF 可把
-  goal-plus 运行时锁定到含 worker 沙箱契约的分支（与 detect 相同做法）。
+  设置 BENCH_GOAL_PLUS_SOURCE_DIR 可改用外部 goal-plus 检出（与 detect 相同
+  做法,如 /data/disk/tangzhiyun/muyuan/plugins/goal-plus）;BENCH_GOAL_PLUS_
+  EXPECTED_REF 为可选 pin,设置时 HEAD 必须精确匹配。
 USAGE
 }
 
@@ -616,8 +624,10 @@ case "$L1_PROVIDER" in
     deepseek)
         PROVIDER_KEY_ENV="DEEPSEEK_API_KEY"
         PROVIDER_BASE_ENV="DEEPSEEK_BASE_URL"
-        PROVIDER_BASE_DEFAULT="https://api.deepseek.com"
-        PROVIDER_MODEL_DEFAULT="deepseek-v4-flash"
+        # 与 detect 完全一致:走 113 网关(pool key 只放行该网关的模型池),
+        # 官方 api.deepseek.com 会以 key_model_access_denied 拒绝此 key。
+        PROVIDER_BASE_DEFAULT="http://113.46.219.251:8080/v1"
+        PROVIDER_MODEL_DEFAULT="DeepSeek-V4.1-Flash-1017"
         ;;
     glm)
         PROVIDER_KEY_ENV="GLM_API_KEY"
@@ -651,6 +661,16 @@ if [[ "$L1_PROVIDER" == "glm" ]]; then
     unset DEEPSEEK_BASE_URL
 else
     unset GLM_BASE_URL
+fi
+
+# Shared Knowledge Board 依赖含 PR !86 的 goal-plus 运行时;默认受管检出
+# (third_party/muyuan, 2026-09-24) 早于 board 合入,静默回退会拿到旧共享行为。
+if [[ "$L1_SHARED_KNOWLEDGE_ENABLED" == "1" ]]; then
+    if [[ -z "${BENCH_GOAL_PLUS_SOURCE_DIR:-}" ]]; then
+        die "L1_SHARED_KNOWLEDGE=1 需要含 knowledge board 的 goal-plus 运行时:请 export BENCH_GOAL_PLUS_SOURCE_DIR=<检出>(如 /data/disk/tangzhiyun/muyuan/plugins/goal-plus,含 PR !86)"
+    fi
+    [[ -f "$BENCH_GOAL_PLUS_SOURCE_DIR/src/goal_plus/domain/shared_knowledge.py" ]] \
+        || die "L1_SHARED_KNOWLEDGE=1 但检出不含 shared knowledge board(缺 src/goal_plus/domain/shared_knowledge.py): $BENCH_GOAL_PLUS_SOURCE_DIR"
 fi
 
 # REA 工具开关：启用时校验包完整性并导出两个环境变量——
@@ -727,6 +747,7 @@ fi
     printf '锁定源码缓存实际位置: %s\n' "$SOURCE_CACHE_RESOLVED"
     printf '锁定源码缓存模式: %s\n' "$SOURCE_CACHE_STORAGE_MODE"
     printf 'worker 断网: bwrap loopback-only + api-only LLM 中继\n'
+    printf 'Shared Knowledge Board: %s\n' "$([[ "$L1_SHARED_KNOWLEDGE_ENABLED" == "1" ]] && printf 'enabled(PoC 模板)' || printf 'disabled')"
     printf 'goal-plus 运行时来源: %s\n' \
         "$([[ -n "${BENCH_GOAL_PLUS_SOURCE_DIR:-}" ]] && printf 'external %s @ %s' "${BENCH_GOAL_PLUS_EXPECTED_REF:-?}" "$BENCH_GOAL_PLUS_SOURCE_DIR" || printf 'managed checkout (third_party/muyuan)')"
     printf 'REA 工具: %s\n' "$([[ "$L1_REA_ENABLED" == "1" ]] && printf 'enabled root=%s' "$L1_REA_ROOT" || printf 'disabled')"
@@ -741,6 +762,8 @@ status_message \
     "INIT l1_state_dir=$STATE_DIR source_cache=$CURRENT_SOURCE_CACHE source_cache_resolved=$SOURCE_CACHE_RESOLVED storage_mode=$SOURCE_CACHE_STORAGE_MODE"
 status_message \
     "INIT rea_tools enabled=$L1_REA_ENABLED root=$L1_REA_ROOT"
+status_message \
+    "INIT shared_knowledge enabled=$L1_SHARED_KNOWLEDGE_ENABLED template=poc(target_facts/trigger_hypotheses/poc_verdicts)"
 status_message \
     "CONFIG provider=$L1_PROVIDER model=$L1_MODEL api=$L1_PI_API reasoning=high T=$WALL_TIME_SECONDS K=$LIVE_SEARCH_CONCURRENCY C=$CELL_CONCURRENCY R=$REPEAT_COUNT"
 status_message \
@@ -757,19 +780,26 @@ status_message \
 
 # 启动前校验外部 goal-plus 检出停留在期望 ref 上(如共享平面组件分支),
 # 避免静默回退到不含 worker 沙箱/断网中继契约的默认运行时。
-if [[ -n "${BENCH_GOAL_PLUS_SOURCE_DIR:-}" && -n "${BENCH_GOAL_PLUS_EXPECTED_REF:-}" ]]; then
+# 启动前校验外部 goal-plus 检出身份。EXPECTED_REF 为可选 pin：
+# 设置时 HEAD 必须精确匹配（可复现实验）；未设置时直接使用当前 HEAD，
+# 下游 upstreams 层仍会校验工作树干净并锁定 prepare↔run 一致性。
+if [[ -n "${BENCH_GOAL_PLUS_SOURCE_DIR:-}" ]]; then
     gp_head="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" rev-parse HEAD 2>/dev/null)" \
         || die "BENCH_GOAL_PLUS_SOURCE_DIR 不是可用的 git 检出: $BENCH_GOAL_PLUS_SOURCE_DIR"
-    gp_want="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" rev-parse --verify --end-of-options "${BENCH_GOAL_PLUS_EXPECTED_REF}^{commit}" 2>/dev/null)" \
-        || die "goal-plus 检出中找不到 ref: $BENCH_GOAL_PLUS_EXPECTED_REF"
-    if [[ "$gp_head" != "$gp_want" ]]; then
-        gp_branch="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" branch --show-current 2>/dev/null || true)"
-        die "goal-plus 检出 HEAD 与 BENCH_GOAL_PLUS_EXPECTED_REF=$BENCH_GOAL_PLUS_EXPECTED_REF 不一致(当前: ${gp_branch:-detached} $gp_head);请先执行: git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" checkout $BENCH_GOAL_PLUS_EXPECTED_REF"
+    if [[ -n "${BENCH_GOAL_PLUS_EXPECTED_REF:-}" ]]; then
+        gp_want="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" rev-parse --verify --end-of-options "${BENCH_GOAL_PLUS_EXPECTED_REF}^{commit}" 2>/dev/null)" \
+            || die "goal-plus 检出中找不到 ref: $BENCH_GOAL_PLUS_EXPECTED_REF"
+        if [[ "$gp_head" != "$gp_want" ]]; then
+            gp_branch="$(git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" branch --show-current 2>/dev/null || true)"
+            die "goal-plus 检出 HEAD 与 BENCH_GOAL_PLUS_EXPECTED_REF=$BENCH_GOAL_PLUS_EXPECTED_REF 不一致(当前: ${gp_branch:-detached} $gp_head)。二选一: 精确复现请 git -C "$BENCH_GOAL_PLUS_SOURCE_DIR" checkout $BENCH_GOAL_PLUS_EXPECTED_REF;直接使用当前 HEAD 请 unset BENCH_GOAL_PLUS_EXPECTED_REF"
+        fi
+        status_message "GOAL_PLUS_SOURCE dir=$BENCH_GOAL_PLUS_SOURCE_DIR ref=$BENCH_GOAL_PLUS_EXPECTED_REF commit=$gp_head"
+    else
+        status_message "GOAL_PLUS_SOURCE dir=$BENCH_GOAL_PLUS_SOURCE_DIR ref=<current HEAD> commit=$gp_head"
     fi
-    status_message "GOAL_PLUS_SOURCE dir=$BENCH_GOAL_PLUS_SOURCE_DIR ref=$BENCH_GOAL_PLUS_EXPECTED_REF commit=$gp_head"
 else
     status_message \
-        "GOAL_PLUS_SOURCE mode=managed_checkout(third_party/muyuan;设置 BENCH_GOAL_PLUS_SOURCE_DIR/BENCH_GOAL_PLUS_EXPECTED_REF 可锁定含断网契约的分支)"
+        "GOAL_PLUS_SOURCE mode=managed_checkout(third_party/muyuan;设置 BENCH_GOAL_PLUS_SOURCE_DIR 可改用外部检出,BENCH_GOAL_PLUS_EXPECTED_REF 可选 pin)"
 fi
 
 # 宿主机环境加固（无 systemd 用户会话的主机需要）：
@@ -944,6 +974,9 @@ build_bench_args() {
         --skip-provision
         --foreground
     )
+    if [[ "$L1_SHARED_KNOWLEDGE_ENABLED" == "1" ]]; then
+        BENCH_ARGS+=(--shared-cache)
+    fi
 }
 
 start_launch_heartbeat() {
