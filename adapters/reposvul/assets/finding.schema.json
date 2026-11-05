@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:reposvul:finding:1.0",
+  "title": "Structured static security finding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "location",
+    "bug_type",
+    "root_cause"
+  ],
+  "properties": {
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "function",
+        "start_line",
+        "end_line"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "function": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "bug_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "root_cause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cause",
+        "trigger",
+        "impact"
+      ],
+      "properties": {
+        "cause": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trigger": {
+          "type": "string",
+          "minLength": 1
+        },
+        "impact": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

@@ -95,7 +95,9 @@
           "runtime_source_command": "runtime-source"
         },
         "openevolve": {
-          "bootstrap_targets": ["frontier_engineering_official"]
+          "bootstrap_targets": [
+            "frontier_engineering_official"
+          ]
         }
       },
       "capabilities": {
@@ -220,7 +222,9 @@
       "id": "edgebench",
       "runner": "edgebench-native",
       "adapter": null,
-      "bootstrap_targets": ["edgebench"],
+      "bootstrap_targets": [
+        "edgebench"
+      ],
       "local_asset_inventory": true,
       "default_inventory_profile": "vliw-smoke",
       "docker": {
@@ -234,7 +238,10 @@
       "id": "swe-bench-verified",
       "runner": "swe-bench-native",
       "adapter": null,
-      "bootstrap_targets": ["swebench", "goal_plus"],
+      "bootstrap_targets": [
+        "swebench",
+        "goal_plus"
+      ],
       "local_asset_inventory": true,
       "default_inventory_profile": "sympy-16886-codex-smoke",
       "docker": {
@@ -248,7 +255,10 @@
       "id": "aibench-coding",
       "runner": "aibench-coding-native",
       "adapter": null,
-      "bootstrap_targets": ["aibench_coding", "goal_plus"],
+      "bootstrap_targets": [
+        "aibench_coding",
+        "goal_plus"
+      ],
       "local_asset_inventory": true,
       "default_inventory_profile": "smoke",
       "docker": {
@@ -262,7 +272,9 @@
       "id": "ale-bench-lite",
       "runner": "common-matrix",
       "adapter": "ale-bench-lite",
-      "bootstrap_targets": ["ale_bench"],
+      "bootstrap_targets": [
+        "ale_bench"
+      ],
       "local_asset_inventory": true,
       "default_inventory_profile": "ahc027-cpp20-202301",
       "docker": {
@@ -276,7 +288,9 @@
       "id": "autolab-toy-isa",
       "runner": "common-matrix",
       "adapter": "autolab-toy-isa",
-      "bootstrap_targets": ["autolab"],
+      "bootstrap_targets": [
+        "autolab"
+      ],
       "local_asset_inventory": false,
       "docker": {
         "requirement": "not_required",
@@ -289,7 +303,9 @@
       "id": "frontier-cs-problem-0",
       "runner": "common-matrix",
       "adapter": "frontier-cs-problem-0",
-      "bootstrap_targets": ["frontier_cs"],
+      "bootstrap_targets": [
+        "frontier_cs"
+      ],
       "local_asset_inventory": true,
       "default_inventory_profile": "problem-0",
       "docker": {
@@ -303,7 +319,9 @@
       "id": "frontier-engineering-malloclab",
       "runner": "common-matrix",
       "adapter": "frontier-engineering-malloclab",
-      "bootstrap_targets": ["frontier_engineering_official"],
+      "bootstrap_targets": [
+        "frontier_engineering_official"
+      ],
       "local_asset_inventory": false,
       "docker": {
         "requirement": "not_required",
@@ -316,7 +334,10 @@
       "id": "frontier-engineering",
       "runner": "frontier-engineering-native",
       "adapter": null,
-      "bootstrap_targets": ["frontier_engineering_official", "goal_plus"],
+      "bootstrap_targets": [
+        "frontier_engineering_official",
+        "goal_plus"
+      ],
       "local_asset_inventory": true,
       "default_inventory_profile": "v1-lite-cpu-codex-1h",
       "docker": {
@@ -330,7 +351,9 @@
       "id": "heurigym",
       "runner": "common-matrix",
       "adapter": "heurigym",
-      "bootstrap_targets": ["heurigym"],
+      "bootstrap_targets": [
+        "heurigym"
+      ],
       "local_asset_inventory": false,
       "docker": {
         "requirement": "not_required",
@@ -343,7 +366,9 @@
       "id": "local-vliw",
       "runner": "common-matrix",
       "adapter": "local-vliw",
-      "bootstrap_targets": ["goal_plus"],
+      "bootstrap_targets": [
+        "goal_plus"
+      ],
       "local_asset_inventory": false,
       "docker": {
         "requirement": "not_required",
@@ -356,7 +381,9 @@
       "id": "openevolve-cpu-portable",
       "runner": "openevolve-batch",
       "adapter": null,
-      "bootstrap_targets": ["openevolve"],
+      "bootstrap_targets": [
+        "openevolve"
+      ],
       "local_asset_inventory": false,
       "docker": {
         "requirement": "not_required",
@@ -369,7 +396,10 @@
       "id": "torchbench",
       "runner": "common-matrix",
       "adapter": "torchbench",
-      "bootstrap_targets": ["torchbench", "goal_plus"],
+      "bootstrap_targets": [
+        "torchbench",
+        "goal_plus"
+      ],
       "local_asset_inventory": false,
       "docker": {
         "requirement": "not_required",
@@ -382,7 +412,10 @@
       "id": "zsoft-l1",
       "runner": "common-matrix",
       "adapter": "zsoft-l1",
-      "bootstrap_targets": ["zsoft_l1", "goal_plus"],
+      "bootstrap_targets": [
+        "zsoft_l1",
+        "goal_plus"
+      ],
       "local_asset_inventory": false,
       "docker": {
         "requirement": "required",
@@ -395,7 +428,10 @@
       "id": "zsoft-detect",
       "runner": "common-matrix",
       "adapter": "zsoft-detect",
-      "bootstrap_targets": ["zsoft_l1", "goal_plus"],
+      "bootstrap_targets": [
+        "zsoft_l1",
+        "goal_plus"
+      ],
       "local_asset_inventory": false,
       "docker": {
         "requirement": "not_required",
@@ -405,10 +441,27 @@
       }
     },
     {
+      "id": "reposvul",
+      "runner": "common-matrix",
+      "adapter": "reposvul",
+      "bootstrap_targets": [
+        "goal_plus"
+      ],
+      "local_asset_inventory": false,
+      "docker": {
+        "requirement": "not_required",
+        "owner": "adapter",
+        "provision_mode": "none",
+        "scope": "The controller-owned judge is a host-side location/type matcher over the catalog ground truth; task sources are cloned on demand into REPOSVUL_CHECKOUT_CACHE."
+      }
+    },
+    {
       "id": "zsoft-detect-swe-agent",
       "runner": "zsoft-detect-native",
       "adapter": null,
-      "bootstrap_targets": ["zsoft_l1"],
+      "bootstrap_targets": [
+        "zsoft_l1"
+      ],
       "local_asset_inventory": true,
       "default_inventory_profile": "civetweb-swe-agent-smoke",
       "docker": {
@@ -423,12 +476,16 @@
     {
       "id": "frontier-engineering-energy-storage-openevolve-smoke-5",
       "description": "One-task Frontier-Engineering OpenEvolve lifecycle smoke with 5 evolved candidates, the shipped initial program, and frozen UnifiedTask verifier.",
-      "benchmarks": ["frontier-engineering"],
+      "benchmarks": [
+        "frontier-engineering"
+      ],
       "profile": "energy-storage-openevolve-smoke-5",
       "campaign_id_template": "frontier-engineering-energy-storage-openevolve-gpt-5-6-sol-medium-5iter-k1-c1-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["openevolve"],
+        "methods": [
+          "openevolve"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "medium",
         "wall_time_seconds": 1800,
@@ -439,12 +496,16 @@
     {
       "id": "frontier-engineering-energy-storage-openevolve-paper-100",
       "description": "One-task Frontier-Engineering paper-protocol OpenEvolve run with 100 iterations, the shipped initial program, and frozen UnifiedTask verifier.",
-      "benchmarks": ["frontier-engineering"],
+      "benchmarks": [
+        "frontier-engineering"
+      ],
       "profile": "energy-storage-openevolve-paper-100",
       "campaign_id_template": "frontier-engineering-energy-storage-openevolve-gpt-5-6-sol-medium-100iter-k1-c1-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["openevolve"],
+        "methods": [
+          "openevolve"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "medium",
         "wall_time_seconds": 43200,
@@ -455,12 +516,16 @@
     {
       "id": "frontier-engineering-energy-storage-codex-smoke",
       "description": "One-task Frontier-Engineering v1-lite Plain Codex smoke on the fast BatteryFastChargingSPMe continuous evaluator.",
-      "benchmarks": ["frontier-engineering"],
+      "benchmarks": [
+        "frontier-engineering"
+      ],
       "profile": "energy-storage-codex-smoke",
       "campaign_id_template": "frontier-engineering-energy-storage-codex-gpt-5-6-sol-medium-5m-k1-c1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["plain-codex"],
+        "methods": [
+          "plain-codex"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "medium",
         "wall_time_seconds": 300,
@@ -471,12 +536,16 @@
     {
       "id": "frontier-engineering-jobshop-codex-smoke",
       "description": "One-task Frontier-Engineering v1-lite Plain Codex smoke through the upstream UnifiedTask evaluator.",
-      "benchmarks": ["frontier-engineering"],
+      "benchmarks": [
+        "frontier-engineering"
+      ],
       "profile": "jobshop-codex-smoke",
       "campaign_id_template": "frontier-engineering-jobshop-codex-gpt-5-6-sol-medium-5m-k1-c1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["plain-codex"],
+        "methods": [
+          "plain-codex"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "medium",
         "wall_time_seconds": 300,
@@ -487,12 +556,16 @@
     {
       "id": "frontier-engineering-energy-storage-pi-smoke",
       "description": "One-task Frontier-Engineering v1-lite Plain Pi smoke on BatteryFastChargingSPMe.",
-      "benchmarks": ["frontier-engineering"],
+      "benchmarks": [
+        "frontier-engineering"
+      ],
       "profile": "energy-storage-pi-smoke",
       "campaign_id_template": "frontier-engineering-energy-storage-plain-pi-gpt-5-6-sol-medium-5m-k1-c1-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["plain-pi"],
+        "methods": [
+          "plain-pi"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "medium",
         "wall_time_seconds": 300,
@@ -503,12 +576,16 @@
     {
       "id": "frontier-engineering-energy-storage-goal-plus-pi-smoke",
       "description": "One-task Frontier-Engineering v1-lite Goal Plus + Pi smoke with one live search worker.",
-      "benchmarks": ["frontier-engineering"],
+      "benchmarks": [
+        "frontier-engineering"
+      ],
       "profile": "energy-storage-goal-plus-pi-smoke",
       "campaign_id_template": "frontier-engineering-energy-storage-goal-plus-pi-gpt-5-6-sol-medium-10m-k1-c1-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["goal-plus-pi"],
+        "methods": [
+          "goal-plus-pi"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "medium",
         "wall_time_seconds": 600,
@@ -519,12 +596,16 @@
     {
       "id": "edgebench-vliw-codex-local-smoke",
       "description": "One-task local Plain Codex smoke using the mandatory Judge plus LLM API-only network policy.",
-      "benchmarks": ["edgebench"],
+      "benchmarks": [
+        "edgebench"
+      ],
       "profile": "vliw-codex-sol-medium-local-smoke",
       "campaign_id_template": "edgebench-vliw-codex-gpt-5-6-sol-medium-local-smoke-5m-k1-c1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["plain-codex"],
+        "methods": [
+          "plain-codex"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "medium",
         "wall_time_seconds": 300,
@@ -535,12 +616,16 @@
     {
       "id": "edgebench-vliw-goal-plus-codex-local-smoke",
       "description": "One-task 15-minute local Goal Plus + Codex smoke with a real host MCP gate and two live workers.",
-      "benchmarks": ["edgebench"],
+      "benchmarks": [
+        "edgebench"
+      ],
       "profile": "vliw-goal-plus-codex-gpt55-high-local-smoke",
       "campaign_id_template": "edgebench-vliw-goal-plus-codex-gpt-5-5-high-local-smoke-15m-k2-c2-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["goal-plus-codex"],
+        "methods": [
+          "goal-plus-codex"
+        ],
         "model": "gpt-5.5",
         "reasoning_effort": "high",
         "wall_time_seconds": 900,
@@ -551,12 +636,16 @@
     {
       "id": "edgebench-codex-2h",
       "description": "Example 50-task runnable-public-set Plain Codex campaign; the known-broken order-addition Judge asset is excluded.",
-      "benchmarks": ["edgebench"],
+      "benchmarks": [
+        "edgebench"
+      ],
       "profile": "full-codex-2h",
       "campaign_id_template": "edgebench-50-codex-gpt-5-6-sol-medium-2h-k1-c2-{timestamp}",
       "expected_profile": {
         "task_count": 50,
-        "methods": ["plain-codex"],
+        "methods": [
+          "plain-codex"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "medium",
         "wall_time_seconds": 7200,
@@ -567,12 +656,16 @@
     {
       "id": "edgebench-vliw-pi-local-smoke",
       "description": "One-task local Plain Pi smoke using the host openai-codex login.",
-      "benchmarks": ["edgebench"],
+      "benchmarks": [
+        "edgebench"
+      ],
       "profile": "vliw-pi-sol-medium-local-smoke",
       "campaign_id_template": "edgebench-vliw-pi-gpt-5-6-sol-medium-local-smoke-5m-k1-c1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["plain-pi"],
+        "methods": [
+          "plain-pi"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "medium",
         "wall_time_seconds": 300,
@@ -583,12 +676,16 @@
     {
       "id": "edgebench-vliw-goal-plus-pi-local-smoke",
       "description": "One-task local Goal Plus + Pi smoke with two live search workers.",
-      "benchmarks": ["edgebench"],
+      "benchmarks": [
+        "edgebench"
+      ],
       "profile": "vliw-goal-plus-pi-sol-medium-local-smoke",
       "campaign_id_template": "edgebench-vliw-goal-plus-pi-gpt-5-6-sol-medium-local-smoke-10m-k2-c1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["goal-plus-pi"],
+        "methods": [
+          "goal-plus-pi"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "medium",
         "wall_time_seconds": 600,
@@ -599,12 +696,16 @@
     {
       "id": "edgebench-vliw-goal-plus-pi-glm-provider-1h",
       "description": "One-task Goal Plus + Pi campaign using the explicit glm-proxy/GLM-5.2 API provider with T=3600, K=2, C=1, R=1.",
-      "benchmarks": ["edgebench"],
+      "benchmarks": [
+        "edgebench"
+      ],
       "profile": "vliw-goal-plus-pi-glm-5-2-provider-1h-k2-c1",
       "campaign_id_template": "edgebench-vliw-goal-plus-pi-glm-5-2-provider-1h-k2-c1-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["goal-plus-pi-provider"],
+        "methods": [
+          "goal-plus-pi-provider"
+        ],
         "model": "glm-proxy/GLM-5.2",
         "reasoning_effort": "high",
         "wall_time_seconds": 3600,
@@ -615,12 +716,16 @@
     {
       "id": "edgebench-vliw-goal-plus-pi-zai-glm-5-2-1h",
       "description": "One-task Goal Plus + Pi campaign using Pi's built-in zai/glm-5.2 provider with T=3600, K=2, C=1, R=1.",
-      "benchmarks": ["edgebench"],
+      "benchmarks": [
+        "edgebench"
+      ],
       "profile": "vliw-goal-plus-pi-zai-glm-5-2-1h-k2-c1",
       "campaign_id_template": "edgebench-vliw-goal-plus-pi-zai-glm-5-2-1h-k2-c1-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["goal-plus-pi-provider"],
+        "methods": [
+          "goal-plus-pi-provider"
+        ],
         "model": "zai/glm-5.2",
         "reasoning_effort": "high",
         "wall_time_seconds": 3600,
@@ -631,12 +736,16 @@
     {
       "id": "swe-bench-verified-sympy-16886-codex-smoke",
       "description": "One-instance SWE-bench Verified Plain Codex official-harness smoke with T=1800, K=1, C=1, R=1.",
-      "benchmarks": ["swe-bench-verified"],
+      "benchmarks": [
+        "swe-bench-verified"
+      ],
       "profile": "sympy-16886-codex-smoke",
       "campaign_id_template": "swe-bench-verified-sympy-16886-plain-codex-30m-k1-c1-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["plain-codex"],
+        "methods": [
+          "plain-codex"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "medium",
         "agent_provider": {
@@ -655,12 +764,16 @@
     {
       "id": "swe-bench-verified-sympy-16886-goal-plus-codex-smoke",
       "description": "One-instance SWE-bench Verified Goal Plus + Codex lifecycle smoke with T=300, K=1, C=1, R=1.",
-      "benchmarks": ["swe-bench-verified"],
+      "benchmarks": [
+        "swe-bench-verified"
+      ],
       "profile": "sympy-16886-goal-plus-codex-smoke",
       "campaign_id_template": "swe-bench-verified-sympy-16886-goal-plus-codex-5m-k1-c1-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["goal-plus-codex"],
+        "methods": [
+          "goal-plus-codex"
+        ],
         "model": "gpt-5.6-sol",
         "reasoning_effort": "low",
         "wall_time_seconds": 300,
@@ -671,12 +784,16 @@
     {
       "id": "swe-bench-verified-sympy-16886-pi-smoke",
       "description": "One-instance SWE-bench Verified Plain Pi official-harness smoke with T=1800, K=1, C=1, R=1.",
-      "benchmarks": ["swe-bench-verified"],
+      "benchmarks": [
+        "swe-bench-verified"
+      ],
       "profile": "sympy-16886-pi-smoke",
       "campaign_id_template": "swe-bench-verified-sympy-16886-plain-pi-30m-k1-c1-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["plain-pi"],
+        "methods": [
+          "plain-pi"
+        ],
         "model": "zai/glm-5.2",
         "reasoning_effort": "medium",
         "wall_time_seconds": 1800,
@@ -687,12 +804,16 @@
     {
       "id": "swe-bench-verified-sympy-16886-goal-plus-pi-smoke",
       "description": "One-instance SWE-bench Verified Goal Plus + Pi official-harness smoke with T=1800, K=1, C=1, R=1.",
-      "benchmarks": ["swe-bench-verified"],
+      "benchmarks": [
+        "swe-bench-verified"
+      ],
       "profile": "sympy-16886-goal-plus-pi-smoke",
       "campaign_id_template": "swe-bench-verified-sympy-16886-goal-plus-pi-30m-k1-c1-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["goal-plus-pi"],
+        "methods": [
+          "goal-plus-pi"
+        ],
         "model": "zai/glm-5.2",
         "reasoning_effort": "medium",
         "wall_time_seconds": 1800,
@@ -703,12 +824,16 @@
     {
       "id": "swe-bench-verified-sympy-16886-goal-plus-pi-luna-high-smoke",
       "description": "One-instance SWE-bench Verified Goal Plus + Pi smoke using the OpenAI-compatible gpt-5.6-luna provider with high reasoning and T=1800, K=1, C=1, R=1.",
-      "benchmarks": ["swe-bench-verified"],
+      "benchmarks": [
+        "swe-bench-verified"
+      ],
       "profile": "sympy-16886-goal-plus-pi-luna-high-smoke",
       "campaign_id_template": "swe-bench-verified-sympy-16886-goal-plus-pi-gpt-5-6-luna-high-30m-k1-c1-r1-{timestamp}",
       "expected_profile": {
         "task_count": 1,
-        "methods": ["goal-plus-pi"],
+        "methods": [
+          "goal-plus-pi"
+        ],
         "model": "bench-openai/gpt-5.6-luna",
         "reasoning_effort": "high",
         "agent_provider": {
@@ -727,7 +852,9 @@
     {
       "id": "aibench-coding-smoke",
       "description": "One valid _clean2026 coding repair case across the four Plain and Goal Plus Codex/Pi methods with T=300, K=1, C=1, R=1.",
-      "benchmarks": ["aibench-coding"],
+      "benchmarks": [
+        "aibench-coding"
+      ],
       "profile": "smoke",
       "campaign_id_template": "aibench-coding-four-method-gpt-5-6-sol-medium-5m-k1-c1-r1-{timestamp}",
       "expected_profile": {

@@ -1,7 +1,13 @@
 {
   "schema_version": 2,
   "checked_at": "2026-08-07",
-  "status_values": ["pass", "partial", "todo", "blocked", "n/a"],
+  "status_values": [
+    "pass",
+    "partial",
+    "todo",
+    "blocked",
+    "n/a"
+  ],
   "gate_sets": {
     "benchmark": [
       "source_forked",
@@ -826,6 +832,45 @@
         "Short smokes remain diagnostic and partial. One-hour Plain Pi and Goal Plus Pi fork lifecycle acceptance passed; Plain naturally ended after 676.8 seconds, so wall-time-matched performance comparison remains unproven.",
         "CPU8 official seed checks pass on the ARM toolchain fork; CPU8 model trajectories and all CUDA tasks are not yet accepted. Codex and OpenEvolve acceptance remains separate.",
         "The full repository suite has unresolved failures outside Frontier; focused Frontier tests and official evaluator controls pass."
+      ]
+    },
+    {
+      "id": "reposvul",
+      "display_name": "ReposVul Audit",
+      "kind": "benchmark",
+      "gate_set": "benchmark_methods",
+      "priority": 9,
+      "repositories": [
+        {
+          "role": "benchmark",
+          "upstream_url": "https://github.com/Eshe0922/ReposVul.git",
+          "subdirectory": ".",
+          "tracking_branch": "main",
+          "license": "MIT",
+          "fork_url": "https://github.com/Eshe0922/ReposVul.git"
+        }
+      ],
+      "local_path": "adapters/reposvul/tasks",
+      "docker_requirement": "not_required",
+      "docker_scope": "The controller-owned judge is a host-side location/type matcher over the catalog ground truth; task sources are cloned from upstream repositories at the pinned parent commits into REPOSVUL_CHECKOUT_CACHE. No Docker.",
+      "stages": {
+        "source_forked": "pass",
+        "environment": "partial",
+        "official_verifier": "partial",
+        "native_baseline": "n/a",
+        "plain_codex": "todo",
+        "goal_plus_codex": "todo",
+        "plain_pi": "todo",
+        "goal_plus_pi": "partial",
+        "matched_baseline": "todo",
+        "campaign_ready": "partial"
+      },
+      "evidence": [],
+      "stage_evidence": {},
+      "next_action": "Run the controller-owned judge end-to-end on real campaigns and record method-specific stage evidence (official verifier, goal-plus-pi) before claiming any pass stage; first real-model Goal Plus Pi campaign on lang=C min-findings>=3.",
+      "blockers": [
+        "Task sources are cloned on demand from public repositories; a campaign needs either network access at materialize time or a prewarmed REPOSVUL_CHECKOUT_CACHE.",
+        "No real-model campaign has been recorded yet; readiness stays partial until plan/launch evidence exists."
       ]
     }
   ]

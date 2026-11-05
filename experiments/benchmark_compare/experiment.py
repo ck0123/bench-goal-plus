@@ -269,6 +269,64 @@ def _candidate_judge_incomplete_reason(closeout: Any, mode: str) -> str | None:
                 return "enabled candidate judge left no selection receipt"
             return "enabled candidate judge did not produce a trusted selection receipt"
     return None
+
+# Controller-owned shared-knowledge template for PoC benchmarks (zsoft-l1).
+# The default template above is shaped for finding-audit tasks (signatures /
+# value ranges / FP verdicts); PoC candidates instead share verified target
+# facts, crash-trigger hypotheses, and per-variant differential verdicts.
+# poc_verdicts anchors every entry to a settled iteration via evidence_ref so
+# a "crash / no-crash" claim always traces to a verifier-scored PoC snapshot.
+POC_SHARED_KNOWLEDGE_SPEC_TEMPLATE: dict = {
+    "enabled": True,
+    "sections": [
+        {
+            "key": "target_facts",
+            "title": "Target program facts",
+            "requirement": "One verified program fact per entry. subject=<source-file>#<function>.",
+            "cardinality": "any",
+            "requires_evidence": False,
+            "content_keys": ["fact", "path", "basis"],
+        },
+        {
+            "key": "trigger_hypotheses",
+            "title": "Crash trigger hypotheses",
+            "requirement": "One suspected trigger path per entry. subject=<function>#<condition>.",
+            "cardinality": "any",
+            "requires_evidence": False,
+            "content_keys": ["hypothesis", "next_check"],
+        },
+        {
+            "key": "poc_verdicts",
+            "title": "PoC variant verdicts",
+            "requirement": "One PoC variant per entry. subject=poc#<variant>.",
+            "cardinality": "any",
+            "requires_evidence": True,
+            "content_keys": ["variant", "outcome", "basis"],
+        },
+    ],
+    "verifier_input": False,
+    "verifier_updates": False,
+    "max_records": 200,
+    "max_content_chars": 2000,
+}
+
+
+def shared_knowledge_template(manifest: Mapping[str, Any]) -> dict:
+    """Select the controller knowledge template for the prepared benchmark.
+
+    The audit template (function signatures / value ranges / FP verdicts)
+    fits every finding-audit task shape: zsoft-detect and reposvul share it.
+    The PoC template is for exploit-generation tasks (zsoft-l1) where the
+    shared unit is trigger facts and differential verdicts instead.
+    """
+    adapter_id = manifest.get("benchmark_adapter")
+    if adapter_id == "zsoft-l1":
+        return POC_SHARED_KNOWLEDGE_SPEC_TEMPLATE
+    if adapter_id in {"zsoft-detect", "reposvul"}:
+        return SHARED_KNOWLEDGE_SPEC_TEMPLATE
+    return SHARED_KNOWLEDGE_SPEC_TEMPLATE
+
+
 METHODS = (
     "plain-codex",
     "plain-pi",
@@ -1588,6 +1646,17 @@ def _posthoc_metric_value(
     if metric_name == "f1" and not 0.0 <= value <= 1.0:
         raise RuntimeError("official evaluator returned an out-of-range F1")
     score_payload = evaluation.get("zsoft_score")
+    if score_payload is None:
+        # zsoft adapters name their payload "zsoft_score"; non-zsoft adapters
+        # (e.g. reposvul) use "<benchmark>_score" — accept exactly one such
+        # dict payload so the consistency check stays adapter-agnostic.
+        candidates = [
+            item
+            for key, item in evaluation.items()
+            if isinstance(key, str) and key.endswith("_score")
+            and isinstance(item, dict)
+        ]
+        score_payload = candidates[0] if len(candidates) == 1 else None
     if (
         metric_name == "f1"
         and (
@@ -2140,7 +2209,7 @@ def execute_plain(
                 (manifest.get("goal_plus_config") or {}).get("shared_cache_enabled")
             ):
                 lane_environment["GOAL_PLUS_CONTROLLER_SHARED_KNOWLEDGE"] = json.dumps(
-                    SHARED_KNOWLEDGE_SPEC_TEMPLATE
+                    shared_knowledge_template(manifest)
                 )
             command = [
                 args.pi_bin,
@@ -2580,7 +2649,7 @@ def execute_goal_plus(
             (manifest.get("goal_plus_config") or {}).get("shared_cache_enabled")
         ):
             environment["GOAL_PLUS_CONTROLLER_SHARED_KNOWLEDGE"] = json.dumps(
-                SHARED_KNOWLEDGE_SPEC_TEMPLATE
+                shared_knowledge_template(manifest)
             )
         environment["GOAL_PLUS_PI_MODEL"] = qualified_model
         command = [
