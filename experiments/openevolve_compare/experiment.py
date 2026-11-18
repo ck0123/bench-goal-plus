@@ -2854,11 +2854,16 @@ def _controller_closeout_resume_blocked_goal(goal_runtime: Any, goal: Any) -> An
     )
     nonce = uuid.uuid4().hex
     invocation_id = f"resume:controller-closeout:{nonce}"
+    transport_and_command = {
+        "pi": ("pi_extension_command", "/goal-plus"),
+        "opencode": ("opencode_plugin_command", "/goal-plus"),
+        "codex": ("codex_user_prompt_submit", "$goal-plus"),
+    }.get(harness)
+    if transport_and_command is None:
+        raise RuntimeError(f"unsupported Goal Plus host for closeout resume: {harness}")
     payload: dict[str, Any] = {
-        "transport": (
-            "pi_extension_command" if harness == "pi" else "codex_user_prompt_submit"
-        ),
-        "command": "/goal-plus" if harness == "pi" else "$goal-plus",
+        "transport": transport_and_command[0],
+        "command": transport_and_command[1],
         "action": "resume",
         "session_id": str(session.session_id),
         "native_entry_id": f"controller-closeout-{nonce}",
