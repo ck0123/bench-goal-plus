@@ -813,6 +813,10 @@ def copy_goal_plus_pi_assets(goal_plus_root: Path, workspace: Path) -> None:
     install_goal_plus(goal_plus_root, workspace, "pi")
 
 
+def copy_goal_plus_opencode_assets(goal_plus_root: Path, workspace: Path) -> None:
+    install_goal_plus(goal_plus_root, workspace, "opencode")
+
+
 def append_unique_lines(path: Path, lines: list[str]) -> None:
     existing = path.read_text().splitlines() if path.is_file() else []
     for line in lines:
@@ -2623,10 +2627,30 @@ def close_candidate_sessions(workspace: Path, timeout_seconds: int) -> list[dict
                 raise RuntimeError(f"Search run {run_id} lacks successful scope cleanup")
             summaries.append({"run_id": run_id, "active_count": 0, "scope_id": scope["scope_id"]})
             continue
-        summaries.append(close_run_candidates(
-            root_dir=root, scope_id=scope["scope_id"], run_id=run_id,
-            timeout_seconds=timeout_seconds,
-        ))
+        try:
+            summaries.append(close_run_candidates(
+                root_dir=root, scope_id=scope["scope_id"], run_id=run_id,
+                timeout_seconds=timeout_seconds,
+            ))
+        except RuntimeError as error:
+            # A killed Main may have fenced the scope in its own shutdown
+            # path between our read and this close call; closing an already
+            # fenced/closed scope is success, not a closeout failure.
+            if "is not open" not in str(error):
+                raise
+            refreshed = execution_scope_for_run(
+                root_dir=root, run_id=run_id
+            ) or {}
+            if refreshed.get("state") not in {"closed", "fenced"}:
+                raise
+            cleanup = refreshed.get("cleanup") or {}
+            summaries.append({
+                "run_id": run_id,
+                "active_count": cleanup.get("active_count", 0),
+                "scope_id": scope.get("scope_id"),
+                "already_fenced": True,
+                "close_skipped_reason": str(error),
+            })
     return summaries
 
 
@@ -2830,11 +2854,16 @@ def _controller_closeout_resume_blocked_goal(goal_runtime: Any, goal: Any) -> An
     )
     nonce = uuid.uuid4().hex
     invocation_id = f"resume:controller-closeout:{nonce}"
+    transport_and_command = {
+        "pi": ("pi_extension_command", "/goal-plus"),
+        "opencode": ("opencode_plugin_command", "/goal-plus"),
+        "codex": ("codex_user_prompt_submit", "$goal-plus"),
+    }.get(harness)
+    if transport_and_command is None:
+        raise RuntimeError(f"unsupported Goal Plus host for closeout resume: {harness}")
     payload: dict[str, Any] = {
-        "transport": (
-            "pi_extension_command" if harness == "pi" else "codex_user_prompt_submit"
-        ),
-        "command": "/goal-plus" if harness == "pi" else "$goal-plus",
+        "transport": transport_and_command[0],
+        "command": transport_and_command[1],
         "action": "resume",
         "session_id": str(session.session_id),
         "native_entry_id": f"controller-closeout-{nonce}",

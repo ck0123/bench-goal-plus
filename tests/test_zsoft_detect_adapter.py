@@ -854,5 +854,26 @@ class ScanRootPathBaseTest(unittest.TestCase):
         self.assertEqual(report[adapter.GOAL_PLUS_PROCESS_METRIC], 0.0)
 
 
+class DetectBatchMethodSwitchTest(unittest.TestCase):
+    def test_method_switch_drives_launch_and_result_contracts(self) -> None:
+        script = (
+            ROOT / "adapters" / "zsoft_detect" / "run_all_detect_cases.sh"
+        ).read_text()
+
+        self.assertIn('readonly DETECT_METHOD="${DETECT_METHOD:-goal-plus-pi}"', script)
+        self.assertIn('goal-plus-pi|goal-plus-opencode) ;;', script)
+        self.assertEqual(script.count('--method "$DETECT_METHOD"'), 2)
+        self.assertIn('--method "$DETECT_METHOD"', script)
+        self.assertIn('.cells[0].method == $method', script)
+        self.assertIn('.method == $method', script)
+        self.assertNotIn('.cells[0].method == "goal-plus-pi"', script)
+        self.assertNotIn('.method == "goal-plus-pi"', script)
+        self.assertIn(
+            '"$DETECT_METHOD" == "goal-plus-opencode" && '
+            '"$DETECT_PI_API" != "openai-completions"',
+            script,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

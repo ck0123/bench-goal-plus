@@ -89,8 +89,10 @@ usage() {
   DETECT_MAX_INFRA_ATTEMPTS     基础设施失败最大尝试次数
   DETECT_PROVIDER               模型提供方:deepseek(默认)或 glm(智谱 OpenAI 兼容 API)
   DETECT_MODEL                  模型 id,默认按提供方:DeepSeek-V4.1-Flash-1017 / glm-4.6
+  DETECT_METHOD                 Agent 方法:goal-plus-pi(默认)或 goal-plus-opencode
   DETECT_PI_API                 Pi 线协议:openai-completions(默认)或 anthropic-messages
-                                (例:z.ai 的 /api/anthropic 通道走 anthropic-messages)
+                                (OpenCode 仅支持 openai-completions;例:z.ai 的
+                                /api/anthropic 通道走 anthropic-messages)
   GLM_API_KEY                   DETECT_PROVIDER=glm 时的凭据(未设置则交互输入)
   GLM_BASE_URL                  glm API base,默认 https://open.bigmodel.cn/api/paas/v4
   DEEPSEEK_BASE_URL             deepseek 兼容 API base,默认 http://113.46.219.251:8080/v1
@@ -383,12 +385,27 @@ case "$DETECT_PROVIDER" in
         ;;
 esac
 readonly DETECT_MODEL="${DETECT_MODEL:-$PROVIDER_MODEL_DEFAULT}"
+readonly DETECT_METHOD="${DETECT_METHOD:-goal-plus-pi}"
+case "$DETECT_METHOD" in
+    goal-plus-pi|goal-plus-opencode) ;;
+    *) die "DETECT_METHOD 只能是 goal-plus-pi 或 goal-plus-opencode(当前: $DETECT_METHOD)" ;;
+esac
+if [[ "$DETECT_METHOD" == "goal-plus-opencode" ]]; then
+    command -v opencode >/dev/null 2>&1 \
+        || die "DETECT_METHOD=goal-plus-opencode 需要 PATH 上有 opencode(白名单版本见 goal-plus assets/opencode/versions.json,当前仅 2.2.7)"
+    OC_VERSION="$(NO_COLOR=1 opencode --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    [[ "$OC_VERSION" == "2.2.7" ]] \
+        || die "goal-plus-opencode 需要 opencode 2.2.7(检测到: ${OC_VERSION:-未知})"
+fi
 readonly PROVIDER_KEY_ENV PROVIDER_BASE_ENV
 readonly DETECT_PI_API="${DETECT_PI_API:-openai-completions}"
 case "$DETECT_PI_API" in
     openai-completions|anthropic-messages) ;;
     *) die "DETECT_PI_API 只能是 openai-completions 或 anthropic-messages(当前: $DETECT_PI_API)" ;;
 esac
+if [[ "$DETECT_METHOD" == "goal-plus-opencode" && "$DETECT_PI_API" != "openai-completions" ]]; then
+    die "goal-plus-opencode 仅支持 DETECT_PI_API=openai-completions(当前: $DETECT_PI_API)"
+fi
 
 if [[ -z "${!PROVIDER_KEY_ENV:-}" ]]; then
     [[ -t 0 ]] || die "非交互运行前必须先 export $PROVIDER_KEY_ENV"
@@ -477,8 +494,8 @@ case_status() {
 {
     printf 'ZSoft Detect 运行汇总\n'
     printf '开始时间: %s\n' "$(date --iso-8601=seconds)"
-    printf '配置: provider=%s model=%s reasoning=high T=%d K=%d C=%d R=%d skill=%s\n' \
-        "$DETECT_PROVIDER" "$DETECT_MODEL" \
+    printf '配置: method=%s provider=%s model=%s reasoning=high T=%d K=%d C=%d R=%d skill=%s\n' \
+        "$DETECT_METHOD" "$DETECT_PROVIDER" "$DETECT_MODEL" \
         "$WALL_TIME_SECONDS" "$LIVE_SEARCH_CONCURRENCY" \
         "$CELL_CONCURRENCY" "$REPEAT_COUNT" "$TASK_SKILLS_ENABLED"
     printf '评分策略: 搜索期间仅 format_valid；收尾后隐藏评分并记录最高 F1\n'
@@ -493,7 +510,7 @@ status_message "INIT work_dir=$WORK_DIR"
 status_message "INIT log_dir=$LOG_DIR progress_file=$PROGRESS_FILE"
 status_message "INIT source_cache=$SOURCE_CACHE_ROOT storage_mode=$SOURCE_CACHE_STORAGE_MODE"
 status_message \
-    "CONFIG provider=$DETECT_PROVIDER model=$DETECT_MODEL reasoning=high T=$WALL_TIME_SECONDS K=$LIVE_SEARCH_CONCURRENCY C=$CELL_CONCURRENCY R=$REPEAT_COUNT scoring=controller_posthoc_best_f1 skill=$TASK_SKILLS_ENABLED"
+    "CONFIG method=$DETECT_METHOD provider=$DETECT_PROVIDER model=$DETECT_MODEL reasoning=high T=$WALL_TIME_SECONDS K=$LIVE_SEARCH_CONCURRENCY C=$CELL_CONCURRENCY R=$REPEAT_COUNT scoring=controller_posthoc_best_f1 skill=$TASK_SKILLS_ENABLED"
 status_message \
     "QUEUE cases=${#CASE_IDS[@]} task_cells=$TOTAL_TASK_CELLS execution=serial"
 
@@ -504,7 +521,7 @@ if {
     "$PYTHON" scripts/bench.py catalog
     "$PYTHON" scripts/bench.py setup \
         --benchmark zsoft-detect \
-        --method goal-plus-pi \
+        --method "$DETECT_METHOD" \
         --model "$DETECT_MODEL" \
         --reasoning-effort high \
         --pi-provider-id "$DETECT_PROVIDER" \
@@ -610,7 +627,7 @@ build_bench_args() {
         --task-id "$case_id"
         --campaign-id "$campaign_id"
         --campaign-dir "$WORK_DIR/$CAMPAIGN_BASE/$campaign_id"
-        --method goal-plus-pi
+        --method "$DETECT_METHOD"
         --seed "$seed"
         --model "$DETECT_MODEL"
         --reasoning-effort high
@@ -712,11 +729,12 @@ campaign_contract_valid() {
         --arg case_id "$case_id" \
         --argjson seed "$seed" \
         --arg model "$DETECT_MODEL" \
+        --arg method "$DETECT_METHOD" \
         --argjson wall_time "$WALL_TIME_SECONDS" \
         --argjson live_concurrency "$LIVE_SEARCH_CONCURRENCY" \
         --argjson cell_concurrency "$CELL_CONCURRENCY" '
         .task_id == $case_id and
-        .methods == ["goal-plus-pi"] and
+        .methods == [$method] and
         .seeds == [$seed] and
         .model == $model and
         .reasoning_effort == "high" and
@@ -730,7 +748,7 @@ campaign_contract_valid() {
         (.cells | type) == "array" and
         (.cells | length) == 1 and
         .cells[0].benchmark_id == "zsoft-detect" and
-        .cells[0].method == "goal-plus-pi" and
+        .cells[0].method == $method and
         .cells[0].seed == $seed and
         .cells[0].effective_concurrency == $live_concurrency
     ' "$campaign" >/dev/null 2>&1
@@ -906,6 +924,7 @@ run_case_attempt() {
         --arg case_id "$case_id" \
         --argjson seed "$seed" \
         --arg model "$DETECT_MODEL" \
+        --arg method "$DETECT_METHOD" \
         --arg provider "$DETECT_PROVIDER" \
         --arg pi_api "$DETECT_PI_API" \
         --arg api_key_env "$PROVIDER_KEY_ENV" \
@@ -915,7 +934,7 @@ run_case_attempt() {
         .benchmark_adapter == "zsoft-detect" and
         .benchmark_task_selector == $case_id and
         .task_id == $case_id and
-        .method == "goal-plus-pi" and
+        .method == $method and
         .seed == $seed and
         .model == $model and
         .reasoning_effort == "high" and
