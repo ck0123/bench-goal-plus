@@ -174,7 +174,7 @@ def parse_codex_event_text(text: str) -> dict[str, Any]:
             control_id = structured.get("session_id")
             if (
                 isinstance(session_id, str) and isinstance(control_id, str)
-                and structured.get("agent_harness") in {"codex", "pi"}
+                and structured.get("agent_harness") in {"codex", "pi", "opencode"}
                 and structured.get("runtime_provider") == "direct"
             ):
                 native_sessions[control_id] = (session_id, structured)

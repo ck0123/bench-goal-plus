@@ -6,7 +6,7 @@ import re
 from typing import Literal
 
 
-GoalPlusAgentHarness = Literal["codex", "pi"]
+GoalPlusAgentHarness = Literal["codex", "pi", "opencode"]
 GoalPlusWorkspaceProvider = Literal["git_worktree", "thinkthread"]
 GoalPlusPromotionMode = Literal["apply", "artifact_only"]
 GOAL_PLUS_MODEL_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*\Z")
@@ -16,6 +16,8 @@ def goal_plus_entrypoint(agent_harness: GoalPlusAgentHarness) -> str:
     if agent_harness == "codex":
         return "$goal-plus"
     if agent_harness == "pi":
+        return "/goal-plus"
+    if agent_harness == "opencode":
         return "/goal-plus"
     raise ValueError(f"unsupported Goal Plus worker host: {agent_harness}")
 

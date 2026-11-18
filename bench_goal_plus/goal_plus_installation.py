@@ -21,6 +21,10 @@ def installation_environment(run_dir: Path) -> dict[str, str]:
         "GOAL_PLUS_INSTALL_HOME": str(run_dir / "controller-runtime/goal-plus-install"),
         "CODEX_HOME": str(run_dir / "controller-runtime/codex-home"),
         "PI_CODING_AGENT_DIR": str(run_dir / "pi-home"),
+        "OPENCODE_CONFIG_DIR": str(run_dir / "opencode-home"),
+        # opencode >= 2.2 renders ANSI in --version output that breaks the
+        # Goal Plus installer probe.
+        "NO_COLOR": "1",
     }
 
 
@@ -93,7 +97,7 @@ def prepare_bootstrap_python(run_dir: Path, environment: dict[str, str]) -> None
 
 
 def install_goal_plus(source: Path, workspace: Path, agent_harness: str) -> None:
-    if agent_harness not in {"codex", "pi"}:
+    if agent_harness not in {"codex", "pi", "opencode"}:
         raise ValueError(f"unsupported Agent harness: {agent_harness}")
     run_dir = workspace.parent
     environment = {**os.environ, **installation_environment(run_dir)}

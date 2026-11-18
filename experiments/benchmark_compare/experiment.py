@@ -58,6 +58,19 @@ from bench_goal_plus.goal_plus_command import (  # noqa: E402
     goal_plus_command_config,
     goal_plus_entrypoint,
 )
+from bench_goal_plus.opencode_runtime import (  # noqa: E402
+    OPENCODE_API_KEY_ENV,
+    check_opencode_version,
+    deploy_gp_bind_plugin,
+    opencode_bind_preamble,
+    opencode_environment,
+    opencode_home,
+    opencode_main_command,
+    parse_opencode_events,
+    supported_opencode_versions,
+    write_opencode_config,
+    write_opencode_profile,
+)
 from bench_goal_plus.goal_plus_installation import (  # noqa: E402
     require_goal_plus_runtime_capabilities,
 )
@@ -99,6 +112,7 @@ from experiments.openevolve_compare.experiment import (  # noqa: E402
     configure_evidence_annotator_environment,
     configure_isolated_codex_home,
     copy_goal_plus_assets,
+    copy_goal_plus_opencode_assets,
     copy_goal_plus_pi_assets,
     finalize_goal_plus_search,
     goal_plus_incomplete_reason,
@@ -274,10 +288,12 @@ METHODS = (
     "plain-pi",
     "goal-plus-codex",
     "goal-plus-pi",
+    "goal-plus-opencode",
     *sky_backend.METHODS,
 )
 CONTROLLER_ONLY_METHODS = frozenset(
-    {"plain-codex", "plain-pi", "goal-plus-codex", "goal-plus-pi"}
+    {"plain-codex", "plain-pi", "goal-plus-codex", "goal-plus-pi",
+     "goal-plus-opencode"}
 )
 SKYDISCOVER_EDIT_PROTOCOL = """
 
@@ -346,6 +362,7 @@ class RunConfig:
     model: str = DEFAULT_MODEL
     codex_bin: str = "codex"
     pi_bin: str = "pi"
+    opencode_bin: str = "opencode"
     api_base: str | None = None
     pi_provider_id: str = PI_PROVIDER_ID
     pi_api: str = "openai-responses"
@@ -579,6 +596,37 @@ def _pi_worker_sandbox_policy(api_key_env: str) -> dict[str, Any] | None:
     return policy
 
 
+def _goal_plus_agent_configuration(
+    method: str,
+    provider_id: str,
+    model: str,
+) -> tuple[str, str]:
+    if method == "goal-plus-opencode":
+        return "opencode", f"{provider_id}/{model}"
+    if method == "goal-plus-pi":
+        return "pi", f"{provider_id}/{model}"
+    if method == "goal-plus-codex":
+        return "codex", model
+    raise ValueError(f"unsupported Goal Plus method: {method}")
+
+
+def _resolve_opencode_binary(
+    environment: Mapping[str, str],
+    opencode_bin: str,
+) -> Path:
+    """Resolve the OpenCode 2.2.x binary the run must use, absolute."""
+
+    configured = Path(opencode_bin)
+    if configured.is_absolute():
+        if not configured.is_file() or not os.access(configured, os.X_OK):
+            raise FileNotFoundError(f"OpenCode executable not found: {opencode_bin}")
+        return configured
+    found = shutil.which(opencode_bin, path=environment.get("PATH"))
+    if not found:
+        raise FileNotFoundError(f"OpenCode executable not found: {opencode_bin}")
+    return Path(found).resolve()
+
+
 def _resolve_real_pi_binary(
     pi_bin: str,
     environment: dict[str, str],
@@ -717,11 +765,13 @@ def prepare(args: argparse.Namespace) -> int:
     if getattr(args, "shared_dir", False) and args.method not in {
         "goal-plus-codex",
         "goal-plus-pi",
+        "goal-plus-opencode",
     }:
         raise ValueError("--shared-dir requires a Goal Plus method")
     if getattr(args, "shared_cache", False) and args.method not in {
         "goal-plus-codex",
         "goal-plus-pi",
+        "goal-plus-opencode",
     }:
         raise ValueError("--shared-cache requires a Goal Plus method")
     if args.iterations_ceiling < 1:
@@ -739,14 +789,15 @@ def prepare(args: argparse.Namespace) -> int:
     if candidate_judge["mode"] != MODE_OFF and args.method not in {
         "goal-plus-codex",
         "goal-plus-pi",
+        "goal-plus-opencode",
     }:
         raise ValueError("candidate judge requires a Goal Plus method")
     if (
         candidate_judge["mode"] == MODE_JEV
-        and args.method == "goal-plus-pi"
+        and args.method in {"goal-plus-pi", "goal-plus-opencode"}
         and args.pi_api_key_env == candidate_judge["api_key_env"]
     ):
-        raise ValueError("Pi provider key must not reuse the controller-only Jev key")
+        raise ValueError("Agent provider key must not reuse the controller-only Jev key")
     environment = load_json(args.environment_manifest)
     upstreams = environment["upstreams"]
     checkout_root = args.checkout_root.expanduser().absolute()
@@ -859,7 +910,7 @@ def prepare(args: argparse.Namespace) -> int:
         }
         workspace_value = None
         goal_plus_config = None
-    elif args.method in {"goal-plus-codex", "goal-plus-pi"}:
+    elif args.method in {"goal-plus-codex", "goal-plus-pi", "goal-plus-opencode"}:
         workspace = run_dir / "workspace"
         materialized = materialize_workspace(
             benchmark_root,
@@ -868,13 +919,15 @@ def prepare(args: argparse.Namespace) -> int:
         if args.method == "goal-plus-codex":
             copy_goal_plus_assets(goal_plus_root, workspace)
             append_unique_lines(workspace / ".gitignore", [".gp/", ".codex-log/"])
-            agent_harness = "codex"
-            worker_model = args.model
-        else:
+        elif args.method == "goal-plus-pi":
             copy_goal_plus_pi_assets(goal_plus_root, workspace)
             append_unique_lines(workspace / ".gitignore", [".gp/", ".pi-log/"])
-            agent_harness = "pi"
-            worker_model = f"{args.pi_provider_id}/{args.model}"
+        else:
+            copy_goal_plus_opencode_assets(goal_plus_root, workspace)
+            append_unique_lines(workspace / ".gitignore", [".gp/"])
+        agent_harness, worker_model = _goal_plus_agent_configuration(
+            args.method, args.pi_provider_id, args.model
+        )
         if _requires_controller_runtime_capabilities(
             args.method,
             candidate_judge["mode"],
@@ -1066,7 +1119,7 @@ def prepare(args: argparse.Namespace) -> int:
                 "api": args.pi_api,
                 "api_key_env": args.pi_api_key_env,
             }
-            if args.method in {"plain-pi", "goal-plus-pi"}
+            if args.method in {"plain-pi", "goal-plus-pi", "goal-plus-opencode"}
             else None
         ),
         "reasoning_effort": args.reasoning_effort,
@@ -1240,7 +1293,7 @@ def _requires_controller_runtime_capabilities(
     method: str, judge_mode: str, controller_only: bool
 ) -> bool:
     """Guard the launch paths that rely on controller-owned selection/closeout."""
-    return method in {"goal-plus-codex", "goal-plus-pi"} and (
+    return method in {"goal-plus-codex", "goal-plus-pi", "goal-plus-opencode"} and (
         judge_mode != MODE_OFF
         or (controller_only and EVALUATION_MODE == "blind")
     )
@@ -2404,15 +2457,16 @@ def execute_goal_plus(
             "prepared Goal Plus config does not match the task posthoc-selection contract"
         )
     is_pi = manifest.get("method", "goal-plus-codex") == "goal-plus-pi"
+    is_opencode = manifest.get("method") == "goal-plus-opencode"
     prepared_judge = manifest.get("candidate_judge") or {"mode": MODE_OFF}
     judge_mode = _bind_prepared_candidate_judge(prepared_judge, environment)["mode"]
-    if judge_mode == MODE_JEV and is_pi:
+    if judge_mode == MODE_JEV and (is_pi or is_opencode):
         agent_key_env = pi_provider_config(args)[2]
         if agent_key_env == prepared_judge.get(
             "api_key_env", JEV_DEFAULT_API_KEY_ENV
         ):
             raise RuntimeError(
-                "Pi provider key must not reuse the controller-only Jev key"
+                "Agent provider key must not reuse the controller-only Jev key"
             )
     judge_mode, judge_callback = _candidate_judge_callback(
         environment,
@@ -2420,7 +2474,11 @@ def execute_goal_plus(
         cache_dir=run_dir / "controller-runtime/candidate-judge-cache",
     )
     if judge_mode != MODE_OFF:
-        preserve = {pi_provider_config(args)[2]} if is_pi else {"OPENAI_API_KEY"}
+        preserve = (
+            {pi_provider_config(args)[2]}
+            if (is_pi or is_opencode)
+            else {"OPENAI_API_KEY"}
+        )
         _hide_candidate_judge_from_workers(environment, preserve=preserve)
         environment[ANNOTATOR_DISABLED_ENV] = "1"
     else:
@@ -2514,18 +2572,22 @@ def execute_goal_plus(
         configure_evidence_annotator_environment(
             environment,
             model=(
-                f"{pi_provider_id}/{args.model}" if is_pi else args.model
+                f"{pi_provider_id}/{args.model}"
+                if (is_pi or is_opencode) else args.model
             ),
             reasoning_effort=manifest.get(
                 "reasoning_effort", DEFAULT_REASONING_EFFORT
             ),
-            api_base=None if is_pi else args.api_base,
+            api_base=None if (is_pi or is_opencode) else args.api_base,
         )
     spawn_mode = prepared_goal_config.get("command_config", {}).get("spawn_mode", "fresh")
     parallel_execution = prepared_goal_config.get("parallel_execution")
     if parallel_execution:
         exploration_deadline = deadline - timedelta(seconds=budget["soft_closeout_seconds"])
         environment["BENCH_GOAL_PLUS_EXPLORATION_DEADLINE_AT"] = exploration_deadline.isoformat()
+    agent_harness, worker_model = _goal_plus_agent_configuration(
+        manifest.get("method", "goal-plus-codex"), pi_provider_id, args.model
+    )
     prompt = render_goal(
         spawn_mode=spawn_mode,
         continuous_parallelism=parallel_execution is not None,
@@ -2538,8 +2600,8 @@ def execute_goal_plus(
         wall_seconds=budget["wall_time_seconds"],
         closeout_seconds=budget["soft_closeout_seconds"],
         concurrency=budget["concurrency"],
-        agent_harness="pi" if is_pi else "codex",
-        worker_model=f"{pi_provider_id}/{args.model}" if is_pi else args.model,
+        agent_harness=agent_harness,
+        worker_model=worker_model,
         reasoning_effort=manifest.get(
             "reasoning_effort", DEFAULT_REASONING_EFFORT
         ),
@@ -2604,6 +2666,68 @@ def execute_goal_plus(
             *(["--extension", str(ROOT / "bench_goal_plus/pi_parallel_extension.mjs")]
               if parallel_execution else []),
             prompt,
+        ]
+        stdin_text = None
+        recorded_command = [*command[:-1], "<goal-prompt>"]
+    elif is_opencode:
+        qualified_model = f"{pi_provider_id}/{args.model}"
+        opencode_bin = _resolve_opencode_binary(environment, args.opencode_bin)
+        oc_home = opencode_home(run_dir)
+        deploy_gp_bind_plugin(oc_home)
+        goal_plus_receipt = json.loads(
+            (run_dir / "goal-plus-runtime.json").read_text()
+        )
+        goal_plus_assets = Path(goal_plus_receipt["package"]) / "assets" / "opencode"
+        if not goal_plus_assets.is_dir():
+            registered = oc_home / "plugins" / "goal-plus"
+            goal_plus_assets = registered.resolve()
+        environment[OPENCODE_API_KEY_ENV] = environment[pi_api_key_env]
+        write_opencode_config(
+            oc_home,
+            provider_id=pi_provider_id,
+            api_base=args.api_base,
+            api_key_env=OPENCODE_API_KEY_ENV,
+            model=args.model,
+            goal_plus_assets=goal_plus_assets,
+        )
+        goal_plus_identity = (
+            (manifest.get("environment") or {}).get("goal_plus_source") or {}
+        )
+        goal_plus_source_dir = Path(
+            goal_plus_identity.get("source_dir")
+            or upstream_source_path("goal_plus")
+        )
+        version = check_opencode_version(
+            str(opencode_bin), supported_opencode_versions(goal_plus_source_dir)
+        )
+        profile_path = write_opencode_profile(
+            run_dir / "controller-runtime" / "opencode-profile.json",
+            version=version,
+            executable=opencode_bin,
+            provider_id=pi_provider_id,
+            model=args.model,
+            api_base=args.api_base,
+            api_key_env=OPENCODE_API_KEY_ENV,
+            variant=reasoning_effort,
+        )
+        if bool(
+            (manifest.get("goal_plus_config") or {}).get("shared_cache_enabled")
+        ):
+            environment["GOAL_PLUS_CONTROLLER_SHARED_KNOWLEDGE"] = json.dumps(
+                SHARED_KNOWLEDGE_SPEC_TEMPLATE
+            )
+        environment.update(
+            opencode_environment(oc_home, workdir=workspace, profile_path=profile_path)
+        )
+        main_prompt = opencode_bind_preamble() + prompt
+        command = [
+            *opencode_main_command(
+                str(opencode_bin),
+                qualified_model=qualified_model,
+                title=f"bench-{run_dir.name}",
+                variant=reasoning_effort,
+            ),
+            main_prompt,
         ]
         stdin_text = None
         recorded_command = [*command[:-1], "<goal-prompt>"]
@@ -2762,7 +2886,7 @@ def execute_goal_plus(
         )
     if judge_reason and not closeout_reason:
         closeout_reason = judge_reason
-    if is_pi and posthoc_selection is not None:
+    if (is_pi or is_opencode) and posthoc_selection is not None:
         closeout_reason = _posthoc_prerequisite_incomplete_reason(
             closeout_reason,
             control.get("candidate_session_cleanup"),
@@ -2819,6 +2943,8 @@ def execute_goal_plus(
         control["result_incomplete_reason"] = closeout_reason
     if is_pi:
         control["pi"] = parse_pi_events(run_dir / "events.jsonl")
+    elif is_opencode:
+        control["opencode"] = parse_opencode_events(run_dir / "events.jsonl")
     else:
         control["codex"] = parse_codex_events(run_dir / "events.jsonl")
     control["goal_plus"] = collect_goal_plus_state(workspace)
@@ -3050,8 +3176,9 @@ def execute(args: argparse.Namespace) -> int:
     if args.model != manifest["model"]:
         raise ValueError(f"model mismatch: prepared {manifest['model']}, got {args.model}")
     is_pi = manifest["method"] in {"plain-pi", "goal-plus-pi"}
+    is_opencode_method = manifest["method"] == "goal-plus-opencode"
     pi_provider_id, pi_api, pi_api_key_env = pi_provider_config(args)
-    if is_pi:
+    if is_pi or is_opencode_method:
         prepared_provider = manifest.get("pi_provider") or {
             "id": PI_PROVIDER_ID,
             "api": "openai-responses",
@@ -3064,19 +3191,21 @@ def execute(args: argparse.Namespace) -> int:
         }
         if runtime_provider != prepared_provider:
             raise ValueError(
-                "Pi provider mismatch: prepared "
+                "Agent provider mismatch: prepared "
                 f"{prepared_provider}, got {runtime_provider}"
             )
     if (
         sky_backend.is_method(manifest["method"])
-        or manifest["method"] in {"plain-pi", "goal-plus-pi"}
+        or manifest["method"] in {"plain-pi", "goal-plus-pi", "goal-plus-opencode"}
     ) and not args.api_base:
         raise ValueError(f"--api-base is required for {manifest['method']}")
-    credential_env = pi_api_key_env if is_pi else "OPENAI_API_KEY"
+    credential_env = (
+        pi_api_key_env if (is_pi or is_opencode_method) else "OPENAI_API_KEY"
+    )
     if args.api_base and not os.environ.get(credential_env):
         raise RuntimeError(f"{credential_env} is required with --api-base")
     environment = configure_temp_environment(os.environ.copy())
-    if manifest["method"] in {"goal-plus-codex", "goal-plus-pi"}:
+    if manifest["method"] in {"goal-plus-codex", "goal-plus-pi", "goal-plus-opencode"}:
         prepared_judge = manifest.get("candidate_judge") or {"mode": MODE_OFF}
         if normalize_mode(prepared_judge.get("mode")) == MODE_JEV:
             environment.setdefault(
@@ -3132,6 +3261,8 @@ def execute(args: argparse.Namespace) -> int:
         if sky_backend.is_method(manifest["method"])
         else [args.pi_bin, "--version"]
         if manifest["method"] in {"plain-pi", "goal-plus-pi"}
+        else [args.opencode_bin, "--version"]
+        if manifest["method"] == "goal-plus-opencode"
         else [args.codex_bin, "--version"]
     )
     version = subprocess.run(
@@ -3165,7 +3296,7 @@ def seed_smoke(args: argparse.Namespace) -> int:
                 run_dir / "controller-runtime/seed-smoke" / workspace.name,
                 benchmark_root,
             )
-            if manifest["method"] in {"goal-plus-codex", "goal-plus-pi"}
+            if manifest["method"] in {"goal-plus-codex", "goal-plus-pi", "goal-plus-opencode"}
             else evaluate(workspace, "public", benchmark_root)
         )
         results.append(
@@ -3188,7 +3319,7 @@ def repair_closeout(args: argparse.Namespace) -> int:
         module_name=manifest.get("benchmark_adapter_module"),
     )
     validate_controller_only_method(manifest["method"])
-    if manifest["method"] not in {"goal-plus-codex", "goal-plus-pi"}:
+    if manifest["method"] not in {"goal-plus-codex", "goal-plus-pi", "goal-plus-opencode"}:
         raise ValueError("closeout is only valid for Goal Plus runs")
     prepared_judge_mode = normalize_mode(
         (manifest.get("candidate_judge") or {"mode": MODE_OFF}).get("mode")
@@ -3276,7 +3407,7 @@ def repair_closeout(args: argparse.Namespace) -> int:
         if controller_only
         else None
     )
-    if manifest["method"] == "goal-plus-pi" and posthoc_selection is not None:
+    if manifest["method"] in {"goal-plus-pi", "goal-plus-opencode"} and posthoc_selection is not None:
         controller_only_closeout_reason = _posthoc_prerequisite_incomplete_reason(
             controller_only_closeout_reason,
             control.get("candidate_session_cleanup_repair"),
@@ -3459,6 +3590,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--run-dir", type=Path, required=True)
     run_parser.add_argument("--codex-bin", default="codex")
     run_parser.add_argument("--pi-bin", default="pi")
+    run_parser.add_argument("--opencode-bin", default="opencode")
     run_parser.add_argument("--model", default=DEFAULT_MODEL)
     run_parser.add_argument("--api-base")
     run_parser.add_argument("--pi-provider-id", default=PI_PROVIDER_ID)

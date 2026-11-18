@@ -267,7 +267,10 @@ def _campaign_provider(
     args: argparse.Namespace, *, methods: list[str]
 ) -> dict[str, Any] | None:
     """Resolve the non-secret Pi provider contract for this campaign."""
-    if not any(method in {"plain-pi", "goal-plus-pi"} for method in methods):
+    if not any(
+        method in {"plain-pi", "goal-plus-pi", "goal-plus-opencode"}
+        for method in methods
+    ):
         return None
     return {
         "id": args.pi_provider_id,

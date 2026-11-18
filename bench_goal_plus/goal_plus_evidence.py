@@ -89,11 +89,11 @@ def overlapping_bound_candidates(
     return sorted(overlapping)
 
 
-def session_agent_harness(session: Mapping[str, Any]) -> Literal["codex", "pi"] | None:
+def session_agent_harness(session: Mapping[str, Any]) -> Literal["codex", "pi", "opencode"] | None:
     handle = session.get("session_handle")
     harness = session.get("agent_harness")
     if (
-        harness not in ("codex", "pi")
+        harness not in ("codex", "pi", "opencode")
         or session.get("runtime_provider") != "direct"
         or not isinstance(handle, Mapping)
         or handle.get("agent_harness") != harness
@@ -110,7 +110,7 @@ def session_agent_harness(session: Mapping[str, Any]) -> Literal["codex", "pi"] 
 def _session_worker_intervals_from_dispatches(
     session: Mapping[str, Any],
     *,
-    harness: Literal["codex", "pi"],
+    harness: Literal["codex", "pi", "opencode"],
     handle: Mapping[str, Any],
     dispatches: list[Any],
 ) -> list[dict[str, Any]]:
@@ -238,7 +238,7 @@ def session_worker_intervals(
     )
 
 
-def frozen_agent_harness(frozen: Mapping[str, Any]) -> Literal["codex", "pi"] | None:
+def frozen_agent_harness(frozen: Mapping[str, Any]) -> Literal["codex", "pi", "opencode"] | None:
     spec = frozen.get("spec")
     workspace = spec.get("workspace") if isinstance(spec, Mapping) else None
     if not isinstance(workspace, Mapping) or workspace.get("provider") not in (
@@ -250,6 +250,6 @@ def frozen_agent_harness(frozen: Mapping[str, Any]) -> Literal["codex", "pi"] | 
     if any(key in frozen for key in ("native_host", "worker_host")) or "backend" in workspace:
         return None
     agent_harness = frozen.get("agent_harness")
-    if agent_harness in ("codex", "pi"):
+    if agent_harness in ("codex", "pi", "opencode"):
         return agent_harness
     return None

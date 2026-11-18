@@ -667,6 +667,31 @@ class BenchmarkAgentContractTest(unittest.TestCase):
         self.assertIn("--shared-dir", command[0])
         self.assertEqual(load_adapter("zsoft-detect").module.TASK_ID, "civetweb-detect")
 
+    def test_common_matrix_opencode_uses_the_explicit_provider_contract(self) -> None:
+        spec = self.agent.resolve_spec(
+            target_ids=("zsoft-detect",),
+            task_id="civetweb-detect",
+            methods=("goal-plus-opencode",),
+            model="DeepSeek-V4.1-Flash-1017",
+            reasoning_effort="high",
+            wall_time_seconds=1260,
+            live_search_concurrency=2,
+            pi_provider_id="deepseek",
+            pi_api="openai-completions",
+            pi_api_key_env="DEEPSEEK_API_KEY",
+            pi_api_base_env="DEEPSEEK_BASE_URL",
+        )
+
+        commands, _ = create_runner(spec.runner).prepare_commands(spec)
+        command = commands[0]
+        self.assertEqual(
+            command[command.index("--methods") + 1], "goal-plus-opencode"
+        )
+        self.assertEqual(command[command.index("--pi-provider-id") + 1], "deepseek")
+        self.assertEqual(
+            command[command.index("--pi-api-key-env") + 1], "DEEPSEEK_API_KEY"
+        )
+
     def test_common_matrix_rejects_shared_dir_for_plain_method(self) -> None:
         with self.assertRaisesRegex(
             ContractError,

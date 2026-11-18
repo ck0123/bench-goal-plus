@@ -813,6 +813,10 @@ def copy_goal_plus_pi_assets(goal_plus_root: Path, workspace: Path) -> None:
     install_goal_plus(goal_plus_root, workspace, "pi")
 
 
+def copy_goal_plus_opencode_assets(goal_plus_root: Path, workspace: Path) -> None:
+    install_goal_plus(goal_plus_root, workspace, "opencode")
+
+
 def append_unique_lines(path: Path, lines: list[str]) -> None:
     existing = path.read_text().splitlines() if path.is_file() else []
     for line in lines:

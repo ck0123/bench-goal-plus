@@ -55,8 +55,14 @@ def validate_pi_provider(
     missing = [flag for flag, value in fields.items() if value is None]
     if missing:
         raise ContractError("explicit Pi provider selection requires " + ", ".join(missing))
+    # goal-plus-opencode reuses the Pi provider contract (same OpenAI-compatible
+    # provider env pair) for its OpenCode host configuration.
+    def _uses_pi_provider(method: str) -> bool:
+        return method.endswith("-pi") or method == "goal-plus-opencode"
+
     if (runner_kind not in {"common-matrix", "openevolve-batch"}
-            or not methods or any(not method.endswith("-pi") for method in methods)):
+            or not methods
+            or any(not _uses_pi_provider(method) for method in methods)):
         raise ContractError("explicit Pi provider selection requires a common-matrix or OpenEvolve Pi method")
     if not provider_id or "/" in provider_id:
         raise ContractError("Pi provider id must be non-empty and cannot contain '/'")
