@@ -2719,6 +2719,10 @@ def execute_goal_plus(
         environment.update(
             opencode_environment(oc_home, workdir=workspace, profile_path=profile_path)
         )
+        # Pin the Goal Plus root inside the cell workspace: gp-bind and the
+        # OpenCode host otherwise resolve ".gp" against the OpenCode session
+        # location, which can differ from the controller's cwd.
+        environment["GOAL_PLUS_ROOT"] = str(workspace / ".gp")
         main_prompt = opencode_bind_preamble() + prompt
         command = [
             *opencode_main_command(
