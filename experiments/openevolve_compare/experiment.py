@@ -2627,10 +2627,30 @@ def close_candidate_sessions(workspace: Path, timeout_seconds: int) -> list[dict
                 raise RuntimeError(f"Search run {run_id} lacks successful scope cleanup")
             summaries.append({"run_id": run_id, "active_count": 0, "scope_id": scope["scope_id"]})
             continue
-        summaries.append(close_run_candidates(
-            root_dir=root, scope_id=scope["scope_id"], run_id=run_id,
-            timeout_seconds=timeout_seconds,
-        ))
+        try:
+            summaries.append(close_run_candidates(
+                root_dir=root, scope_id=scope["scope_id"], run_id=run_id,
+                timeout_seconds=timeout_seconds,
+            ))
+        except RuntimeError as error:
+            # A killed Main may have fenced the scope in its own shutdown
+            # path between our read and this close call; closing an already
+            # fenced/closed scope is success, not a closeout failure.
+            if "is not open" not in str(error):
+                raise
+            refreshed = execution_scope_for_run(
+                root_dir=root, run_id=run_id
+            ) or {}
+            if refreshed.get("state") not in {"closed", "fenced"}:
+                raise
+            cleanup = refreshed.get("cleanup") or {}
+            summaries.append({
+                "run_id": run_id,
+                "active_count": cleanup.get("active_count", 0),
+                "scope_id": scope.get("scope_id"),
+                "already_fenced": True,
+                "close_skipped_reason": str(error),
+            })
     return summaries
 
 
